@@ -15,3 +15,6 @@ One line per decision. Newest at the bottom. Workers append here when the spec l
 - 2026-09-09 integration: a CPU-only match takes its pause key from a window listener, since no slot can produce Btn.Start and the match would otherwise be unquittable.
 - 2026-09-09 integration: main drops the finished match when the results screen navigates away on its own, polled from the render callback because UiCallbacks has no screen-change hook.
 - 2026-09-09 integration: the CPU holds toward its target when it is facing the wrong way at close range, and keeps recovering when no opponent is alive. Reason: it used to swing at empty air forever, or drift off stage while the other fighter was respawning.
+- 2026-09-09 owner: character name Aeval approved. Double-tap dash stays. Defaults of 3 stocks and no timer stay. First deploy target is GitHub Pages.
+- 2026-09-09 owner: priority order is feel tuning and fixing known issues before any new feature (grabs, netcode, gamepad wait).
+- 2026-09-09 lead: feel constants move from fixed exports to a mutable TUNING object so a debug panel (F4) can change them live; saved values apply at boot from localStorage. Character physics are tuned by mutating the character def in place.
