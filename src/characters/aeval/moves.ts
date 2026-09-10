@@ -1,26 +1,168 @@
-import type { CharacterDef, MoveDef, MoveId } from '../../core/types';
+import type { CharacterDef, HitboxDef, MoveDef, MoveId, ProjectileDef } from '../../core/types';
 
 /**
- * Stub frame data. The sim worker replaces every entry with real hitboxes,
- * velocities, and timings per SPEC section 5. This file only needs to
- * typecheck for the scaffold.
+ * Aeval frame data (SPEC section 5).
+ *
+ * Frame numbers are 0-based move frames. Frame 0 is the first frame of the move,
+ * counted after any smash charge hold. Hitbox offsets are fighter-local with the
+ * fighter facing right: x grows forward, y is negative above the feet, so the body
+ * center sits at y -20 and the head around y -36.
  */
-const MOVE_IDS: MoveId[] = [
-  'jab', 'ftilt', 'utilt', 'dtilt', 'dashatk',
-  'fsmash', 'usmash', 'dsmash',
-  'nair', 'fair', 'bair', 'uair', 'dair',
-  'nspecial', 'sspecial', 'uspecial', 'dspecial',
-  'taunt', 'ledgeatk', 'getupatk',
+
+/** Sakurai angle marker. The sim picks a weak or strong angle from the knockback. */
+const SAKURAI = 361;
+
+function box(
+  id: number, start: number, end: number,
+  x: number, y: number, r: number,
+  damage: number, angle: number, bkb: number, kbg: number, group: number,
+): HitboxDef {
+  return { id, start, end, x, y, r, damage, angle, bkb, kbg, group };
+}
+
+/** Geyser: one launch on frame 8, then a shrinking rise for the active window. */
+function geyserVelocity(): NonNullable<MoveDef['velocity']> {
+  const out: NonNullable<MoveDef['velocity']> = [{ frame: 8, vy: -6.5, setY: true }];
+  for (let frame = 9; frame <= 20; frame++) out.push({ frame, vy: 0.3 });
+  return out;
+}
+
+const waterOrb: ProjectileDef = {
+  id: 'orb',
+  spawnFrame: 18,
+  x: 18, y: -20,
+  vx: 3.5, vy: 0,
+  gravity: 0,
+  lifetime: 90,
+  r: 8,
+  damage: 6, angle: 40, bkb: 30, kbg: 60,
+  destroyOnHit: true,
+  sprite: 'orb',
+  animFps: 12,
+};
+
+const tidalCrescent: ProjectileDef = {
+  id: 'crescent',
+  spawnFrame: 12,
+  x: 20, y: -18,
+  vx: 5, vy: 0,
+  gravity: 0,
+  lifetime: 45,
+  r: 13,
+  damage: 9, angle: SAKURAI, bkb: 40, kbg: 70,
+  destroyOnHit: false,
+  sprite: 'crescent',
+  animFps: 10,
+};
+
+/** Whirlpool: four pulling hits in 8-frame windows, then a launching fifth. */
+const whirlpoolHits: HitboxDef[] = [
+  box(1, 10, 17, 4, -20, 18, 2, 90, 15, 40, 1),
+  box(2, 18, 25, 4, -20, 18, 2, 90, 15, 40, 2),
+  box(3, 26, 33, 4, -20, 18, 2, 90, 15, 40, 3),
+  box(4, 34, 41, 4, -20, 18, 2, 90, 15, 40, 4),
+  box(5, 42, 46, 4, -20, 20, 2, 60, 40, 90, 5),
 ];
 
-function placeholderMove(id: MoveId): MoveDef {
-  return { id, totalFrames: 20, hitboxes: [] };
-}
+const moves: Record<MoveId, MoveDef> = {
+  // Ground normals. Jab is fast and safe, tilts commit a little more.
+  jab: {
+    id: 'jab', totalFrames: 18, iasa: 14, groundOnly: true,
+    hitboxes: [box(1, 4, 7, 20, -18, 9, 3, SAKURAI, 20, 40, 1)],
+  },
+  ftilt: {
+    id: 'ftilt', totalFrames: 26, iasa: 22, groundOnly: true,
+    hitboxes: [box(1, 8, 12, 24, -18, 11, 8, SAKURAI, 30, 80, 1)],
+  },
+  utilt: {
+    id: 'utilt', totalFrames: 24, iasa: 20, groundOnly: true,
+    hitboxes: [box(1, 6, 11, 2, -44, 12, 7, 90, 35, 85, 1)],
+  },
+  dtilt: {
+    id: 'dtilt', totalFrames: 22, iasa: 18, groundOnly: true,
+    hitboxes: [box(1, 5, 9, 10, -4, 9, 6, 80, 25, 70, 1)],
+  },
+  dashatk: {
+    id: 'dashatk', totalFrames: 32, groundOnly: true,
+    hitboxes: [box(1, 6, 16, 20, -16, 12, 9, 60, 45, 70, 1)],
+    velocity: [{ frame: 4, vx: 3 }],
+  },
 
-const moves = {} as Record<MoveId, MoveDef>;
-for (const id of MOVE_IDS) {
-  moves[id] = placeholderMove(id);
-}
+  // Smashes. Slow, chargeable, the reward for a hard read.
+  fsmash: {
+    id: 'fsmash', totalFrames: 44, chargeable: true, groundOnly: true,
+    hitboxes: [box(1, 16, 21, 26, -18, 16, 15, SAKURAI, 40, 100, 1)],
+  },
+  usmash: {
+    id: 'usmash', totalFrames: 40, chargeable: true, groundOnly: true,
+    hitboxes: [box(1, 12, 18, 2, -44, 15, 14, 88, 40, 98, 1)],
+  },
+  dsmash: {
+    id: 'dsmash', totalFrames: 42, chargeable: true, groundOnly: true,
+    hitboxes: [
+      box(1, 12, 15, 18, -6, 14, 12, 30, 38, 95, 1),
+      box(2, 12, 15, -18, -6, 14, 12, 30, 38, 95, 1),
+    ],
+  },
+
+  // Aerials. Every one pays landing lag.
+  nair: {
+    id: 'nair', totalFrames: 34, landingLag: 8, airOnly: true,
+    hitboxes: [box(1, 5, 22, 6, -20, 16, 7, 60, 25, 75, 1)],
+  },
+  fair: {
+    id: 'fair', totalFrames: 30, landingLag: 12, airOnly: true,
+    hitboxes: [box(1, 9, 13, 22, -20, 13, 10, 45, 30, 90, 1)],
+  },
+  bair: {
+    id: 'bair', totalFrames: 28, landingLag: 12, airOnly: true,
+    hitboxes: [box(1, 7, 10, -22, -20, 12, 11, SAKURAI, 35, 95, 1)],
+  },
+  uair: {
+    id: 'uair', totalFrames: 26, landingLag: 9, airOnly: true,
+    hitboxes: [box(1, 6, 10, 2, -44, 12, 9, 85, 30, 90, 1)],
+  },
+  dair: {
+    id: 'dair', totalFrames: 36, landingLag: 16, airOnly: true,
+    hitboxes: [box(1, 12, 16, 4, -2, 12, 12, 270, 30, 85, 1)],
+  },
+
+  // Specials. Two projectiles, a rising recovery, a multi-hit trap.
+  nspecial: {
+    id: 'nspecial', totalFrames: 40,
+    hitboxes: [],
+    projectiles: [waterOrb],
+  },
+  sspecial: {
+    id: 'sspecial', totalFrames: 42,
+    hitboxes: [],
+    projectiles: [tidalCrescent],
+    velocity: [{ frame: 8, vx: 2 }],
+  },
+  uspecial: {
+    id: 'uspecial', totalFrames: 48, helplessAfter: true,
+    hitboxes: [box(1, 8, 20, 2, -44, 14, 8, 80, 50, 60, 1)],
+    velocity: geyserVelocity(),
+  },
+  dspecial: {
+    id: 'dspecial', totalFrames: 50,
+    hitboxes: whirlpoolHits,
+  },
+
+  // Utility.
+  taunt: { id: 'taunt', totalFrames: 90, hitboxes: [] },
+  ledgeatk: {
+    id: 'ledgeatk', totalFrames: 40, invuln: [0, 17],
+    hitboxes: [box(1, 18, 24, 20, -14, 12, 8, SAKURAI, 30, 70, 1)],
+  },
+  getupatk: {
+    id: 'getupatk', totalFrames: 34, invuln: [0, 13],
+    hitboxes: [
+      box(1, 14, 20, 18, -10, 12, 7, SAKURAI, 30, 70, 1),
+      box(2, 14, 20, -18, -10, 12, 7, SAKURAI, 30, 70, 1),
+    ],
+  },
+};
 
 export const aevalDef: CharacterDef = {
   id: 'aeval',
