@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Aevalrena</title>
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        background: #0e0f17;
+        overflow: hidden;
+        width: 100%;
+        height: 100%;
+      }
+      #app {
+        position: fixed;
+        inset: 0;
+        width: 100vw;
+        height: 100vh;
+      }
+      canvas#game {
+        image-rendering: pixelated;
+        display: block;
+        margin: auto;
+      }
+      #ui {
+        position: absolute;
+        inset: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="game"></canvas>
+      <div id="ui"></div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
