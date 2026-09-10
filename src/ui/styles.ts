@@ -14,6 +14,11 @@ export const STYLE_CSS = `
   -webkit-user-select: none;
 }
 
+/* Class rules below set display, which would beat the user-agent [hidden] rule. */
+.aev-ui-root [hidden] {
+  display: none !important;
+}
+
 .aev-ui-root * {
   box-sizing: border-box;
   font-family: inherit;

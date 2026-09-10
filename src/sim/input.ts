@@ -7,6 +7,8 @@ import type { SimFighter } from './state';
 export const ACTION_BUTTONS = Btn.Jump | Btn.Attack | Btn.Special | Btn.Shield | Btn.Taunt;
 
 const TAP_AGE_CAP = 240;
+/** Frames within which a second press of the same direction counts as a dash input. */
+const DASH_RETAP_WINDOW = 14;
 
 export const EMPTY_INPUT: InputFrame = { held: 0, pressed: 0, released: 0 };
 
@@ -18,11 +20,15 @@ export function consumeInput(f: SimFighter, inp: InputFrame): void {
   if (f.dirTapAge < TAP_AGE_CAP) f.dirTapAge++;
   if (f.udTapAge < TAP_AGE_CAP) f.udTapAge++;
   if ((inp.pressed & Btn.Left) !== 0) {
+    f.dirRetap = f.dirTapDir === -1 && f.dirTapAge <= DASH_RETAP_WINDOW;
     f.dirTapAge = 0;
     f.dirTapDir = -1;
   } else if ((inp.pressed & Btn.Right) !== 0) {
+    f.dirRetap = f.dirTapDir === 1 && f.dirTapAge <= DASH_RETAP_WINDOW;
     f.dirTapAge = 0;
     f.dirTapDir = 1;
+  } else if (heldDir(f) === 0) {
+    f.dirRetap = false;
   }
   if ((inp.pressed & Btn.Up) !== 0) {
     f.udTapAge = 0;

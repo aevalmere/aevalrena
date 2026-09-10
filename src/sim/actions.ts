@@ -82,13 +82,19 @@ function enterShieldOption(f: SimFighter): void {
 
 /** Ground half of the decision table in SPEC 4.3. */
 function groundAttack(f: SimFighter): MoveId {
-  if (f.action === 'dash' || f.action === 'run') return 'dashatk';
   if (heldUp(f)) return wantsVerticalSmash(f, 1) ? 'usmash' : 'utilt';
   if (heldDown(f)) return wantsVerticalSmash(f, -1) ? 'dsmash' : 'dtilt';
   const dir = heldDir(f);
+  // A flick of the direction is a smash even out of a dash; only a dash that is
+  // already under way turns the attack into a dash attack.
+  if (dir !== 0 && wantsSmash(f, dir)) {
+    face(f, dir);
+    return 'fsmash';
+  }
+  if (f.action === 'dash' || f.action === 'run') return 'dashatk';
   if (dir !== 0) {
     face(f, dir);
-    return wantsSmash(f, dir) ? 'fsmash' : 'ftilt';
+    return 'ftilt';
   }
   return 'jab';
 }
@@ -310,7 +316,9 @@ function locomotion(state: GameState, f: SimFighter, def: CharacterDef): void {
         return;
       }
       face(f, dir);
-      if (f.action !== 'walk' && wantsSmash(f, dir)) {
+      // Holding a direction walks. A second tap of the same direction dashes,
+      // which is the only dash input a keyboard can express.
+      if (f.dirRetap && wantsSmash(f, dir)) {
         setAction(f, 'dash');
         f.vx = dir * def.dashSpeed;
         state.events.push({ type: 'dash', x: f.x, y: f.y, slot: f.slot, facing: f.facing });

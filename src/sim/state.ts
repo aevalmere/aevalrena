@@ -16,6 +16,7 @@ export interface SimFighter extends FighterState {
   inputPressed: number;    // last InputFrame.pressed
   udTapAge: number;        // frames since the last up or down press
   udTapDir: number;        // 1 = up, -1 = down, 0 = none
+  dirRetap: boolean;       // the last direction press was a second tap of the same direction
   stateTimer: number;      // frames left in a timed action (land, shieldStun, getup)
   charging: boolean;       // holding a smash at charge frame 0
   shortHop: boolean;       // jump released during jumpsquat
@@ -105,6 +106,7 @@ function makeFighter(
     inputPressed: 0,
     udTapAge: 999,
     udTapDir: 0,
+    dirRetap: false,
     stateTimer: 0,
     charging: false,
     shortHop: false,
@@ -176,6 +178,7 @@ function cloneFighter(src: SimFighter): SimFighter {
     inputPressed: src.inputPressed,
     udTapAge: src.udTapAge,
     udTapDir: src.udTapDir,
+    dirRetap: src.dirRetap,
     stateTimer: src.stateTimer,
     charging: src.charging,
     shortHop: src.shortHop,

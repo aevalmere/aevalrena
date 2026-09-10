@@ -11,28 +11,31 @@ export class KeyboardSource {
   readonly held = new Set<string>();
   readonly latch = new Set<string>();
 
-  private attached = false;
+  /** Reference count: the InputSystem holds one, every running session holds another. */
+  private attachRefs = 0;
   private divertResolve: ((code: string) => void) | null = null;
   private divertReject: ((err: Error) => void) | null = null;
 
   constructor(private readonly controls: ControlsConfig) {}
 
   attach(): void {
-    if (this.attached) return;
+    this.attachRefs++;
+    if (this.attachRefs > 1) return;
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
     window.addEventListener('blur', this.onBlur);
-    this.attached = true;
   }
 
   detach(): void {
-    if (!this.attached) return;
+    if (this.attachRefs === 0) return;
+    this.attachRefs--;
+    // A stale tap must never carry into whatever runs next.
+    this.latch.clear();
+    if (this.attachRefs > 0) return;
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('keyup', this.onKeyUp);
     window.removeEventListener('blur', this.onBlur);
-    this.attached = false;
     this.held.clear();
-    this.latch.clear();
   }
 
   anyKeyDown(): boolean {

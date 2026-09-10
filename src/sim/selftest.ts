@@ -229,8 +229,11 @@ function testLedgeGrab(): SelfTestResult {
   f.x = 150;
   state.fighters[1].x = -150;
   let leftGround = -1;
+  // Press, release, press: the second tap of the same direction is the dash input.
   for (let i = 0; i < 40 && leftGround < 0; i++) {
-    step(state, inp(Btn.Right, i === 0 ? Btn.Right : 0), NONE);
+    const held = i === 1 ? 0 : Btn.Right;
+    const pressed = i === 0 || i === 2 ? Btn.Right : 0;
+    step(state, inp(held, pressed), NONE);
     if (!f.onGround) leftGround = i;
   }
   let grabbed = -1;

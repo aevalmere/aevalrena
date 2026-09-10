@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:sim": "npx --yes tsx src/sim/selftest.ts",
+    "validate:art": "npx --yes tsx src/characters/aeval/art/validate.ts"
   },
   "devDependencies": {
     "typescript": "^7.0.2",

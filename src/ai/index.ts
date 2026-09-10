@@ -49,12 +49,20 @@ function getGround(stageId: string): GroundInfo {
   return info;
 }
 
+/** Fighters are stored in config order, which is not the slot number when a slot is off. */
+function fighterBySlot(state: GameState, slot: number): FighterState | null {
+  for (let i = 0; i < state.fighters.length; i++) {
+    if (state.fighters[i].slot === slot) return state.fighters[i];
+  }
+  return null;
+}
+
 function nearestOpponent(state: GameState, slot: number, me: FighterState): FighterState | null {
   let best: FighterState | null = null;
   let bestD = Infinity;
   for (let i = 0; i < state.fighters.length; i++) {
-    if (i === slot) continue;
     const f = state.fighters[i];
+    if (f.slot === slot) continue;
     if (f.stocks <= 0 || f.action === 'dead') continue;
     const dx = f.x - me.x;
     const dy = f.y - me.y;
@@ -100,8 +108,11 @@ function groundFight(
     return pulse;
   }
 
-  // Close range: choose an attack, weighted by level.
-  mem.dirHeld = 0;
+  // Close range: choose an attack, weighted by level. Attacking with nothing
+  // held keeps the current facing, so a fighter that overshot would swing at
+  // empty air forever; hold toward the opponent whenever it faces the wrong
+  // way, which makes the sim turn it and use a forward attack instead.
+  mem.dirHeld = me.facing === towardNum ? 0 : towardBit;
   if (level === 1) return Btn.Attack;
   if (level === 2) {
     if (rand() < 0.5) return Btn.Attack;
@@ -159,7 +170,6 @@ function airFight(
 // button pulse; persistent movement/hold bits are written into mem.dirHeld.
 function decide(state: GameState, slot: number, level: number, rand: () => number, me: FighterState, mem: CpuMem): number {
   const opp = nearestOpponent(state, slot, me);
-  if (!opp) { mem.dirHeld = 0; return 0; }
 
   if (me.action === 'ledgeHang') {
     mem.dirHeld = 0;
@@ -182,6 +192,10 @@ function decide(state: GameState, slot: number, level: number, rand: () => numbe
     return 0;
   }
 
+  // Recovery above runs with or without a live opponent; there is nothing left
+  // to chase once every other fighter is out or waiting to respawn.
+  if (!opp) { mem.dirHeld = 0; return 0; }
+
   const dx = opp.x - me.x;
   const dy = opp.y - me.y;
   const adx = Math.abs(dx);
@@ -198,7 +212,7 @@ function decide(state: GameState, slot: number, level: number, rand: () => numbe
 export function cpuInput(state: GameState, slot: number, level: number, rand: () => number): InputFrame {
   const frame = inputFrames[slot];
   const mem = memSlots[slot];
-  const me = state.fighters[slot];
+  const me = fighterBySlot(state, slot);
 
   if (me && me.hitstun === 0 && mem.shieldTimer > 0) mem.shieldTimer--;
   else mem.shieldTimer = 0;

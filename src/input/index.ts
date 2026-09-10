@@ -65,6 +65,9 @@ export function createInputSystem(): InputSystem {
     },
   };
 
+  // The keyboard stays live for the whole app: the controls screen needs
+  // listenForNextKey and anyKeyDown outside a match. Sessions add a second ref.
+  source.attach();
   sourceByInputSystem.set(system, source);
   return system;
 }
