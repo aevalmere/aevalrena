@@ -1,4 +1,4 @@
-import { SMASH_CHARGE_MAX } from '../core/constants';
+import { TUNING } from '../core/constants';
 import { Btn } from '../core/types';
 import type { CharacterDef, GameState, MoveDef, MoveId } from '../core/types';
 import { setAction, type SimFighter } from './state';
@@ -64,7 +64,7 @@ export function advanceMove(state: GameState, f: SimFighter, def: CharacterDef):
   if (f.charging) {
     f.actionFrame = 0;
     const holding = (f.inputHeld & Btn.Attack) !== 0;
-    if (holding && f.charge < SMASH_CHARGE_MAX) {
+    if (holding && f.charge < TUNING.input.chargeMax) {
       f.charge++;
       return false;
     }

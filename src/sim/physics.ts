@@ -1,4 +1,4 @@
-import { KB_DECAY } from '../core/constants';
+import { TUNING } from '../core/constants';
 import type { ActionId, CharacterDef, GameState, Rect, StageDef } from '../core/types';
 import { AIR_DODGE_LAND_LAG, HELPLESS_LAND_LAG, LAND_LAG, TUMBLE_GETUP } from './actions';
 import { heldDir } from './input';
@@ -42,7 +42,7 @@ function airDrift(f: SimFighter, def: CharacterDef): void {
 
 /** Launch speed decays along the launch direction while gravity builds separately. */
 function knockbackDecay(f: SimFighter, def: CharacterDef): void {
-  f.kbSpeed = Math.max(0, f.kbSpeed - KB_DECAY);
+  f.kbSpeed = Math.max(0, f.kbSpeed - TUNING.knockback.decay);
   if (f.onGround) f.kbFall = 0;
   else f.kbFall = Math.min(def.maxFall, f.kbFall + def.gravity);
   f.vx = f.kbDirX * f.kbSpeed;

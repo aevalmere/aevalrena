@@ -54,10 +54,12 @@ export function spawnSpark(pool: SparkPool, x: number, y: number, charId: string
   pool.source[i] = visual;
 }
 
-export function stepSparks(pool: SparkPool): void {
+/** Age the sparks by `steps` sim frames so they never run at display rate. */
+export function stepSparks(pool: SparkPool, steps: number): void {
+  if (steps <= 0) return;
   for (let i = 0; i < SPARK_POOL; i++) {
     if (pool.live[i] === 0) continue;
-    pool.age[i] += 1;
+    pool.age[i] += steps;
     if (pool.age[i] >= SPARK_LIFE) {
       pool.live[i] = 0;
       pool.source[i] = null;

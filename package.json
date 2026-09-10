@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test:sim": "npx --yes tsx src/sim/selftest.ts",
+    "calibrate": "npx --yes tsx src/sim/calibrate.ts",
     "validate:art": "npx --yes tsx src/characters/aeval/art/validate.ts"
   },
   "devDependencies": {

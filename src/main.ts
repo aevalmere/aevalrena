@@ -16,6 +16,7 @@ import { CHARACTER_LIST } from './characters/registry';
 import { STAGE_LIST } from './stages/registry';
 import { cpuInput } from './ai';
 import { createInputSystem, createLocalSession } from './input';
+import { createTuner, type Tuner } from './debug/tuner';
 import { createRenderer } from './render';
 import { cloneGameState, createGameState, stepGame } from './sim';
 import { createUi } from './ui';
@@ -23,8 +24,8 @@ import { createUi } from './ui';
 /**
  * App entry point and state machine: title -> mode -> select (all owned by the
  * UI) -> match -> results. Owns the fixed-step loop, the previous-frame
- * snapshot used for render interpolation, the CPU input providers and the
- * debug overlay flags.
+ * snapshot used for render interpolation, the CPU input providers, the debug
+ * overlay flags and the live tuning panel.
  */
 
 type Phase = 'menu' | 'match' | 'paused' | 'results';
@@ -49,6 +50,8 @@ interface Match {
 
 const debugFlags: DebugFlags = { hitboxes: false, frameData: false, perf: false };
 const perf: PerfSample = { simMs: 0, renderMs: 0, fps: 0 };
+/** Handed to every CPU slot while the tuner freezes them. Never mutated. */
+const ZERO_INPUT: InputFrame = { held: 0, pressed: 0, released: 0 };
 
 function nextSeed(seed: number): number {
   const next = (Math.imul(seed, SEED_STEP_MUL) + SEED_STEP_ADD) >>> 0;
@@ -125,6 +128,7 @@ function boot(): void {
 
   let fpsFrames = 0;
   let fpsWindowStart = performance.now();
+  let freezeCpu = false;
 
   function endMatch(): void {
     if (match === null) return;
@@ -237,7 +241,9 @@ function boot(): void {
       if (!player.cpu) continue;
       const slot = player.slot;
       const level = player.cpuLevel;
-      session.setSlotProvider(slot, (_frame, st) => cpuInput(st, slot, level, rand));
+      session.setSlotProvider(slot, (_frame, st) => (
+        freezeCpu ? ZERO_INPUT : cpuInput(st, slot, level, rand)
+      ));
     }
 
     session.setState(state);
@@ -295,6 +301,15 @@ function boot(): void {
     { startMatch, resume, quit, rematch }
   );
 
+  // The panel sits outside the UI root, which is hidden while a match runs.
+  const tuner: Tuner = createTuner({
+    root: document.body,
+    getState: () => (match === null ? null : match.state),
+    setTimeScale: (scale: number) => loop.setTimeScale(scale),
+    setFreezeCpu: (frozen: boolean) => { freezeCpu = frozen; },
+  });
+  tuner.applySaved();
+
   window.addEventListener('keydown', (e: KeyboardEvent) => {
     // A CPU-only match has no slot that can press Start, so the pause key has
     // to come off the window or the match cannot be left.
@@ -320,6 +335,10 @@ function boot(): void {
       case 'F3':
         e.preventDefault();
         debugFlags.perf = !debugFlags.perf;
+        break;
+      case 'F4':
+        e.preventDefault();
+        tuner.toggle();
         break;
       default:
         break;

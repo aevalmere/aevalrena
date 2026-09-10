@@ -40,6 +40,24 @@ export function resetHudState(hud: HudState): void {
   hud.pop.fill(0);
 }
 
+/**
+ * Advance the percent pop by `steps` elapsed sim frames. A percent that changed
+ * this sim frame restarts the pop; repeat renders of the same sim frame pass
+ * zero steps and leave the pop alone.
+ */
+export function stepHud(hud: HudState, state: GameState, steps: number): void {
+  const count = Math.min(state.fighters.length, hud.pop.length);
+  for (let i = 0; i < count; i++) {
+    const percent = state.fighters[i].percent;
+    if (hud.lastPercent[i] !== percent) {
+      if (hud.lastPercent[i] >= 0) hud.pop[i] = POP_FRAMES;
+      hud.lastPercent[i] = percent;
+    } else if (hud.pop[i] > 0) {
+      hud.pop[i] = hud.pop[i] > steps ? hud.pop[i] - steps : 0;
+    }
+  }
+}
+
 function drawBorder(ctx: CanvasRenderingContext2D, x: number, y: number, color: string): void {
   ctx.fillStyle = color;
   ctx.fillRect(x, y, CARD_W, 1);
@@ -61,15 +79,6 @@ export function drawHud(ctx: CanvasRenderingContext2D, state: GameState, hud: Hu
     const x = startX + i * (CARD_W + CARD_GAP);
     const y = CARD_Y;
     const color = playerColor(fighter.slot);
-
-    if (i < hud.pop.length) {
-      if (hud.lastPercent[i] !== fighter.percent) {
-        if (hud.lastPercent[i] >= 0) hud.pop[i] = POP_FRAMES;
-        hud.lastPercent[i] = fighter.percent;
-      } else if (hud.pop[i] > 0) {
-        hud.pop[i] -= 1;
-      }
-    }
 
     ctx.globalAlpha = fighter.stocks > 0 ? 1 : 0.45;
 

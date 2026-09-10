@@ -1,7 +1,6 @@
 import {
-  HITLAG, HITSTUN_PER_KB, KB_TO_VEL, SAKURAI_KB_THRESHOLD, SAKURAI_STRONG_ANGLE,
-  SAKURAI_WEAK_ANGLE, SHIELD_BREAK_STUN, SHIELD_MAX, SHIELD_STUN_PER_DAMAGE, SMASH_CHARGE_BONUS,
-  SMASH_CHARGE_MAX, TUMBLE_KB,
+  hitlagFrames, SAKURAI_STRONG_ANGLE, SAKURAI_WEAK_ANGLE, SHIELD_BREAK_STUN, SHIELD_MAX,
+  SHIELD_STUN_PER_DAMAGE, TUNING,
 } from '../core/constants';
 import { circleRectOverlap, degToRad } from '../core/math';
 import { MAX_PLAYERS } from '../core/types';
@@ -29,7 +28,7 @@ export function canBeHit(f: SimFighter): boolean {
  *   w  = victim weight (higher = harder to launch)
  *   d  = damage dealt by this hitbox after charge scaling
  *   kbg / bkb = the hitbox's knockback growth and base knockback
- * kb is a knockback unit; launch speed in px/frame is kb * KB_TO_VEL.
+ * kb is a knockback unit; launch speed in px/frame is kb * TUNING.knockback.toVel.
  */
 function knockback(p: number, w: number, d: number, bkb: number, kbg: number): number {
   return ((((p / 10) + (p * d / 20)) * (200 / (w + 100)) * 1.4) + 18) * (kbg / 100) + bkb;
@@ -37,7 +36,7 @@ function knockback(p: number, w: number, d: number, bkb: number, kbg: number): n
 
 function launchAngle(angle: number, kb: number): number {
   if (angle !== 361) return angle;
-  return kb < SAKURAI_KB_THRESHOLD ? SAKURAI_WEAK_ANGLE : SAKURAI_STRONG_ANGLE;
+  return kb < TUNING.knockback.sakuraiThreshold ? SAKURAI_WEAK_ANGLE : SAKURAI_STRONG_ANGLE;
 }
 
 function breakShield(state: GameState, victim: SimFighter): void {
@@ -55,19 +54,21 @@ export function applyHit(
   victim: SimFighter,
   attackerSlot: number,
   facing: Facing,
-  damage: number,
+  rawDamage: number,
   angle: number,
   bkb: number,
   kbg: number,
   hitlagMul: number,
-  shieldDamage: number,
+  rawShieldDamage: number,
   hitX: number,
   hitY: number,
 ): number {
-  const lag = Math.max(1, Math.round(HITLAG(damage) * hitlagMul));
+  // damageMul scales everything a hit deals, so hitlag and shield damage follow it too.
+  const damage = rawDamage * TUNING.knockback.damageMul;
+  const lag = Math.max(1, Math.round(hitlagFrames(damage) * hitlagMul));
 
   if (victim.action === 'shield' || victim.action === 'shieldStun') {
-    victim.shieldHp -= shieldDamage;
+    victim.shieldHp -= rawShieldDamage * TUNING.knockback.damageMul;
     victim.hitlag = lag;
     victim.vx += (victim.x < hitX ? -1 : 1) * SHIELD_PUSHBACK;
     state.events.push({ type: 'shieldHit', x: hitX, y: hitY, victim: victim.slot });
@@ -82,15 +83,15 @@ export function applyHit(
 
   const def = defOf(victim);
   victim.percent = Math.min(PERCENT_CAP, victim.percent + damage);
-  const kb = knockback(victim.percent, def.weight, damage, bkb, kbg);
+  const kb = knockback(victim.percent, def.weight, damage, bkb, kbg) * TUNING.knockback.kbMul;
   const local = launchAngle(angle, kb);
   const world = facing === 1 ? local : 180 - local;
   const rad = degToRad(world);
-  const speed = kb * KB_TO_VEL;
+  const speed = kb * TUNING.knockback.toVel;
 
   const dirX = Math.cos(rad);
   let dirY = -Math.sin(rad);
-  const slides = victim.onGround && local < GROUNDED_ANGLE && kb < TUMBLE_KB;
+  const slides = victim.onGround && local < GROUNDED_ANGLE && kb < TUNING.knockback.tumbleKb;
   if (slides) dirY = 0;
 
   victim.kbDirX = dirX;
@@ -104,8 +105,8 @@ export function applyHit(
   victim.ledge = -1;
   victim.lastHitBy = attackerSlot;
   victim.hitlag = lag;
-  victim.hitstun = Math.floor(kb * HITSTUN_PER_KB);
-  setAction(victim, kb >= TUMBLE_KB ? 'tumble' : 'hitstun');
+  victim.hitstun = Math.floor(kb * TUNING.knockback.hitstunPerKb);
+  setAction(victim, kb >= TUNING.knockback.tumbleKb ? 'tumble' : 'hitstun');
 
   state.events.push({
     type: 'hit', x: hitX, y: hitY,
@@ -117,7 +118,7 @@ export function applyHit(
 
 function chargeMultiplier(charge: number, chargeable: boolean | undefined): number {
   if (chargeable !== true) return 1;
-  return 1 + SMASH_CHARGE_BONUS * (charge / SMASH_CHARGE_MAX);
+  return 1 + TUNING.input.chargeBonus * (charge / TUNING.input.chargeMax);
 }
 
 function hitboxDamage(hb: HitboxDef, mul: number): number {

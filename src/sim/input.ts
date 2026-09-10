@@ -1,4 +1,4 @@
-import { INPUT_BUFFER, SMASH_TAP_WINDOW } from '../core/constants';
+import { TUNING } from '../core/constants';
 import { Btn } from '../core/types';
 import type { InputFrame } from '../core/types';
 import type { SimFighter } from './state';
@@ -7,8 +7,6 @@ import type { SimFighter } from './state';
 export const ACTION_BUTTONS = Btn.Jump | Btn.Attack | Btn.Special | Btn.Shield | Btn.Taunt;
 
 const TAP_AGE_CAP = 240;
-/** Frames within which a second press of the same direction counts as a dash input. */
-const DASH_RETAP_WINDOW = 14;
 
 export const EMPTY_INPUT: InputFrame = { held: 0, pressed: 0, released: 0 };
 
@@ -20,11 +18,11 @@ export function consumeInput(f: SimFighter, inp: InputFrame): void {
   if (f.dirTapAge < TAP_AGE_CAP) f.dirTapAge++;
   if (f.udTapAge < TAP_AGE_CAP) f.udTapAge++;
   if ((inp.pressed & Btn.Left) !== 0) {
-    f.dirRetap = f.dirTapDir === -1 && f.dirTapAge <= DASH_RETAP_WINDOW;
+    f.dirRetap = f.dirTapDir === -1 && f.dirTapAge <= TUNING.input.dashRetapWindow;
     f.dirTapAge = 0;
     f.dirTapDir = -1;
   } else if ((inp.pressed & Btn.Right) !== 0) {
-    f.dirRetap = f.dirTapDir === 1 && f.dirTapAge <= DASH_RETAP_WINDOW;
+    f.dirRetap = f.dirTapDir === 1 && f.dirTapAge <= TUNING.input.dashRetapWindow;
     f.dirTapAge = 0;
     f.dirTapDir = 1;
   } else if (heldDir(f) === 0) {
@@ -44,7 +42,7 @@ export function consumeInput(f: SimFighter, inp: InputFrame): void {
     f.buffer.age = 0;
   } else if (f.buffer.btn !== 0) {
     f.buffer.age++;
-    if (f.buffer.age > INPUT_BUFFER) {
+    if (f.buffer.age > TUNING.input.buffer) {
       f.buffer.btn = 0;
       f.buffer.age = 0;
     }
@@ -73,12 +71,12 @@ export function heldShield(f: SimFighter): boolean {
 
 /** True when the fighter flicked that horizontal direction inside the smash window. */
 export function wantsSmash(f: SimFighter, dir: number): boolean {
-  return f.dirTapDir === dir && f.dirTapAge <= SMASH_TAP_WINDOW;
+  return f.dirTapDir === dir && f.dirTapAge <= TUNING.input.smashTapWindow;
 }
 
 /** dir 1 = up smash, dir -1 = down smash. */
 export function wantsVerticalSmash(f: SimFighter, dir: number): boolean {
-  return f.udTapDir === dir && f.udTapAge <= SMASH_TAP_WINDOW;
+  return f.udTapDir === dir && f.udTapAge <= TUNING.input.smashTapWindow;
 }
 
 /** Takes a buffered button out of the buffer. */

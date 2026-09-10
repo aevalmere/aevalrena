@@ -27,7 +27,7 @@ import {
   spawnSpark,
   stepSparks,
 } from './fx';
-import { createHudState, drawHud, resetHudState } from './hud';
+import { createHudState, drawHud, resetHudState, stepHud } from './hud';
 import {
   clearParticles,
   createParticles,
@@ -52,6 +52,8 @@ import { buildVisuals } from './visuals';
 
 const PROJECTILE_CAP = 256;
 const FLASH_FRAMES = 2;
+/** Most sim frames one render call will catch up on, so a stall never lurches. */
+const MAX_CATCHUP_FRAMES = 4;
 const HIT_SHAKE_BASE = 0.6;
 const HIT_SHAKE_PER_KB = 0.03;
 const HIT_SHAKE_MAX = 3;
@@ -91,6 +93,7 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
 
   const posX = new Float32Array(MAX_PLAYERS);
   const posY = new Float32Array(MAX_PLAYERS);
+  const velX = new Float32Array(MAX_PLAYERS);
   const live = new Uint8Array(MAX_PLAYERS);
   const flash = new Uint8Array(MAX_PLAYERS);
   const slotToIndex = new Int32Array(MAX_PLAYERS);
@@ -209,9 +212,13 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
       }
       posX[i] = x;
       posY[i] = y;
+      velX[i] = f.vx;
       live[i] = f.action === 'dead' ? 0 : 1;
     }
-    for (let i = count; i < MAX_PLAYERS; i++) live[i] = 0;
+    for (let i = count; i < MAX_PLAYERS; i++) {
+      live[i] = 0;
+      velX[i] = 0;
+    }
 
     const pcount = Math.min(state.projectiles.length, PROJECTILE_CAP);
     for (let i = 0; i < pcount; i++) {
@@ -232,13 +239,20 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
     }
   }
 
-  function stepRenderFrame(): void {
-    renderTick++;
-    stepShake(shakeState);
-    stepParticles(particles);
-    stepSparks(sparks);
+  /**
+   * Advance everything that is measured in sim frames: shake decay, particles,
+   * sparks, the hit flash and the invulnerability blink. `steps` is the number
+   * of sim frames since the last render call, so these run at the same speed on
+   * any display and stand still when a render repeats one sim frame.
+   */
+  function stepRenderFrame(steps: number): void {
+    renderTick += steps;
+    stepShake(shakeState, steps);
+    stepParticles(particles, steps);
+    stepSparks(sparks, steps);
+    if (steps <= 0) return;
     for (let i = 0; i < MAX_PLAYERS; i++) {
-      if (flash[i] > 0) flash[i] -= 1;
+      if (flash[i] > 0) flash[i] = flash[i] > steps ? flash[i] - steps : 0;
     }
   }
 
@@ -288,12 +302,19 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
       indexSlots(state);
 
       if (state.frame < lastConsumedFrame) resetTransientState();
+
+      let steps = state.frame - lastConsumedFrame;
+      if (steps < 0) steps = 0;
+      if (steps > MAX_CATCHUP_FRAMES) steps = MAX_CATCHUP_FRAMES;
+
+      // Age first, then apply this sim frame's events, so a hit flashes and
+      // shakes on the very render that consumes it and for its full duration.
+      stepRenderFrame(steps);
       if (state.frame !== lastConsumedFrame) {
         consumeEvents(state);
         lastConsumedFrame = state.frame;
       }
-
-      stepRenderFrame();
+      stepHud(hud, state, steps);
 
       const clampedAlpha = alpha < 0 ? 0 : alpha > 1 ? 1 : alpha;
       interpolate(state, prev, clampedAlpha);
@@ -304,10 +325,10 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
 
       if (stage !== null) {
         if (!cameraPrimed) {
-          snapCamera(camera, posX, posY, live, MAX_PLAYERS, stage.cameraBounds);
+          snapCamera(camera, posX, posY, velX, live, MAX_PLAYERS, stage.cameraBounds);
           cameraPrimed = true;
         } else {
-          updateCamera(camera, posX, posY, live, MAX_PLAYERS, stage.cameraBounds);
+          updateCamera(camera, posX, posY, velX, live, MAX_PLAYERS, stage.cameraBounds);
         }
       }
 

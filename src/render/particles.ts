@@ -164,7 +164,12 @@ export function spawnDroplets(pool: ParticlePool, x: number, y: number, count: n
   }
 }
 
-export function stepParticles(pool: ParticlePool): void {
+/** Advance the pool by `steps` sim frames. Zero steps leaves it untouched. */
+export function stepParticles(pool: ParticlePool, steps: number): void {
+  for (let s = 0; s < steps; s++) stepOnce(pool);
+}
+
+function stepOnce(pool: ParticlePool): void {
   const { x, y, vx, vy, life, kind } = pool;
   for (let i = 0; i < POOL_SIZE; i++) {
     const l = life[i];

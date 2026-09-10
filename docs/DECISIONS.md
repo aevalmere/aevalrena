@@ -18,3 +18,8 @@ One line per decision. Newest at the bottom. Workers append here when the spec l
 - 2026-09-09 owner: character name Aeval approved. Double-tap dash stays. Defaults of 3 stocks and no timer stay. First deploy target is GitHub Pages.
 - 2026-09-09 owner: priority order is feel tuning and fixing known issues before any new feature (grabs, netcode, gamepad wait).
 - 2026-09-09 lead: feel constants move from fixed exports to a mutable TUNING object so a debug panel (F4) can change them live; saved values apply at boot from localStorage. Character physics are tuned by mutating the character def in place.
+- 2026-09-09 tuning: the calibration harness probes three victim placements and a raised one, because the upward normals and the whirlpool are centered on the attacker and cannot reach a victim standing 40 px away; the table prints the gap and lift each move used.
+- 2026-09-09 tuning: knockout percents were reached by scaling each move's bkb and kbg together, which keeps the low-percent feel in proportion to the growth, instead of moving only kbg.
+- 2026-09-09 tuning: the whirlpool pull hits drop from 15/40 to 6/10 knockback so the victim stays inside the vortex at high percent and the launching fifth hit still connects; without it dspecial could not kill above about 200 percent.
+- 2026-09-09 tuning: damageMul is applied inside applyHit, so it scales percent, shield damage and hitlag together rather than only the number on the hitbox.
+- 2026-09-09 tuning: the tuner panel is appended to document.body, not the UI root, because the UI root is hidden while a match runs.

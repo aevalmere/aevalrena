@@ -4,10 +4,12 @@ import { tidegateDef } from './data';
 
 /**
  * Tidegate art: dusk over a flooded ruin. Every parallax layer is painted once
- * into an offscreen canvas sized to cover the camera bounds scaled by its own
- * parallax factor plus a full view, then blitted with one drawImage. Only the
- * ocean highlight row and the platform drips move, and both switch between two
- * frames driven by `t`.
+ * into an offscreen canvas sized to cover the camera bounds at its own parallax
+ * factor plus a full view at the smallest zoom the camera can reach, then
+ * blitted with one drawImage under a whole-pixel translate and a camera-zoom
+ * scale, so the background grows with the fighters instead of staying at 1x.
+ * Only the ocean highlight row and the platform drips move, and both switch
+ * between two frames driven by `t`.
  *
  * Palette is SPEC section 6. Everything is fillRect at whole pixels: no
  * gradient API, no arcs, no per-frame pixel work.
@@ -31,6 +33,16 @@ const CENTER_Y = BOUNDS.y + BOUNDS.h / 2;
 
 /** Screen row the sky meets the water when the camera sits at the bounds center. */
 const HORIZON_Y = 190;
+
+/**
+ * Smallest zoom the layers are sized to cover. It sits below the camera's own
+ * zoomMin so lowering that floor at runtime still cannot expose a layer edge at
+ * any point inside the camera bounds.
+ */
+const MIN_COVERED_ZOOM = 0.6;
+
+/** Slack that absorbs the whole-pixel rounding of the layer translate. */
+const COVER_PAD = 4;
 
 interface BakedLayer extends ParallaxLayer {
   bake(): void;
@@ -57,17 +69,29 @@ function layerY(screenY: number, h: number): number {
   return Math.round(screenY + h / 2 - VIEW_H / 2);
 }
 
+/**
+ * Layer canvas size. A layer drawn at zoom z covers `size * z` screen pixels
+ * and slides by `bounds * parallax * z`, so covering the view at every camera
+ * position needs `view / MIN_COVERED_ZOOM + bounds * parallax` pixels.
+ */
+function layerSize(extent: number, view: number, parallax: number): number {
+  return Math.ceil(extent * parallax) + Math.ceil(view / MIN_COVERED_ZOOM) + COVER_PAD;
+}
+
 function createLayer(
   parallax: number,
+  scaleWithZoom: boolean,
   frameCount: number,
   framesPerSecond: number,
   paint: (ctx: CanvasRenderingContext2D, w: number, h: number, frame: number) => void
 ): BakedLayer {
-  const w = Math.ceil(BOUNDS.w * parallax) + VIEW_W;
-  const h = Math.ceil(BOUNDS.h * parallax) + VIEW_H;
   const canvases: HTMLCanvasElement[] = [];
+  let w = 0;
+  let h = 0;
 
   function bake(): void {
+    w = layerSize(BOUNDS.w, VIEW_W, parallax);
+    h = layerSize(BOUNDS.h, VIEW_H, parallax);
     canvases.length = 0;
     for (let f = 0; f < frameCount; f++) {
       const canvas = document.createElement('canvas');
@@ -88,9 +112,23 @@ function createLayer(
         index = Math.floor(t * framesPerSecond) % frameCount;
         if (index < 0) index = 0;
       }
-      const ox = Math.round(VIEW_W / 2 - (camX - CENTER_X) * parallax - w / 2);
-      const oy = Math.round(VIEW_H / 2 - (camY - CENTER_Y) * parallax - h / 2);
-      ctx.drawImage(canvases[index], ox, oy);
+      const canvas = canvases[index];
+
+      if (!scaleWithZoom) {
+        const flatX = Math.round(VIEW_W / 2 - (camX - CENTER_X) * parallax - w / 2);
+        const flatY = Math.round(VIEW_H / 2 - (camY - CENTER_Y) * parallax - h / 2);
+        ctx.drawImage(canvas, flatX, flatY);
+        return;
+      }
+
+      const ox = Math.round(VIEW_W / 2 - (camX - CENTER_X) * parallax * zoom - (w * zoom) / 2);
+      const oy = Math.round(VIEW_H / 2 - (camY - CENTER_Y) * parallax * zoom - (h * zoom) / 2);
+      ctx.save();
+      ctx.translate(ox, oy);
+      ctx.scale(zoom, zoom);
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(canvas, 0, 0);
+      ctx.restore();
     },
   };
 }
@@ -344,11 +382,13 @@ function drawFloatingPlatform(
 
 // ---------------- assembled art ----------------
 
-const skyLayer = createLayer(0, 1, 0, paintSky);
-const mountainLayer = createLayer(0.1, 1, 0, paintMountains);
-const ruinLayer = createLayer(0.3, 1, 0, paintRuins);
-const oceanLayer = createLayer(0.5, 2, 2, paintOcean);
-const mistLayer = createLayer(1.15, 1, 0, paintMist);
+// The sky is a full-screen banded gradient fixed to the view, so it stays at
+// 1x; everything with depth scales with the camera.
+const skyLayer = createLayer(0, false, 1, 0, paintSky);
+const mountainLayer = createLayer(0.1, true, 1, 0, paintMountains);
+const ruinLayer = createLayer(0.3, true, 1, 0, paintRuins);
+const oceanLayer = createLayer(0.5, true, 2, 2, paintOcean);
+const mistLayer = createLayer(1.15, true, 1, 0, paintMist);
 
 const bakedLayers: readonly BakedLayer[] = [
   skyLayer,
@@ -370,6 +410,7 @@ export const tidegateArt: PreparableStageArt = {
   layers: [skyLayer, mountainLayer, ruinLayer, oceanLayer],
   foreground: [mistLayer],
 
+  /** Rebake every layer at the size the current bounds and zoom floor need. */
   prepare(): void {
     for (let i = 0; i < bakedLayers.length; i++) bakedLayers[i].bake();
   },
