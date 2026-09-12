@@ -43,13 +43,21 @@ const orbBurst: ProjectileDef = {
   animFps: 14,
 };
 
+/**
+ * The orb is a mid-range poke, not a full-stage wall: 48 frames at 3.5 px/frame
+ * is 168 px of travel from a spawn 18 px in front of the feet, so it reaches
+ * about 186 px out and bursts there. Roughly a third of the stage.
+ *
+ * It leaves her hands on frame 15 so the shot comes out a little sooner, and
+ * nspecial runs 52 frames, which leaves a longer recovery behind the shot.
+ */
 const waterOrb: ProjectileDef = {
   id: 'orb',
-  spawnFrame: 18,
+  spawnFrame: 15,
   x: 18, y: -20,
   vx: 3.5, vy: 0,
   gravity: 0,
-  lifetime: 90,
+  lifetime: 48,
   r: 8,
   damage: 6, angle: 40, bkb: 24, kbg: 48,
   destroyOnHit: true,
@@ -73,18 +81,25 @@ const jabDrop: ProjectileDef = {
   animFps: 16,
 };
 
+/**
+ * The crescent flies out, turns around on frame 20 and sweeps back through the
+ * thrower for half damage. Out: 20 px spawn offset plus 20 frames at 5 px/frame
+ * is 120 px ahead. Back: the remaining 36 frames cover 180 px, so it crosses the
+ * thrower on frame 44 and dies 60 px behind them, well inside the 56 lifetime.
+ */
 const tidalCrescent: ProjectileDef = {
   id: 'crescent',
   spawnFrame: 10,
   x: 20, y: -18,
   vx: 5, vy: 0,
   gravity: 0,
-  lifetime: 45,
+  lifetime: 56,
   r: 13,
   damage: 9, angle: SAKURAI, bkb: 27, kbg: 48,
   destroyOnHit: false,
   sprite: 'slash',
   animFps: 10,
+  returnFrame: 20,
 };
 
 /** Whirlpool: four pulling hits in 8-frame windows, then a launching fifth. */
@@ -161,8 +176,10 @@ const moves: Record<MoveId, MoveDef> = {
   },
 
   // Specials. Two projectiles, a rising recovery, a multi-hit trap.
+  // Hold special to swell the orb before the throw. 48 frames with no iasa, so a
+  // whiffed orb is a little more punishable than the throw it replaced.
   nspecial: {
-    id: 'nspecial', totalFrames: 40,
+    id: 'nspecial', totalFrames: 52, chargeable: true, chargeButton: 'special',
     hitboxes: [],
     projectiles: [waterOrb, orbBurst],
   },

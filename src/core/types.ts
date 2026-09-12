@@ -87,6 +87,14 @@ export interface ProjectileDef {
    * hit something. The water orb uses it to burst.
    */
   burstId?: string;
+  /**
+   * Age at which the projectile turns around and travels back the way it came: vx is
+   * negated, the sprite mirrors, it may hit each target once more, and its damage is
+   * multiplied by `returnPower`. Omitted means it never returns.
+   */
+  returnFrame?: number;
+  /** Damage multiplier applied on the return pass. Defaults to 0.5. */
+  returnPower?: number;
 }
 
 export interface MoveDef {
@@ -98,7 +106,9 @@ export interface MoveDef {
   velocity?: { frame: number; vx?: number; vy?: number; setX?: boolean; setY?: boolean }[];
   landingLag?: number;      // aerials only
   iasa?: number;            // frame after which other actions may interrupt
-  chargeable?: boolean;     // smashes: hold to charge before totalFrames start
+  chargeable?: boolean;     // hold to charge before totalFrames start
+  /** Button that must stay held to charge. Defaults to 'attack' (smashes). */
+  chargeButton?: 'attack' | 'special';
   invuln?: [number, number];
   helplessAfter?: boolean;  // up-special: fall helpless when done in air
   airOnly?: boolean;
@@ -197,6 +207,7 @@ export interface FighterState {
   actionFrame: number;           // frames spent in current action
   moveId: MoveId | null;
   charge: number;                // smash charge frames
+  charging: boolean;             // still holding the charge; the move has not been released yet
   percent: number;
   stocks: number;
   jumpsLeft: number;
@@ -225,6 +236,12 @@ export interface ProjectileState {
   age: number;
   hitSlots: number;              // bitmask of slots already hit
   alive: boolean;
+  /** Damage multiplier for this instance: charge scales it up, a return pass scales it down. */
+  power: number;
+  /** Hit-circle and sprite size multiplier for this instance. 1 = the def's own size. */
+  scale: number;
+  /** True once the projectile has turned around, so it only ever turns once. */
+  returned: boolean;
 }
 
 export type SimEvent =

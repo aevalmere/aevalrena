@@ -1,5 +1,6 @@
 import { Btn } from '../core/types';
-import type { FighterState, GameState, InputFrame, MatchConfig } from '../core/types';
+import type { FighterState, GameState, InputFrame, MatchConfig, MoveId } from '../core/types';
+import { CHARACTER_DEFS } from '../characters/registry';
 import { nextFloat } from '../core/rng';
 import { createGameState, stepGame } from '../sim';
 import { cpuInput } from './index';
@@ -72,6 +73,25 @@ const KIT_MOVES = [
 // startMove of a getup-family move is ledgeatk in src/sim/ledge.ts. No input can reach it, so the
 // CPU cannot be held to using it. Add it back once a knockdown state exists.
 const CHARGEABLE_SMASHES: Record<string, boolean> = { fsmash: true, usmash: true, dsmash: true };
+
+/**
+ * Every move that can be charged, read off the character data rather than listed by hand.
+ * advanceMove pins actionFrame to 0 on each charging frame, so the "action frame went
+ * backwards" restart test fires once per held frame for any of these. nspecial became
+ * chargeable and a hand-written smash list silently missed it, inflating its count.
+ */
+const CHARGEABLE_MOVES: Record<string, boolean> = (() => {
+  const out: Record<string, boolean> = {};
+  const chars = Object.keys(CHARACTER_DEFS).sort();
+  for (let c = 0; c < chars.length; c++) {
+    const moves = CHARACTER_DEFS[chars[c]].moves;
+    const ids = Object.keys(moves);
+    for (let i = 0; i < ids.length; i++) {
+      if (moves[ids[i] as MoveId].chargeable === true) out[ids[i]] = true;
+    }
+  }
+  return out;
+})();
 /** Charge frames that separate a deliberate hold from the one-frame slack of a normal release. */
 const CHARGE_MIN = 6;
 
@@ -180,8 +200,8 @@ function runCpuMatch(levelA: number, levelB: number, maxFrames: number, seed: nu
       // The restart half is skipped for chargeable smashes: advanceMove pins actionFrame to 0 on
       // every charging frame (src/sim/moves.ts), so the backwards test fires once per held frame
       // and a single charged fsmash would otherwise read as dozens of separate uses.
-      const restarted = f.actionFrame <= prevFrameNo[s] &&
-        (id === null || CHARGEABLE_SMASHES[id] !== true);
+      const restarted = f.actionFrame <= prevFrameNo[s] && f.hitlag === 0 &&
+        (id === null || CHARGEABLE_MOVES[id] !== true);
       const started = id !== null && act === 'attack' &&
         (id !== prevMoveId[s] || prevAction[s] !== 'attack' || restarted);
       if (started && id !== null) {

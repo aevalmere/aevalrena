@@ -27,6 +27,7 @@ function freeSlot(state: GameState): ProjectileState {
   const fresh: ProjectileState = {
     id: 0, owner: 0, defId: '', x: 0, y: 0, vx: 0, vy: 0, facing: 1,
     age: 0, hitSlots: 0, alive: false,
+    power: 1, scale: 1, returned: false,
   };
   state.projectiles.push(fresh);
   return fresh;
@@ -38,7 +39,9 @@ function spawnAt(
   facing: 1 | -1,
   x: number,
   y: number,
-  def: ProjectileDef
+  def: ProjectileDef,
+  power: number,
+  scale: number
 ): void {
   const p = freeSlot(state);
   p.id = state.nextProjectileId++;
@@ -52,12 +55,24 @@ function spawnAt(
   p.age = 0;
   p.hitSlots = 0;
   p.alive = true;
+  // A dead slot is handed back with the last projectile's values still on it, so
+  // every per-instance field is reset here as well as on a fresh one.
+  p.power = power;
+  p.scale = scale;
+  p.returned = false;
   state.events.push({ type: 'projectileSpawn', x: p.x, y: p.y, slot: owner, defId: def.id });
 }
 
-/** Spawns from a move's projectile def, in fighter-local space mirrored by facing. */
-export function spawnProjectile(state: GameState, f: SimFighter, def: ProjectileDef): void {
-  spawnAt(state, f.slot, f.facing, f.x + def.x * f.facing, f.y + def.y, def);
+/**
+ * Spawns from a move's projectile def, in fighter-local space mirrored by facing.
+ * `power` scales the damage it deals and `scale` its hit circle and sprite, both 1
+ * by default so an ordinary spawn is exactly the def's own numbers; a charged
+ * nspecial passes them up.
+ */
+export function spawnProjectile(
+  state: GameState, f: SimFighter, def: ProjectileDef, power = 1, scale = 1,
+): void {
+  spawnAt(state, f.slot, f.facing, f.x + def.x * f.facing, f.y + def.y, def, power, scale);
 }
 
 /**
@@ -71,7 +86,7 @@ export function killProjectile(state: GameState, p: ProjectileState, def: Projec
   if (def.burstId === undefined) return;
   const burst = PROJECTILE_DEFS[def.burstId];
   if (burst === undefined) return;
-  spawnAt(state, p.owner, p.facing, p.x, p.y, burst);
+  spawnAt(state, p.owner, p.facing, p.x, p.y, burst, 1, 1);
 }
 
 /** Step 5 of the frame: move, age, die on lifetime or outside the blast zone. */
@@ -84,6 +99,15 @@ export function stepProjectiles(state: GameState): void {
     if (def === undefined) {
       p.alive = false;
       continue;
+    }
+    // The turnaround happens before this frame's integration, so the frame it fires on
+    // is the first one stepped with age >= returnFrame, and it fires exactly once.
+    if (def.returnFrame !== undefined && !p.returned && p.age >= def.returnFrame) {
+      p.vx = -p.vx;
+      p.facing = p.facing === 1 ? -1 : 1;
+      p.hitSlots = 0;              // one more hit per target on the way back
+      p.power *= def.returnPower === undefined ? 0.5 : def.returnPower;
+      p.returned = true;
     }
     p.x += p.vx;
     p.y += p.vy;

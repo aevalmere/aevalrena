@@ -8,7 +8,23 @@ import type { AnimDef, AnimName, CharacterSprites, FighterState } from '../core/
  */
 
 const FALLBACK_ANIM = 'idle';
+const CHARGE_SUFFIX = 'Charge';
 const reportedMisses = new Set<string>();
+
+/**
+ * Cache of animation name to its charge variant name, so holding a charge never
+ * builds a string in the draw path. A name is concatenated once, the first time
+ * it is seen, and read out of the map on every frame after that.
+ */
+const chargeNames = new Map<AnimName, AnimName>();
+
+function chargeNameOf(name: AnimName): AnimName {
+  const cached = chargeNames.get(name);
+  if (cached !== undefined) return cached;
+  const built = name + CHARGE_SUFFIX;
+  chargeNames.set(name, built);
+  return built;
+}
 
 /** Animation names the renderer could not resolve, for the debug overlay. */
 export function missingAnims(): ReadonlySet<string> {
@@ -22,12 +38,20 @@ function firstAnimName(sprites: CharacterSprites): AnimName | null {
 
 /**
  * Pick the animation for a fighter. Falling in the air prefers a 'fall'
- * animation when the sheet has one.
+ * animation when the sheet has one, and a fighter holding a charge prefers the
+ * '<anim>Charge' wind-up pose when the sheet defines one. The sim pins
+ * actionFrame to 0 while the charge is held, so that pose holds on its first
+ * frame and the move's own animation takes over the frame the charge is let go.
  */
 export function pickAnimName(sprites: CharacterSprites, fighter: FighterState): AnimName | null {
   let name: AnimName;
   const chosen = sprites.animFor(fighter.action, fighter.moveId);
   name = typeof chosen === 'string' ? chosen : FALLBACK_ANIM;
+
+  if (fighter.charging) {
+    const held = chargeNameOf(name);
+    if (sprites.anims[held] !== undefined) name = held;
+  }
 
   if (fighter.action === 'air' && fighter.vy > 0 && sprites.anims['fall'] !== undefined) {
     name = 'fall';

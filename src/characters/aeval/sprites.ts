@@ -47,7 +47,12 @@ const anims: Record<AnimName, AnimDef> = {
   uair: { frames: ['cast', 'uair1'], fps: 12, loop: false },
   dair: { frames: ['crouch', 'dtilt1'], fps: 11, loop: false },
 
-  nspecial: { frames: ['nspecial0', 'nspecial1'], fps: 10, loop: false },
+  // Firing is the casting pose: the orb leaves her hands on one held frame.
+  nspecial: still('cast'),
+  // The wind-up the renderer swaps in while nspecial is being held. The sim
+  // pins actionFrame to 0 for the whole hold, so this reads as the nspecial0
+  // pose held still; nspecial1 only shows if the hold ever advances its frame.
+  nspecialCharge: { frames: ['nspecial0', 'nspecial1'], fps: 10, loop: false },
   sspecial: { frames: ['cast', 'jab1'], fps: 10, loop: false },
   uspecial: { frames: ['cast', 'usmash2'], fps: 12, loop: false },
   dspecial: { frames: ['cast', 'nair1'], fps: 10, loop: false },

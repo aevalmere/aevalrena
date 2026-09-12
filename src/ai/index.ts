@@ -62,6 +62,7 @@ interface CpuMem {
   chargePending: number; // charge frames waiting for the queued smash's tap frame
   chargeFrames: number; // real frames Attack stays held to charge a smash
   dropPhase: number;    // 0/1 toggle so a platform drop-through Down is a fresh press
+  orbHold: number;      // real frames Special stays held to charge a neutral-special orb
 }
 
 /**
@@ -82,6 +83,7 @@ function initMem(mem: CpuMem): void {
   mem.bairPhase = 0;
   mem.matchRef = null; mem.matchFrame = -1;
   mem.jumpHold = 0; mem.chargePending = 0; mem.chargeFrames = 0; mem.dropPhase = 0;
+  mem.orbHold = 0;
 }
 
 /**
@@ -210,7 +212,26 @@ const JAB_STARTUP = 4;
 const LEDGE_STOP = 30;
 /** Back off if somehow drifted well past the stop distance toward the edge. */
 const LEDGE_BACKOFF = LEDGE_STOP - 10;
-/** How far mid-range counts, for a neutral-special poke. */
+/**
+ * How far the neutral special's orb actually reaches: it spawns 18 px ahead and lives 48 frames
+ * at 3.5 px/frame, so roughly 186 px, plus the burst it ends in. It is a mid-range tool now, not
+ * the full-stage one it used to be, and every range gate below is kept inside this number.
+ */
+const ORB_RANGE = 186;
+/**
+ * Longest charge ever held on the orb, and the shortest one worth rooting the fighter for at all.
+ * How much of that window is actually taken is arithmetic off the distance (see orbSafeRange):
+ * a fixed hold was only ever right for one set of frame data.
+ */
+const ORB_CHARGE_FRAMES = 24;
+const ORB_CHARGE_MIN_FRAMES = 6;
+/**
+ * The side special's crescent turns around on frame 20 and sweeps back through the thrower for
+ * the rest of its 56-frame life, so it covers about 100 px in front and about 80 px behind.
+ */
+const CRESCENT_OUT = 150;
+const CRESCENT_BACK = 80;
+/** How far mid-range counts, for a bare (uncharged) neutral-special poke; inside ORB_RANGE. */
 const MID_RANGE_MIN = 34;
 const MID_RANGE_MAX = 120;
 /** Horizontal reach of our own fastest grounded pokes (jab/ftilt), in px. */
@@ -323,7 +344,7 @@ for (let i = 0; i < MAX_PLAYERS; i++) {
     oppShots: 0, oppShotAge: 0,
     tiltBit: 0, tiltFrames: 0,
     bairPhase: 0, matchRef: null, matchFrame: -1,
-    jumpHold: 0, chargePending: 0, chargeFrames: 0, dropPhase: 0,
+    jumpHold: 0, chargePending: 0, chargeFrames: 0, dropPhase: 0, orbHold: 0,
   };
   initMem(mem);
   memSlots.push(mem);
@@ -398,6 +419,23 @@ function moveStartup(mv: MoveDef): number {
   return best;
 }
 
+/**
+ * Last frame on which the move still has a projectile left to put out, or -1 when it never had
+ * one. BURST_ONLY payloads (spawnFrame -1) are spawned by another projectile dying, not by the
+ * move's own timeline, so they are not part of it. Read live, so retuning a shot's spawn frame
+ * retunes every read of it below.
+ */
+function moveLastSpawn(mv: MoveDef): number {
+  const list = mv.projectiles;
+  if (list === undefined) return -1;
+  let best = -1;
+  for (let i = 0; i < list.length; i++) {
+    const s = list[i].spawnFrame;
+    if (s > best) best = s;
+  }
+  return best;
+}
+
 /** Last frame any hitbox of the move is live, or -1 for a move with no melee hitbox. */
 function moveActiveEnd(mv: MoveDef): number {
   let best = -1;
@@ -441,9 +479,13 @@ function vulnerableFor(f: FighterState): number {
   if (f.action === 'land') return 4;
   const mv = activeMove(f);
   if (mv === null) return 0;
-  const end = moveActiveEnd(mv);
-  if (end >= 0 && f.actionFrame <= end) return 0;
-  if (end < 0 && f.actionFrame <= 8) return 0;
+  // A move is over as a threat only once its last hitbox has died AND its last projectile has
+  // actually left. The frames before a shot spawns look exactly like ending lag from the outside
+  // and are not: walking in there is walking into the shot. Reading the spawn frame off the move
+  // rather than assuming one is what keeps this honest when the owner retunes the timing.
+  const threatEnd = Math.max(moveActiveEnd(mv), moveLastSpawn(mv));
+  if (threatEnd >= 0 && f.actionFrame <= threatEnd) return 0;
+  if (threatEnd < 0 && f.actionFrame <= 8) return 0;
   const free = mv.iasa === undefined ? mv.totalFrames : mv.iasa;
   return Math.max(0, free - f.actionFrame);
 }
@@ -719,6 +761,27 @@ function chargeSmash(
   prof: CpuProfile, rand: () => number, mem: CpuMem, opp: FighterState, dirBit: number, adx: number,
 ): number {
   return chargeSmashFor(prof, rand, mem, chargeWindow(opp, adx), dirBit);
+}
+
+/**
+ * The distance from which throwing the orb is actually safe. The shot leaves her hands on the
+ * move's own spawn frame and the fighter is rooted for every frame after it, so the punish window
+ * a running opponent gets is exactly that tail, and the ground they cover in it is that tail times
+ * their run speed, plus our own poke range to stand outside. Every number comes out of the move
+ * and the character rather than being written down here, so the owner retuning the shot's spawn
+ * frame or its total length moves this gate with it: the 7 extra frames of recovery behind the
+ * new orb push the safe distance outward on their own.
+ */
+function orbSafeRange(me: FighterState, opp: FighterState): number {
+  const mv = myMove(me, 'nspecial');
+  if (mv === null) return MID_RANGE_MAX;
+  const spawn = moveLastSpawn(mv);
+  if (spawn < 0) return MID_RANGE_MAX;
+  const free = mv.iasa === undefined ? mv.totalFrames : mv.iasa;
+  const tail = Math.max(0, free - spawn);
+  const def = CHARACTER_DEFS[opp.charId];
+  const speed = def ? def.runSpeed : 2.6;
+  return tail * speed + MY_REACH;
 }
 
 /** A step that would walk us off the stage is no step at all. */
@@ -1124,6 +1187,14 @@ function groundFight(
     const destAdx = Math.abs(destX - me.x);
     // Rolling through us: a forward smash covers one side, a down smash covers both.
     const through = (destX - me.x) * (opp.x - me.x) < 0;
+    // So does the crescent, now that it comes home: thrown out in front it turns on frame 20 and
+    // sweeps back through us into the space they rolled to, which is a cleaner answer to a
+    // cross-up roll than turning around and guessing. Only profiles that read patterns find it.
+    if (through && destAdx < CRESCENT_BACK && prof.adaptRate > 0.5 && left >= 6 &&
+        rand() < 0.3 * prof.adaptRate) {
+      mem.dirHeld = towardBit;
+      return Btn.Special;
+    }
     if (through && destAdx < MY_REACH + 12 && left >= 8 && left <= 16 &&
         rand() < 0.15 + 0.35 * prof.smashAccuracy) {
       return queueSmash(mem, Btn.Down);
@@ -1141,13 +1212,31 @@ function groundFight(
   }
 
   // Whirlpool. 50 frames, four pulling hits and a launching fifth: a stock on a hard read and a
-  // free punish on a whiff, so it only ever goes out against someone already stuck for longer
-  // than its own wind-up. Checked before the ordinary punishes, which would otherwise always
-  // take the frame first.
-  if (settled && adx < 30 && Math.abs(dy) < 34 && prof.smashAccuracy > 0.4 &&
-      vulnerableFor(opp) >= 22 && rand() < rate(prof, 1.2 * prof.smashAccuracy)) {
-    mem.dirHeld = Btn.Down;
-    return Btn.Special;
+  // free punish on a whiff, so it only ever goes out against someone who cannot answer it before
+  // the pull is live. Reach and wind-up are read off the move's own hitboxes rather than guessed,
+  // so retuning the whirlpool retunes the read with it. Checked before the ordinary punishes,
+  // which would otherwise always take the frame first.
+  const wp = myMove(me, 'dspecial');
+  if (wp !== null && settled && prof.smashAccuracy > 0.4 &&
+      adx < moveSpan(wp) + 10 && Math.abs(dy) < 34) {
+    const wind = moveStartup(wp) + 2;
+    // Long enough that the pull actually chains into the launching fifth hit, rather than
+    // trading 50 frames of ending lag for a single 2% tick.
+    const worthIt = wind + 6;
+    // Stuck for longer than the wind-up: hitstun, a broken shield, or the ending lag of something
+    // long and committed. This is the read the whole move exists for.
+    const stuck = vulnerableFor(opp) >= worthIt;
+    // Covering a landing. They are falling and physics says when they touch down; starting the
+    // pull now means the first hit is live as they arrive, with nothing they can do about it.
+    let covering = false;
+    if (!stuck && !opp.onGround && opp.vy > 0.05 && opp.hitstun === 0) {
+      const eta = framesUntilLevel(opp, me.y, 40);
+      covering = eta >= wind - 2 && eta <= wind + 10;
+    }
+    if ((stuck || covering) && rand() < rate(prof, 1.2 * prof.smashAccuracy)) {
+      mem.dirHeld = Btn.Down;
+      return Btn.Special;
+    }
   }
 
   // Free charge. They cannot act for longer than a charged smash takes to come out, whether that
@@ -1330,14 +1419,42 @@ function groundFight(
       mem.dirHeld = towardBit;
       return Btn.Attack;
     }
-    // Side special pierces and lives 45 frames: the kit's real zoning tool. Thrown from outside
-    // the dash-dance band, where its own 42 frames cannot be walked through and punished.
-    if (adx > SPACING_MAX && adx < 220 && Math.abs(dy) < 60 && vulnerableFor(opp) === 0 &&
+    // Charged orb. Holding Special roots the fighter with no hitbox out, so it is only correct
+    // when zoning is genuinely free: they are out past the orb's own reach, they are not closing,
+    // and nothing of theirs is in the air. cpuInput re-checks all of that every frame and lets go
+    // early the moment it stops being true, exactly the way a charged smash is abandoned.
+    // The charge itself is bought with distance: every frame Special is held is another frame they
+    // get to run at a rooted fighter, on top of the recovery already owed behind the shot. Hold it
+    // only for the surplus ground they would still have to cover, never longer.
+    if (mem.orbHold === 0 && prof.spacing > 0.45 && adx <= ORB_RANGE &&
+        Math.abs(dy) < 50 && (opp.x - me.x) * opp.vx >= -0.2 && !inStartup(opp) &&
+        incomingProjectile(state, slot, me) < 0 &&
+        rand() < rate(prof, 0.8 * prof.spacing)) {
+      const oppDef = CHARACTER_DEFS[opp.charId];
+      const oppSpeed = oppDef ? oppDef.runSpeed : 2.6;
+      const room = Math.min(ORB_CHARGE_FRAMES, Math.floor((adx - orbSafeRange(me, opp)) / oppSpeed));
+      if (room >= ORB_CHARGE_MIN_FRAMES) {
+        mem.orbHold = room;
+        mem.dirHeld = 0;
+        return Btn.Special;
+      }
+    }
+    // Side special. The crescent flies about 100 px out, turns on frame 20 and sweeps back
+    // through the thrower for the rest of its 56 frames, so one throw covers both sides and an
+    // opponent who jumps or rolls behind is still in its path. Thrown from outside the
+    // dash-dance band, where the move's own 42 frames cannot be walked through and punished.
+    if (adx > SPACING_MAX && adx < CRESCENT_OUT && Math.abs(dy) < 60 && vulnerableFor(opp) === 0 &&
         !inStartup(opp) && rand() < rate(prof, 0.45 * prof.spacing)) {
       mem.dirHeld = towardBit;
       return Btn.Special;
     }
-    if (adx <= MID_RANGE_MAX && adx >= MID_RANGE_MIN &&
+    // Bare orb. A sloppy profile throws it from the middle of the screen and pays the recovery;
+    // a disciplined one stands outside the punish the shot now owes and pokes from there instead.
+    // The band is interpolated by the profile's own spacing, so nothing branches on a level.
+    const orbSafe = orbSafeRange(me, opp);
+    const orbMin = MID_RANGE_MIN + (orbSafe - MID_RANGE_MIN) * prof.spacing;
+    const orbMax = MID_RANGE_MAX + (ORB_RANGE - MID_RANGE_MAX) * prof.spacing;
+    if (adx <= orbMax && adx >= orbMin &&
         rand() < rate(prof, 0.10 + 0.25 * (1 - prof.spacing))) {
       mem.dirHeld = 0;
       return Btn.Special;
@@ -1677,7 +1794,9 @@ export function cpuInput(state: GameState, slot: number, level: number, rand: ()
 
   if (mem.dodgeCd > 0) mem.dodgeCd--;
   if (mem.jumpHold > 0) mem.jumpHold--;
-  if (me === null || me.action === 'dead') { mem.chargeFrames = 0; mem.chargePending = 0; }
+  if (me === null || me.action === 'dead') {
+    mem.chargeFrames = 0; mem.chargePending = 0; mem.orbHold = 0;
+  }
   if (mem.forceFrames > 0) mem.forceFrames--;
   // Hitlag freezes the fighter without freezing this function, so ticking the gate through it
   // would let the next aerial come out while the last one is still on screen.
@@ -1731,6 +1850,23 @@ export function cpuInput(state: GameState, slot: number, level: number, rand: ()
       if (ranged) { mem.oppShots = Math.min(9, mem.oppShots + 1); mem.oppShotAge = 0; }
     }
     mem.oppMove = started;
+
+    // A charge is only free while nothing can reach us. The fighter is rooted with actionFrame
+    // pinned at 0 for every frame of it, so the instant the opponent closes, starts something, or
+    // puts a projectile in the air, let go: an early orb beats a charged one that never comes out.
+    if (mem.orbHold > 0) {
+      const charging = me.action === 'attack' && me.moveId === 'nspecial' && me.hitstun === 0;
+      let bail = !charging;
+      if (!bail && foe !== null) {
+        const gap = Math.abs(foe.x - me.x);
+        if (gap < orbSafeRange(me, foe)) bail = true;
+        else if ((foe.x - me.x) * foe.vx < -0.2) bail = true;
+        else if (inStartup(foe)) bail = true;
+        else if (!foe.onGround && gap < ORB_RANGE) bail = true;
+      }
+      if (!bail && incomingProjectile(state, slot, me) >= 0) bail = true;
+      if (bail) mem.orbHold = 0;
+    }
 
     // A grounded attack is only resolved when its buffer is spent, and a hit that launches us
     // first turns it into an aerial, slipping one past the aerial gate entirely. While the gate
@@ -1787,6 +1923,14 @@ export function cpuInput(state: GameState, slot: number, level: number, rand: ()
     mem.cooldown = 0;
     mem.smashPending = 0;
     mem.egPhase = 0;
+  } else if (mem.smashPending !== 0 && !me.onGround) {
+    // The fighter left the ground between queueing the smash and firing it: a jumpsquat that
+    // took off, a walk-off, a platform that dropped away. Attack from here is an aerial, not a
+    // smash, and one fired off this path would bypass the aerial cooldown entirely, because it
+    // skips the whole decision cadence. Drop the queue and let the next decision think again.
+    mem.smashPending = 0;
+    mem.chargePending = 0;
+    mem.dirHeld = 0;
   } else if (mem.smashPending !== 0) {
     // A smash was queued last frame (direction released that frame); pressing it fresh now,
     // alongside Attack, lands inside the sim's smash window. This bypasses the normal decision
@@ -1821,6 +1965,11 @@ export function cpuInput(state: GameState, slot: number, level: number, rand: ()
   if (mem.chargeFrames > 0) {
     held |= Btn.Attack;
     mem.chargeFrames--;
+  }
+  // The orb charges on Special exactly the way a smash charges on Attack: a hold, not a press.
+  if (mem.orbHold > 0) {
+    held |= Btn.Special;
+    mem.orbHold--;
   }
   // An Attack pressed while grounded is only resolved when the buffer is spent, which may be
   // after a walk-off, a platform drop or a bump into the air. While the aerial gate is up, never

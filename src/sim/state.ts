@@ -203,6 +203,9 @@ function cloneProjectile(src: ProjectileState): ProjectileState {
     age: src.age,
     hitSlots: src.hitSlots,
     alive: src.alive,
+    power: src.power,
+    scale: src.scale,
+    returned: src.returned,
   };
 }
 
