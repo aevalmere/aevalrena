@@ -1,14 +1,19 @@
 import type { ResultsData, UiCallbacks, UiDeps, UiScreen } from '../core/types';
 
-/** Cycle order for a character-select slot: Off, Human, CPU level 1-3. */
-export type SlotMode = 'off' | 'human' | 'cpu1' | 'cpu2' | 'cpu3';
+/** Cycle order for a character-select slot: Off, Human, CPU. */
+export type SlotMode = 'off' | 'human' | 'cpu';
 
-export const SLOT_MODE_CYCLE: SlotMode[] = ['off', 'human', 'cpu1', 'cpu2', 'cpu3'];
+export const SLOT_MODE_CYCLE: SlotMode[] = ['off', 'human', 'cpu'];
+
+/** Highest CPU difficulty the select screen slider allows. */
+export const MAX_CPU_LEVEL = 9;
 
 export interface SlotState {
   mode: SlotMode;
   charId: string;
   charIndex: number;
+  /** 1..MAX_CPU_LEVEL. Kept even while mode is not 'cpu' so toggling does not lose it. */
+  cpuLevel: number;
 }
 
 /** Menu state shared across screens for the lifetime of the UiController. */
@@ -35,10 +40,10 @@ export interface MenuCtx {
 export function createDefaultMenuState(deps: UiDeps): MenuState {
   const defaultChar = deps.characters[0]?.id ?? '';
   const slots: SlotState[] = [
-    { mode: 'human', charId: defaultChar, charIndex: 0 },
-    { mode: 'cpu1', charId: defaultChar, charIndex: 0 },
-    { mode: 'off', charId: defaultChar, charIndex: 0 },
-    { mode: 'off', charId: defaultChar, charIndex: 0 },
+    { mode: 'human', charId: defaultChar, charIndex: 0, cpuLevel: 5 },
+    { mode: 'cpu', charId: defaultChar, charIndex: 0, cpuLevel: 5 },
+    { mode: 'off', charId: defaultChar, charIndex: 0, cpuLevel: 5 },
+    { mode: 'off', charId: defaultChar, charIndex: 0, cpuLevel: 5 },
   ];
   return {
     stocks: 3,
@@ -48,32 +53,35 @@ export function createDefaultMenuState(deps: UiDeps): MenuState {
   };
 }
 
-export function slotCpuLevel(mode: SlotMode): number {
-  switch (mode) {
-    case 'cpu1':
-      return 1;
-    case 'cpu2':
-      return 2;
-    case 'cpu3':
-      return 3;
-    default:
-      return 0;
-  }
-}
-
 export function slotLabel(mode: SlotMode): string {
   switch (mode) {
     case 'off':
       return 'Off';
     case 'human':
       return 'Human';
-    case 'cpu1':
-      return 'CPU 1';
-    case 'cpu2':
-      return 'CPU 2';
-    case 'cpu3':
-      return 'CPU 3';
+    case 'cpu':
+      return 'CPU';
   }
+}
+
+const CPU_LEVEL_NAMES = [
+  'Rookie',
+  'Novice',
+  'Steady',
+  'Sharp',
+  'Skilled',
+  'Expert',
+  'Ruthless',
+  'Merciless',
+  'CRACKED',
+];
+
+/** Short descriptor for a CPU difficulty level 1..MAX_CPU_LEVEL. */
+export function cpuLevelName(level: number): string {
+  const idx = Math.round(level) - 1;
+  if (idx < 0) return CPU_LEVEL_NAMES[0];
+  if (idx >= CPU_LEVEL_NAMES.length) return CPU_LEVEL_NAMES[CPU_LEVEL_NAMES.length - 1];
+  return CPU_LEVEL_NAMES[idx];
 }
 
 const SPECIAL_KEY_NAMES: Record<string, string> = {

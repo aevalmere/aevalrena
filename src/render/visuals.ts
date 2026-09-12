@@ -1,5 +1,5 @@
 import { CHARACTER_DEFS, CHARACTER_SPRITES } from '../characters/registry';
-import type { CharacterSprites, PixelSheet, ProjectileDef } from '../core/types';
+import type { CharacterSprites, ImageSheetData, ProjectileDef } from '../core/types';
 import { portraitFrameName } from './anim';
 import { bakeSheet } from './bake';
 import { PLAYER_COLORS } from './colors';
@@ -35,7 +35,7 @@ const charVisuals = new Map<string, CharVisual>();
 const projectileVisuals = new Map<string, ProjectileVisual>();
 
 /** Collect `base0`, `base1`, ... while the sheet has them. */
-function probeFrames(sheet: PixelSheet, base: string): string[] {
+function probeFrames(sheet: ImageSheetData, base: string): string[] {
   const out: string[] = [];
   for (let i = 0; i < 64; i++) {
     const name = base + i;
@@ -46,7 +46,7 @@ function probeFrames(sheet: PixelSheet, base: string): string[] {
   return out;
 }
 
-export function buildVisuals(): void {
+export async function buildVisuals(): Promise<void> {
   charVisuals.clear();
   projectileVisuals.clear();
 
@@ -54,8 +54,8 @@ export function buildVisuals(): void {
     const sprites = CHARACTER_SPRITES[charId];
     const bodySheetId = charId + ':body';
     const fxSheetId = charId + ':fx';
-    bakeSheet(bodySheetId, sprites.sheet, PLAYER_COLORS);
-    bakeSheet(fxSheetId, sprites.fx, NO_OUTLINES);
+    await bakeSheet(bodySheetId, sprites.sheet, PLAYER_COLORS);
+    await bakeSheet(fxSheetId, sprites.fx, NO_OUTLINES);
 
     const visual: CharVisual = {
       charId,

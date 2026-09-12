@@ -1,3 +1,4 @@
+import { BURST_ONLY } from '../../core/types';
 import type { CharacterDef, HitboxDef, MoveDef, MoveId, ProjectileDef } from '../../core/types';
 
 /**
@@ -27,6 +28,21 @@ function geyserVelocity(): NonNullable<MoveDef['velocity']> {
   return out;
 }
 
+/** The orb's payload: it bursts on contact and again if it runs out of range. */
+const orbBurst: ProjectileDef = {
+  id: 'orbBurst',
+  spawnFrame: BURST_ONLY,
+  x: 0, y: 0,
+  vx: 0, vy: 0,
+  gravity: 0,
+  lifetime: 10,
+  r: 17,
+  damage: 8, angle: 50, bkb: 32, kbg: 62,
+  destroyOnHit: false,
+  sprite: 'burst',
+  animFps: 14,
+};
+
 const waterOrb: ProjectileDef = {
   id: 'orb',
   spawnFrame: 18,
@@ -39,11 +55,27 @@ const waterOrb: ProjectileDef = {
   destroyOnHit: true,
   sprite: 'orb',
   animFps: 12,
+  burstId: orbBurst.id,
+};
+
+/** Jab throws a bead of water rather than a fist. Short-lived, so short-ranged. */
+const jabDrop: ProjectileDef = {
+  id: 'jabDrop',
+  spawnFrame: 5,
+  x: 18, y: -19,
+  vx: 5.5, vy: 0,
+  gravity: 0,
+  lifetime: 7,
+  r: 9,
+  damage: 2, angle: SAKURAI, bkb: 14, kbg: 22,
+  destroyOnHit: true,
+  sprite: 'orb',
+  animFps: 16,
 };
 
 const tidalCrescent: ProjectileDef = {
   id: 'crescent',
-  spawnFrame: 12,
+  spawnFrame: 10,
   x: 20, y: -18,
   vx: 5, vy: 0,
   gravity: 0,
@@ -51,7 +83,7 @@ const tidalCrescent: ProjectileDef = {
   r: 13,
   damage: 9, angle: SAKURAI, bkb: 27, kbg: 48,
   destroyOnHit: false,
-  sprite: 'crescent',
+  sprite: 'slash',
   animFps: 10,
 };
 
@@ -68,7 +100,8 @@ const moves: Record<MoveId, MoveDef> = {
   // Ground normals. Jab is fast and safe, tilts commit a little more.
   jab: {
     id: 'jab', totalFrames: 18, iasa: 14, groundOnly: true,
-    hitboxes: [box(1, 4, 7, 20, -18, 9, 3, SAKURAI, 20, 40, 1)],
+    hitboxes: [box(1, 4, 6, 15, -18, 9, 3, SAKURAI, 20, 40, 1)],
+    projectiles: [jabDrop],
   },
   ftilt: {
     id: 'ftilt', totalFrames: 26, iasa: 22, groundOnly: true,
@@ -131,7 +164,7 @@ const moves: Record<MoveId, MoveDef> = {
   nspecial: {
     id: 'nspecial', totalFrames: 40,
     hitboxes: [],
-    projectiles: [waterOrb],
+    projectiles: [waterOrb, orbBurst],
   },
   sspecial: {
     id: 'sspecial', totalFrames: 42,

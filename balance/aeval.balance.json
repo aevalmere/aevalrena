@@ -1,0 +1,426 @@
+{
+  "schemaVersion": 1,
+  "characterId": "aeval",
+  "name": "Aeval",
+  "archetype": "midrange_water_zoner",
+  "design_goal": "Strong space control and recovery mixups, weak point blank pressure. Wins neutral through water placement rather than raw frame advantage.",
+  "base_stats": {
+    "weight": 88,
+    "walkSpeed": 1.3,
+    "runSpeed": 2.6,
+    "dashSpeed": 2.8,
+    "airSpeed": 1.7,
+    "airAcceleration": 0.12,
+    "gravity": 0.15,
+    "maxFall": 3.2,
+    "fastFall": 5.0,
+    "jumpVelocity": 5.4,
+    "shortHopVelocity": 3.5,
+    "doubleJumpVelocity": 5.0,
+    "jumps": 2,
+    "jumpSquat": 3
+  },
+  "balance_targets": {
+    "fresh_target_full_charge_fsmash_center_stage_ko_percent": 90,
+    "identity": "light, floaty, good midrange, mediocre close range",
+    "power_budget": "projectiles and positional control are stronger than raw grounded normals",
+    "counterplay": [
+      "approach through gaps",
+      "shield projectiles",
+      "force Aeval to commit",
+      "punish recovery usage",
+      "do not let whirlpool become a free escape"
+    ],
+    "red_flags": [
+      "projectile spam with no risk",
+      "sspecial piercing through everything",
+      "dspecial both traps and kills too early",
+      "uspecial grants excessive safety after recovery"
+    ]
+  },
+  "global_character_tuning": {
+    "projectile_damage_multiplier": 1.0,
+    "projectile_knockback_multiplier": 0.95,
+    "grounded_melee_damage_multiplier": 0.95,
+    "landing_lag_bias": 1.0,
+    "recovery_safety_bias": 0.95
+  },
+  "moves": {
+    "jab": {
+      "damage": 3,
+      "startup": 4,
+      "active": [
+        4,
+        7
+      ],
+      "total": 18,
+      "iasa": 14,
+      "angle": 361,
+      "bkb": 20,
+      "kbg": 40,
+      "role": "fast check",
+      "animation": "jab"
+    },
+    "ftilt": {
+      "damage": 8,
+      "startup": 8,
+      "active": [
+        8,
+        12
+      ],
+      "total": 26,
+      "iasa": 22,
+      "angle": 361,
+      "bkb": 19,
+      "kbg": 51,
+      "role": "safe-ish space check",
+      "animation": "ftilt"
+    },
+    "utilt": {
+      "damage": 7,
+      "startup": 6,
+      "active": [
+        6,
+        11
+      ],
+      "total": 24,
+      "iasa": 20,
+      "angle": 90,
+      "bkb": 37,
+      "kbg": 90,
+      "role": "anti-air",
+      "animation": "utilt"
+    },
+    "dtilt": {
+      "damage": 6,
+      "startup": 5,
+      "active": [
+        5,
+        9
+      ],
+      "total": 22,
+      "iasa": 18,
+      "angle": 80,
+      "bkb": 34,
+      "kbg": 95,
+      "role": "combo starter at low percent",
+      "animation": "dtilt"
+    },
+    "dashatk": {
+      "damage": 9,
+      "startup": 6,
+      "active": [
+        6,
+        16
+      ],
+      "total": 32,
+      "angle": 60,
+      "bkb": 32,
+      "kbg": 50,
+      "role": "burst punish",
+      "animation": "dashatk"
+    },
+    "fsmash": {
+      "damage": 15,
+      "startup": 16,
+      "active": [
+        16,
+        21
+      ],
+      "total": 44,
+      "angle": 361,
+      "bkb": 19,
+      "kbg": 46,
+      "chargeable": true,
+      "role": "hard read kill move",
+      "animation": "fsmash"
+    },
+    "usmash": {
+      "damage": 14,
+      "startup": 12,
+      "active": [
+        12,
+        18
+      ],
+      "total": 40,
+      "angle": 88,
+      "bkb": 30,
+      "kbg": 74,
+      "chargeable": true,
+      "role": "anti-air kill",
+      "animation": "usmash"
+    },
+    "dsmash": {
+      "damage": 12,
+      "startup": 12,
+      "active": [
+        12,
+        15
+      ],
+      "total": 42,
+      "angle": 30,
+      "bkb": 21,
+      "kbg": 52,
+      "chargeable": true,
+      "role": "ledge and crossup coverage",
+      "animation": "dsmash"
+    },
+    "nair": {
+      "damage": 7,
+      "startup": 5,
+      "active": [
+        5,
+        22
+      ],
+      "total": 34,
+      "landingLag": 8,
+      "angle": 60,
+      "bkb": 21,
+      "kbg": 63,
+      "role": "defensive bubble and combo bridge",
+      "animation": "nair"
+    },
+    "fair": {
+      "damage": 10,
+      "startup": 9,
+      "active": [
+        9,
+        13
+      ],
+      "total": 30,
+      "landingLag": 12,
+      "angle": 45,
+      "bkb": 18,
+      "kbg": 54,
+      "role": "main aerial spacer",
+      "animation": "fair"
+    },
+    "bair": {
+      "damage": 11,
+      "startup": 7,
+      "active": [
+        7,
+        10
+      ],
+      "total": 28,
+      "landingLag": 12,
+      "angle": 361,
+      "bkb": 21,
+      "kbg": 56,
+      "role": "strong retreating aerial",
+      "animation": "bair"
+    },
+    "uair": {
+      "damage": 9,
+      "startup": 6,
+      "active": [
+        6,
+        10
+      ],
+      "total": 26,
+      "landingLag": 9,
+      "angle": 85,
+      "bkb": 26,
+      "kbg": 79,
+      "role": "juggle",
+      "animation": "uair"
+    },
+    "dair": {
+      "damage": 12,
+      "startup": 12,
+      "active": [
+        12,
+        16
+      ],
+      "total": 36,
+      "landingLag": 16,
+      "angle": 270,
+      "bkb": 30,
+      "kbg": 85,
+      "role": "commitment spike",
+      "animation": "dair"
+    },
+    "nspecial": {
+      "damage": 6,
+      "startup": 18,
+      "projectile": "orb",
+      "projectileSpeed": 3.5,
+      "lifetime": 90,
+      "role": "slow durable zoning",
+      "animation": "nspecial"
+    },
+    "sspecial": {
+      "damage": 9,
+      "startup": 12,
+      "projectile": "crescent",
+      "projectileSpeed": 5.0,
+      "lifetime": 45,
+      "pierces": true,
+      "role": "horizontal lane control",
+      "animation": "sspecial"
+    },
+    "uspecial": {
+      "damage": 8,
+      "startup": 8,
+      "velocityY": -6.5,
+      "active": [
+        8,
+        20
+      ],
+      "role": "recovery plus burst hit",
+      "animation": "uspecial"
+    },
+    "dspecial": {
+      "hits": [
+        2,
+        2,
+        2,
+        2,
+        2
+      ],
+      "startup": 10,
+      "windows": [
+        [
+          10,
+          17
+        ],
+        [
+          18,
+          25
+        ],
+        [
+          26,
+          33
+        ],
+        [
+          34,
+          41
+        ],
+        [
+          42,
+          46
+        ]
+      ],
+      "pull": "light",
+      "finalDamage": 2,
+      "finalAngle": 60,
+      "finalBkb": 68,
+      "finalKbg": 153,
+      "role": "space control trap, not a free kill",
+      "animation": "dspecial"
+    }
+  },
+  "character_scaling_system": {
+    "principle": "Each character should be tuned from shared normalized budgets instead of ad hoc numbers.",
+    "axes": [
+      {
+        "id": "speed",
+        "meaning": "ground and air mobility"
+      },
+      {
+        "id": "weight",
+        "meaning": "survivability"
+      },
+      {
+        "id": "range",
+        "meaning": "safe space control"
+      },
+      {
+        "id": "frameAdvantage",
+        "meaning": "ability to act first after contact"
+      },
+      {
+        "id": "killPower",
+        "meaning": "reliability of stocks taken"
+      },
+      {
+        "id": "comboPower",
+        "meaning": "damage conversion from openings"
+      },
+      {
+        "id": "recovery",
+        "meaning": "return to stage"
+      },
+      {
+        "id": "disadvantageEscape",
+        "meaning": "tools for escaping pressure"
+      }
+    ],
+    "archetype_budgets": {
+      "rushdown": {
+        "speed": 1.2,
+        "weight": 0.9,
+        "range": 0.75,
+        "frameAdvantage": 1.2,
+        "killPower": 0.95,
+        "comboPower": 1.2,
+        "recovery": 1.0,
+        "disadvantageEscape": 1.0
+      },
+      "zoner": {
+        "speed": 0.9,
+        "weight": 0.9,
+        "range": 1.3,
+        "frameAdvantage": 0.9,
+        "killPower": 0.95,
+        "comboPower": 0.9,
+        "recovery": 1.05,
+        "disadvantageEscape": 0.85
+      },
+      "heavy": {
+        "speed": 0.75,
+        "weight": 1.35,
+        "range": 1.0,
+        "frameAdvantage": 0.75,
+        "killPower": 1.25,
+        "comboPower": 0.75,
+        "recovery": 0.75,
+        "disadvantageEscape": 0.7
+      },
+      "allrounder": {
+        "speed": 1.0,
+        "weight": 1.0,
+        "range": 1.0,
+        "frameAdvantage": 1.0,
+        "killPower": 1.0,
+        "comboPower": 1.0,
+        "recovery": 1.0,
+        "disadvantageEscape": 1.0
+      },
+      "aerial_specialist": {
+        "speed": 1.05,
+        "weight": 0.95,
+        "range": 1.05,
+        "frameAdvantage": 1.1,
+        "killPower": 0.95,
+        "comboPower": 1.1,
+        "recovery": 1.15,
+        "disadvantageEscape": 1.05
+      }
+    },
+    "tuning_rule": "Start each new fighter from an archetype budget. Spend advantage in one or two dimensions and visibly tax another dimension. Do not give a fighter top tier speed, range, kill power, recovery, and frame advantage simultaneously.",
+    "move_budget_fields": [
+      "startup",
+      "activeFrames",
+      "endLag",
+      "damage",
+      "bkb",
+      "kbg",
+      "range",
+      "hitboxRadius",
+      "landingLag",
+      "projectileSpeed",
+      "projectileLifetime"
+    ],
+    "debug_metrics_to_track": [
+      "neutral_openings_per_stock",
+      "avg_damage_per_opening",
+      "projectile_hits_per_stock",
+      "kills_from_each_move",
+      "time_in_disadvantage",
+      "recovery_success_rate",
+      "shield_damage_dealt",
+      "self_damage_from_whiffs"
+    ]
+  }
+}

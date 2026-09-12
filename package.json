@@ -10,7 +10,9 @@
     "typecheck": "tsc --noEmit",
     "test:sim": "npx --yes tsx src/sim/selftest.ts",
     "calibrate": "npx --yes tsx src/sim/calibrate.ts",
-    "validate:art": "npx --yes tsx src/characters/aeval/art/validate.ts"
+    "art:build": "python tools/spritegen/build.py all",
+    "art:check": "python tools/spritegen/check.py",
+    "art:preview": "python tools/spritegen/stagecheck.py"
   },
   "devDependencies": {
     "typescript": "^7.0.2",

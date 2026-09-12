@@ -32,21 +32,46 @@ function freeSlot(state: GameState): ProjectileState {
   return fresh;
 }
 
-/** Spawns from a move's projectile def, in fighter-local space mirrored by facing. */
-export function spawnProjectile(state: GameState, f: SimFighter, def: ProjectileDef): void {
+function spawnAt(
+  state: GameState,
+  owner: number,
+  facing: 1 | -1,
+  x: number,
+  y: number,
+  def: ProjectileDef
+): void {
   const p = freeSlot(state);
   p.id = state.nextProjectileId++;
-  p.owner = f.slot;
+  p.owner = owner;
   p.defId = def.id;
-  p.x = f.x + def.x * f.facing;
-  p.y = f.y + def.y;
-  p.vx = def.vx * f.facing;
+  p.x = x;
+  p.y = y;
+  p.vx = def.vx * facing;
   p.vy = def.vy;
-  p.facing = f.facing;
+  p.facing = facing;
   p.age = 0;
   p.hitSlots = 0;
   p.alive = true;
-  state.events.push({ type: 'projectileSpawn', x: p.x, y: p.y, slot: f.slot, defId: def.id });
+  state.events.push({ type: 'projectileSpawn', x: p.x, y: p.y, slot: owner, defId: def.id });
+}
+
+/** Spawns from a move's projectile def, in fighter-local space mirrored by facing. */
+export function spawnProjectile(state: GameState, f: SimFighter, def: ProjectileDef): void {
+  spawnAt(state, f.slot, f.facing, f.x + def.x * f.facing, f.y + def.y, def);
+}
+
+/**
+ * Retire a projectile and detonate its burst where it died. The freed slot can
+ * be handed straight back for the burst, which is why the position is read into
+ * arguments before anything is written.
+ */
+export function killProjectile(state: GameState, p: ProjectileState, def: ProjectileDef): void {
+  p.alive = false;
+  state.events.push({ type: 'projectileDie', x: p.x, y: p.y, defId: p.defId });
+  if (def.burstId === undefined) return;
+  const burst = PROJECTILE_DEFS[def.burstId];
+  if (burst === undefined) return;
+  spawnAt(state, p.owner, p.facing, p.x, p.y, burst);
 }
 
 /** Step 5 of the frame: move, age, die on lifetime or outside the blast zone. */
@@ -65,9 +90,11 @@ export function stepProjectiles(state: GameState): void {
     p.vy += def.gravity;
     p.age++;
     const outside = p.x < blast.x || p.x > blast.x + blast.w || p.y < blast.y || p.y > blast.y + blast.h;
-    if (p.age >= def.lifetime || outside) {
+    if (outside) {
       p.alive = false;
       state.events.push({ type: 'projectileDie', x: p.x, y: p.y, defId: p.defId });
+    } else if (p.age >= def.lifetime) {
+      killProjectile(state, p, def);
     }
   }
 }

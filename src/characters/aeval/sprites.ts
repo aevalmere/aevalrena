@@ -1,10 +1,17 @@
-import type { ActionId, AnimDef, AnimName, CharacterSprites, MoveId, PixelSheet } from '../../core/types';
-import { PALETTE } from './art/palette';
-import { BODY_FRAMES } from './art/body';
-import { FX_FRAMES } from './art/fx';
+import type { ActionId, AnimDef, AnimName, CharacterSprites, MoveId } from '../../core/types';
+import { BODY_ATLAS } from './art/atlas.body';
+import { FX_ATLAS } from './art/atlas.fx';
 
-const sheet: PixelSheet = { palette: PALETTE, frames: BODY_FRAMES };
-const fx: PixelSheet = { palette: PALETTE, frames: FX_FRAMES };
+/**
+ * Aeval's animation table.
+ *
+ * Frames come from the reference sheets through tools/spritegen, so the names
+ * here are the poses those sheets actually contain. Aeval is a water mage and
+ * every attack pose already has its water drawn into it: the sweeps, arcs and
+ * thrusts are part of the frame rather than an effect layered on top. Only
+ * water that has to travel or outlive the move (the orb, the tidal crescent,
+ * the geyser, the whirlpool) lives on the effect sheet.
+ */
 
 /** One frame, held: the renderer never advances past it. */
 function still(frame: string): AnimDef {
@@ -13,48 +20,49 @@ function still(frame: string): AnimDef {
 
 const anims: Record<AnimName, AnimDef> = {
   idle: { frames: ['idle0', 'idle1', 'idle2'], fps: 6, loop: true },
-  walk: { frames: ['walk0', 'walk1', 'walk2', 'walk3'], fps: 10, loop: true },
-  run: { frames: ['run0', 'run1', 'run2', 'run3'], fps: 14, loop: true },
-  turn: still('turn0'),
-  crouch: still('crouch0'),
-  jumpsquat: still('jumpsquat0'),
-  jump: still('jump0'),
-  fall: still('fall0'),
-  land: still('land0'),
-  helpless: still('helpless0'),
+  walk: { frames: ['walk0', 'walk1', 'walk2'], fps: 9, loop: true },
+  run: { frames: ['run0', 'run1', 'run2'], fps: 13, loop: true },
+  turn: still('turn'),
+  crouch: still('crouch'),
+  jumpsquat: still('crouch'),
+  jump: still('jump'),
+  fall: still('fall'),
+  land: still('land'),
+  helpless: still('helpless'),
 
-  jab: { frames: ['jab0', 'jab1'], fps: 10, loop: false },
-  ftilt: { frames: ['ftilt0', 'ftilt1'], fps: 12, loop: false },
-  utilt: { frames: ['utilt0', 'utilt1'], fps: 12, loop: false },
-  dtilt: { frames: ['dtilt0', 'dtilt1'], fps: 12, loop: false },
-  dashatk: { frames: ['dashatk0', 'dashatk1'], fps: 12, loop: false },
+  // Ground normals. Every one throws water forward or along the ground.
+  jab: { frames: ['jab0', 'jab1'], fps: 14, loop: false },
+  ftilt: { frames: ['jab0', 'ftilt1'], fps: 12, loop: false },
+  utilt: { frames: ['cast', 'utilt1'], fps: 12, loop: false },
+  dtilt: { frames: ['crouch', 'dtilt1'], fps: 12, loop: false },
+  dashatk: { frames: ['run1', 'ftilt1'], fps: 12, loop: false },
 
-  fsmash: { frames: ['fsmash0', 'fsmash1', 'fsmash2'], fps: 8, loop: false },
-  usmash: { frames: ['usmash0', 'usmash1', 'usmash2'], fps: 8, loop: false },
-  dsmash: { frames: ['dsmash0', 'dsmash1', 'dsmash2'], fps: 8, loop: false },
+  fsmash: { frames: ['jab0', 'fsmash2', 'fsmash2'], fps: 8, loop: false },
+  usmash: { frames: ['cast', 'usmash2', 'usmash2'], fps: 8, loop: false },
+  dsmash: { frames: ['crouch', 'dtilt1', 'dtilt1'], fps: 8, loop: false },
 
-  nair: { frames: ['nair0', 'nair1'], fps: 10, loop: false },
-  fair: { frames: ['fair0', 'fair1'], fps: 10, loop: false },
-  bair: { frames: ['bair0', 'bair1'], fps: 10, loop: false },
-  uair: { frames: ['uair0', 'uair1'], fps: 10, loop: false },
-  dair: { frames: ['dair0', 'dair1'], fps: 10, loop: false },
+  nair: { frames: ['nair1'], fps: 1, loop: false },
+  fair: { frames: ['jab0', 'fair1'], fps: 11, loop: false },
+  bair: { frames: ['jab0', 'bair1'], fps: 12, loop: false },
+  uair: { frames: ['cast', 'uair1'], fps: 12, loop: false },
+  dair: { frames: ['crouch', 'dtilt1'], fps: 11, loop: false },
 
-  nspecial: { frames: ['nspecial0', 'nspecial1'], fps: 12, loop: false },
-  sspecial: { frames: ['sspecial0', 'sspecial1'], fps: 12, loop: false },
-  uspecial: { frames: ['uspecial0', 'uspecial1'], fps: 12, loop: false },
-  dspecial: { frames: ['dspecial0', 'dspecial1'], fps: 12, loop: false },
+  nspecial: { frames: ['nspecial0', 'nspecial1'], fps: 10, loop: false },
+  sspecial: { frames: ['cast', 'jab1'], fps: 10, loop: false },
+  uspecial: { frames: ['cast', 'usmash2'], fps: 12, loop: false },
+  dspecial: { frames: ['cast', 'nair1'], fps: 10, loop: false },
 
-  shield: still('shield0'),
-  spotDodge: still('spotDodge0'),
-  roll: { frames: ['roll0', 'roll1'], fps: 12, loop: false },
-  airDodge: still('airDodge0'),
-  hitLight: still('hitLight0'),
-  hitStrong: still('hitStrong0'),
-  tumble: { frames: ['tumble0', 'tumble1'], fps: 8, loop: true },
-  ledgeHang: still('ledgeHang0'),
-  ledgeClimb: { frames: ['ledgeClimb0', 'ledgeClimb1'], fps: 12, loop: false },
-  taunt: { frames: ['taunt0', 'taunt1'], fps: 4, loop: true },
-  dead: still('dead0'),
+  shield: still('crouch'),
+  spotDodge: still('crouch'),
+  roll: { frames: ['downed', 'downed'], fps: 12, loop: false },
+  airDodge: still('airDodge'),
+  hitLight: still('hitLight'),
+  hitStrong: still('hitStrong'),
+  tumble: { frames: ['hitStrong', 'helpless'], fps: 8, loop: true },
+  ledgeHang: still('helpless'),
+  ledgeClimb: { frames: ['downed', 'crouch'], fps: 10, loop: false },
+  taunt: { frames: ['taunt', 'cast'], fps: 3, loop: true },
+  dead: still('dead'),
 };
 
 const MOVE_ANIM: Record<MoveId, AnimName> = {
@@ -122,8 +130,8 @@ function animFor(action: ActionId, moveId: MoveId | null): AnimName {
 }
 
 export const aevalSprites: CharacterSprites = {
-  sheet,
-  fx,
+  sheet: BODY_ATLAS,
+  fx: FX_ATLAS,
   anims,
   animFor,
 };

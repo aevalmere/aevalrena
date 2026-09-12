@@ -106,8 +106,9 @@ function testJab(): SelfTestResult {
   }
   const percent = state.fighters[1].percent;
   return {
-    name: 'c. jab deals 3 percent and hitstun',
-    pass: percent === 3 && maxHitstun > 0 && sawHitstun,
+    // Jab is a 3 percent thrust plus the 2 percent bead of water it throws.
+    name: 'c. jab deals 5 percent and hitstun',
+    pass: percent === 5 && maxHitstun > 0 && sawHitstun,
     detail: `percent ${percent}, max hitstun ${maxHitstun}, entered hitstun: ${sawHitstun}`,
   };
 }
@@ -166,6 +167,34 @@ function testProjectile(): SelfTestResult {
     name: 'e. nspecial projectile travels and expires',
     pass: spawned && died && gone && traveled > 200,
     detail: `spawned at ${spawnX.toFixed(1)}, traveled ${traveled.toFixed(1)} px, died on frame ${dieFrame}`,
+  };
+}
+
+/**
+ * The orb is meant to burst whether or not it connects, so run it past a
+ * victim's face and then out to the end of its range and watch for the burst
+ * both times.
+ */
+function testOrbBurst(): SelfTestResult {
+  function burstsAfter(victimX: number): boolean {
+    const state = fresh(1, 10);
+    state.fighters[1].x = victimX;
+    step(state, inp(Btn.Special, Btn.Special), NONE);
+    for (let i = 0; i < 140; i++) {
+      step(state, NONE, NONE);
+      for (let e = 0; e < state.events.length; e++) {
+        const ev = state.events[e];
+        if (ev.type === 'projectileSpawn' && ev.defId === 'orbBurst') return true;
+      }
+    }
+    return false;
+  }
+  const onHit = burstsAfter(60);
+  const onExpiry = burstsAfter(-170);
+  return {
+    name: 'i. the water orb bursts on impact and at the end of its range',
+    pass: onHit && onExpiry,
+    detail: `burst on impact: ${onHit}, burst at end of range: ${onExpiry}`,
   };
 }
 
@@ -258,6 +287,7 @@ export function runSimSelfTest(): SelfTestResult[] {
     testShield(),
     testDeterminism(),
     testLedgeGrab(),
+    testOrbBurst(),
   ];
 }
 

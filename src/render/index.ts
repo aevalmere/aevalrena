@@ -266,7 +266,7 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
   return {
     async load(): Promise<void> {
       clearBakes();
-      buildVisuals();
+      await buildVisuals();
       bakeFont(fontColors());
       for (const stageId in STAGE_ART) {
         const art = STAGE_ART[stageId] as PreparableStageArt;

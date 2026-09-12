@@ -60,6 +60,16 @@ export interface HitboxDef {
   shieldDamage?: number;  // default = damage
 }
 
+/**
+ * A projectile def with this spawnFrame never fires from a move's timeline,
+ * because move frames start at 0. It exists only to be detonated as another
+ * projectile's burst, and still has to sit in the move's `projectiles` list so
+ * the sim and the renderer both learn about it. It lives here rather than in
+ * the sim so character data can use it without importing the sim, which would
+ * close a cycle through the character registry.
+ */
+export const BURST_ONLY = -1;
+
 export interface ProjectileDef {
   id: string;
   spawnFrame: number;
@@ -72,6 +82,11 @@ export interface ProjectileDef {
   destroyOnHit: boolean;
   sprite: string;           // key into the character's effect sheet
   animFps?: number;
+  /**
+   * Def id detonated where this projectile dies, whether it ran out of life or
+   * hit something. The water orb uses it to burst.
+   */
+  burstId?: string;
 }
 
 export interface MoveDef {
@@ -107,15 +122,31 @@ export interface CharacterDef {
 
 // ---------------- Characters (render half) ----------------
 /**
- * Pixel sheet: each frame is an array of equal-length strings; each char indexes `palette`;
- * '.' is transparent. Origin is bottom-center of the frame.
+ * Sprite atlas. One packed PNG plus a frame table; `frames` maps a frame name
+ * to its [x, y, w, h] rect in atlas pixels. The atlas arrives as a data URL so
+ * no asset path is involved and a Pages deploy under a sub-path still works.
+ *
+ * `origin` says where a frame's rect anchors when drawn. Body frames are baked
+ * so the bottom row is the character's heel line and the horizontal middle is
+ * the body's middle; effect frames anchor at their middle in both axes.
  */
-export interface PixelSheet { palette: Record<string, string>; frames: Record<string, string[]> }
+export interface ImageSheetData {
+  url: string;
+  origin: 'bottom-center' | 'center';
+  frames: Record<string, [number, number, number, number]>;
+  /**
+   * Colours the player-colour outline ring skips, as '#rrggbb'. Aeval's attack
+   * frames have their water drawn into them; ringing every droplet in the
+   * player colour turns a clean sweep into confetti, so the ring traces the
+   * fighter and lets the water alone.
+   */
+  outlineIgnore?: string[];
+}
 export interface AnimDef { frames: string[]; fps: number; loop: boolean }
 export type AnimName = string;
 export interface CharacterSprites {
-  sheet: PixelSheet;                 // body frames
-  fx: PixelSheet;                    // projectiles and effect frames
+  sheet: ImageSheetData;             // body frames
+  fx: ImageSheetData;                // projectiles and effect frames
   anims: Record<AnimName, AnimDef>;
   /** Map a sim action + move to an animation name. Must never return undefined. */
   animFor(action: ActionId, moveId: MoveId | null): AnimName;
@@ -278,7 +309,7 @@ export interface LocalSession extends SessionAdapter {
 export type UiScreen = 'title' | 'mode' | 'select' | 'controls' | 'pause' | 'results';
 export interface ResultsData { winner: number; players: { slot: number; charId: string; stocks: number; percent: number }[] }
 export interface UiDeps {
-  characters: { id: string; name: string }[];
+  characters: { id: string; name: string; icon?: string }[];
   stages: { id: string; name: string }[];
   input: InputSystem;
 }

@@ -574,25 +574,28 @@ fresh (0%) opponent is KO'd by a full-charge fsmash around 90% from center stage
 | Move | Total | Active | Dmg | Angle | bkb / kbg | Notes |
 |---|---|---|---|---|---|---|
 | jab | 18 | 4-7 | 3 | 361 | 20 / 40 | short water slap, iasa 14 |
-| ftilt | 26 | 8-12 | 8 | 361 | 30 / 80 | forward splash |
-| utilt | 24 | 6-11 | 7 | 90 | 35 / 85 | upward ripple |
-| dtilt | 22 | 5-9 | 6 | 80 | 25 / 70 | low puddle poke, pops up |
-| dashatk | 32 | 6-16 | 9 | 60 | 45 / 70 | slide on a wave, velocity +3 vx on frame 4 |
-| fsmash | 44 | 16-21 | 15 | 361 | 40 / 100 | chargeable, big crescent wave |
-| usmash | 40 | 12-18 | 14 | 88 | 40 / 98 | chargeable, geyser burst |
-| dsmash | 42 | 12-15 both sides | 12 | 30 | 38 / 95 | chargeable, ring wave both sides |
-| nair | 34 | 5-22 | 7 | 60 | 25 / 75 | orbiting bubble, landing lag 8 |
-| fair | 30 | 9-13 | 10 | 45 | 30 / 90 | forward wave slash, landing lag 12 |
-| bair | 28 | 7-10 | 11 | 361 | 35 / 95 | back splash, landing lag 12 |
-| uair | 26 | 6-10 | 9 | 85 | 30 / 90 | upward flick, landing lag 9 |
+| ftilt | 26 | 8-12 | 8 | 361 | 19 / 51 | forward splash |
+| utilt | 24 | 6-11 | 7 | 90 | 37 / 90 | upward ripple |
+| dtilt | 22 | 5-9 | 6 | 80 | 34 / 95 | low puddle poke, pops up |
+| dashatk | 32 | 6-16 | 9 | 60 | 32 / 50 | slide on a wave, velocity +3 vx on frame 4 |
+| fsmash | 44 | 16-21 | 15 | 361 | 19 / 46 | chargeable, big crescent wave |
+| usmash | 40 | 12-18 | 14 | 88 | 30 / 74 | chargeable, geyser burst |
+| dsmash | 42 | 12-15 both sides | 12 | 30 | 21 / 52 | chargeable, ring wave both sides |
+| nair | 34 | 5-22 | 7 | 60 | 21 / 63 | orbiting bubble, landing lag 8 |
+| fair | 30 | 9-13 | 10 | 45 | 18 / 54 | forward wave slash, landing lag 12 |
+| bair | 28 | 7-10 | 11 | 361 | 21 / 56 | back splash, landing lag 12 |
+| uair | 26 | 6-10 | 9 | 85 | 26 / 79 | upward flick, landing lag 9 |
 | dair | 36 | 12-16 | 12 | 270 (spike) | 30 / 85 | downward drop, landing lag 16 |
-| nspecial | 40 | projectile f18 | 6 | 40 | 30 / 60 | Water Orb: vx 3.5, lifetime 90, destroyOnHit |
-| sspecial | 42 | projectile f12 | 9 | 361 | 40 / 70 | Tidal Crescent: vx 5, lifetime 45, pierces (destroyOnHit false), fighter gets +2 vx on f8 |
-| uspecial | 48 | 8-20 | 8 | 80 | 50 / 60 | Geyser: velocity setY -6.5 on f8, then +0.3 drift; helplessAfter |
-| dspecial | 50 | 10-40 multi (group per 8f) | 2 x5 | 90 then 60 last | 15 / 40, last 40 / 90 | Whirlpool: pulls in, last hit launches |
+| nspecial | 40 | projectile f18 | 6 | 40 | 24 / 48 | Water Orb: vx 3.5, lifetime 90, destroyOnHit |
+| sspecial | 42 | projectile f12 | 9 | 361 | 27 / 48 | Tidal Crescent: vx 5, lifetime 45, pierces (destroyOnHit false), fighter gets +2 vx on f8 |
+| uspecial | 48 | 8-20 | 8 | 80 | 55 / 66 | Geyser: velocity setY -6.5 on f8, then +0.3 drift; helplessAfter |
+| dspecial | 50 | 10-46 multi (4 pull windows of 8f, then a 5f launcher) | 2 x5 | 90 then 60 last | 6 / 10, last 68 / 153 | Whirlpool: pulls in, last hit launches |
 | taunt | 90 | none | | | | small water orb floats above hand |
-| ledgeatk | 40 | 18-24 | 8 | 361 | 30 / 70 | |
-| getupatk | 34 | 14-20 | 7 | 361 | 30 / 70 | |
+| ledgeatk | 40 | 18-24 | 8 | 361 | 20 / 47 | |
+| getupatk | 34 | 14-20 | 7 | 361 | 22 / 51 | |
+
+The bkb / kbg column was resynced from the KO-calibration pass; `src/characters/aeval/moves.ts` is
+authoritative for knockback.
 
 Physics numbers for Aeval:
 

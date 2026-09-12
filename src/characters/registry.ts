@@ -10,6 +10,6 @@ export const CHARACTER_SPRITES: Record<string, CharacterSprites> = {
   aeval: aevalSprites,
 };
 
-export const CHARACTER_LIST: { id: string; name: string }[] = [
-  { id: aevalDef.id, name: aevalDef.name },
+export const CHARACTER_LIST: { id: string; name: string; icon?: string }[] = [
+  { id: aevalDef.id, name: aevalDef.name, icon: 'icons/aeval.png' },
 ];

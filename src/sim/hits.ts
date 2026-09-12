@@ -6,7 +6,7 @@ import { circleRectOverlap, degToRad } from '../core/math';
 import { MAX_PLAYERS } from '../core/types';
 import type { Facing, GameState, HitboxDef, Rect } from '../core/types';
 import { defOf, fighterHurtbox, setAction, simFighters, type SimFighter } from './state';
-import { PROJECTILE_DEFS } from './projectiles';
+import { PROJECTILE_DEFS, killProjectile } from './projectiles';
 
 const HURT: Rect = { x: 0, y: 0, w: 0, h: 0 };
 const hitThisFrame: boolean[] = [];
@@ -188,8 +188,7 @@ export function resolveHits(state: GameState): void {
       );
       pr.hitSlots |= bit;
       if (pdef.destroyOnHit) {
-        pr.alive = false;
-        state.events.push({ type: 'projectileDie', x: pr.x, y: pr.y, defId: pr.defId });
+        killProjectile(state, pr, pdef);
         break;
       }
     }
