@@ -1,4 +1,5 @@
 import { PLAYER_COLORS, colorIndexOf } from '../render/colors';
+import { MAX_CPU_LEVEL, cpuLevelName } from './context';
 
 /**
  * Shared UI look (docs/UI_STYLE.md sections 1 to 4): fonts, CSS variables and the shared
@@ -73,8 +74,8 @@ export function playerAccentVars(players: readonly { slot: number; team?: number
 }
 
 /**
- * The typed name (or 'P1') for a human slot, 'CPU LV 5' for a CPU slot. Unknown slots fall
- * back to 'P<n>'.
+ * The typed name (or 'P1') for a human slot, 'CPU LV 5' for a CPU slot, and the select
+ * screen's level name ('AEVALMERE') for a top level CPU. Unknown slots fall back to 'P<n>'.
  */
 export function playerTag(
   players: readonly { slot: number; cpu: boolean; cpuLevel: number; name?: string }[],
@@ -83,7 +84,9 @@ export function playerTag(
   for (let i = 0; i < players.length; i++) {
     const p = players[i];
     if (p.slot !== slot) continue;
-    if (p.cpu) return `CPU LV ${p.cpuLevel}`;
+    if (p.cpu) {
+      return p.cpuLevel >= MAX_CPU_LEVEL ? cpuLevelName(p.cpuLevel).toUpperCase() : `CPU LV ${p.cpuLevel}`;
+    }
     const name = p.name === undefined ? '' : p.name.trim();
     return name === '' ? `P${slot + 1}` : name;
   }
