@@ -51,3 +51,111 @@ Both halves sit far under the 4 ms budget.
   because the turn registers as a fresh direction tap.
 - Screen shake and the 2-frame white hit flash were not verified frame by frame; only their event
   sources were.
+
+## Controls
+
+Defaults from `src/input/defaults.ts`. Every action has 2 key slots and 2 pad slots, and anything not
+listed starts unbound. Rebind on the Controls screen. Tap jump starts on.
+
+### P1 keyboard
+
+| Action | Key |
+|---|---|
+| Left, Right, Down | A, D, S |
+| Up | W |
+| Jump | W, Space |
+| Walk (hold) | Left Shift |
+| Attack | J |
+| Special | K |
+| Shield | L |
+| Grab | ; |
+| Dodge | E |
+| Taunt | T |
+| Pause | Escape |
+| Forward smash | F + J |
+| Up smash | F + W |
+| Down smash | F + S |
+| Forward tilt | G + J |
+| Up tilt | G + W |
+| Down tilt | G + S |
+
+W is bound to both Up and Jump; Walk (Shift) suppresses the jump so Shift + W + J is an up tilt
+instead of a jumpsquat.
+
+### How to do each move (P1 keyboard)
+
+- Jab: Attack (J), no direction held.
+- Forward tilt: hold Shift (Walk) + Left/Right + Attack, or G + J.
+- Up tilt: hold Shift (Walk) + W + Attack, or G + W.
+- Down tilt: hold S (Down) + Attack, or G + S.
+- Dash attack: hold Left/Right without Walk to dash or run, then Attack.
+- Forward smash: flick Left/Right and Attack together, or F + J.
+- Up smash: flick W and Attack together, F + W, or a jump-cancelled/out-of-shield up smash.
+- Down smash: flick S and Attack together, or F + S.
+- Neutral air: Attack in the air with no direction held.
+- Forward air: Attack in the air toward the way you're facing.
+- Back air: Attack in the air away from the way you're facing.
+- Up air: Attack in the air + Up (W).
+- Down air: Attack in the air + Down (S).
+- Neutral special: Special (K), no direction.
+- Side special: Special (K) + a side.
+- Up special: Special (K) + Up (W), also out of shield or jump-cancelled from jumpsquat.
+- Down special: Special (K) + Down (S).
+- Grab: Grab (;) on the ground, or Shield (L) + Attack (J) out of shield.
+- Shield: hold Shield (L) on the ground.
+- Spot dodge: double-tap Down (S), or Dodge (E) with no direction held.
+- Roll: double-tap Left/Right (A/D), or Dodge (E) + a held direction.
+- Air dodge: Shield (L) or Dodge (E) in the air, toward whatever direction is held.
+- Taunt: Taunt (T).
+
+### Gamepad (every player)
+
+Standard mapping. PlayStation name first, Xbox name second.
+
+| Action | Slot 1 | Slot 2 |
+|---|---|---|
+| Left, Right, Up, Down | Left stick | D-pad |
+| Jump | Triangle / Y | Square / X |
+| Attack | Cross / A | |
+| Special | Circle / B | |
+| Shield | L2 / LT | R2 / RT |
+| Grab | R1 / RB | |
+| Dodge | L1 / LB | |
+| Taunt | R3 (right stick click) | |
+| Pause | Options / Menu | |
+| C-stick up, down, left, right | Right stick | |
+
+A light left stick tilt walks. A full tilt runs. Only a full push up tap-jumps: a gentle upward
+tilt, short of the walk threshold, is read as a held Up instead, so a pad player can tilt up gently
+and press Attack for an up tilt.
+
+### Things to try
+
+- Double tap left or right on the ground to roll. Double tap Down to spot dodge.
+- Press Grab next to the CPU, then Attack to pummel, or a direction to throw. Get grabbed and mash to
+  break out.
+- Get launched into tumble and press Shield just before landing to tech. Hold a direction as well to
+  tech roll. Land without teching and try the get-up options.
+- Jump onto a fighter's head in the air and press Jump again to footstool.
+- Turn the Final Smash rule On in Mode Select, fill the meter, face an opponent and press Special.
+- Hold F and press J for a forward smash.
+- Press W then F quickly: it still comes out as an up smash, jump-cancelled out of the jumpsquat W
+  started.
+- Hold Shift, then W, then J for an up tilt.
+- Press L (Shield) in the air while holding a direction to air dodge that way.
+- Press L (Shield) on the ground next to an opponent, then J (Attack) to grab out of shield.
+- On the Mode Select screen, set a player's slot to CPU Lv 0 in Character Select and toggle "Lv 0
+  CPU" to Wanders; the dummy walks, runs and jumps at random instead of standing still.
+- On the Controls screen, hold two keys and release one to bind a chord.
+
+### Known feel issues
+
+- On keyboard, a bare direction plus Attack gives dash attack (or a forward smash on a fresh flick),
+  because holding a direction dashes by default. Forward tilt needs Walk (Shift) held, or G + J.
+- The first tap of a double tap still starts a dash, so the fighter slides a little before the roll.
+- Saved controls from before this wave are ignored, not migrated: the store key moved to
+  `aevalrena.controls.v3`, so any save left under the old `v1` or `v2` keys stays untouched in
+  storage and every player gets the new Smash-style defaults once.
+- Every keyboard player now has a Walk key, so every player can reach forward tilt (Walk +
+  left/right + Attack) and up tilt (Walk + Up + Attack); only Player 1 also has the F/G chord
+  shortcuts. Down tilt has always worked for everyone since Down does not dash or jump.

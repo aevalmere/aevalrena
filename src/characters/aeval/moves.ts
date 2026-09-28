@@ -1,5 +1,5 @@
 import { BURST_ONLY } from '../../core/types';
-import type { CharacterDef, HitboxDef, MoveDef, MoveId, ProjectileDef } from '../../core/types';
+import type { CharacterDef, FinalSmashDef, HitboxDef, MoveDef, MoveId, ProjectileDef } from '../../core/types';
 
 /**
  * Aeval frame data (SPEC section 5).
@@ -20,6 +20,27 @@ function box(
 ): HitboxDef {
   return { id, start, end, x, y, r, damage, angle, bkb, kbg, group };
 }
+
+/**
+ * Up-javelin column (utilt, usmash, uair all show uptilt_spike_2, the mid javelin).
+ * Measured on that crop against the heel anchor, game px: the javelin runs up x 7 to
+ * a tip at y -106. Circles every `r` px from just above the head circle (y -44) to
+ * the tip, active for the same window and in the same group as that circle, so a
+ * target is hit once.
+ */
+function javelinColumn(
+  firstId: number, start: number, end: number, r: number,
+  damage: number, angle: number, bkb: number, kbg: number, group: number,
+): HitboxDef[] {
+  const out: HitboxDef[] = [];
+  let id = firstId;
+  for (let y = -44 - r; y >= JAVELIN_TIP - r / 2; y -= r) {
+    out.push(box(id++, start, end, JAVELIN_X, y, r, damage, angle, bkb, kbg, group));
+  }
+  return out;
+}
+const JAVELIN_X = 7;
+const JAVELIN_TIP = -106;
 
 /** Geyser: one launch on frame 8, then a shrinking rise for the active window. */
 function geyserVelocity(): NonNullable<MoveDef['velocity']> {
@@ -82,24 +103,25 @@ const jabDrop: ProjectileDef = {
 };
 
 /**
- * The crescent flies out, turns around on frame 20 and sweeps back through the
- * thrower for half damage. Out: 20 px spawn offset plus 20 frames at 5 px/frame
- * is 120 px ahead. Back: the remaining 36 frames cover 180 px, so it crosses the
- * thrower on frame 44 and dies 60 px behind them, well inside the 56 lifetime.
+ * The crescent flies out, turns around on frame 31 and sweeps back through the
+ * thrower for half damage. Out: 20 px spawn offset plus 31 frames at 4.25 px/frame
+ * is about 152 px ahead. Back: the remaining 51 frames cover about 217 px, so it
+ * crosses the thrower on frame 67 and dies about 65 px behind them. 82 frames at
+ * 4.25 px/frame is 348 px of travel, 25% more than the old 56 at 5 (280 px).
  */
 const tidalCrescent: ProjectileDef = {
   id: 'crescent',
   spawnFrame: 10,
   x: 20, y: -18,
-  vx: 5, vy: 0,
+  vx: 4.25, vy: 0,
   gravity: 0,
-  lifetime: 56,
+  lifetime: 82,
   r: 13,
   damage: 9, angle: SAKURAI, bkb: 27, kbg: 48,
   destroyOnHit: false,
-  sprite: 'slash',
+  sprite: 'crescent',
   animFps: 10,
-  returnFrame: 20,
+  returnFrame: 31,
 };
 
 /** Whirlpool: four pulling hits in 8-frame windows, then a launching fifth. */
@@ -124,7 +146,7 @@ const moves: Record<MoveId, MoveDef> = {
   },
   utilt: {
     id: 'utilt', totalFrames: 24, iasa: 20, groundOnly: true,
-    hitboxes: [box(1, 6, 11, 2, -44, 12, 7, 90, 37, 90, 1)],
+    hitboxes: [box(1, 6, 11, 2, -44, 12, 7, 90, 37, 90, 1), ...javelinColumn(2, 6, 11, 10, 7, 90, 37, 90, 1)],
   },
   dtilt: {
     id: 'dtilt', totalFrames: 22, iasa: 18, groundOnly: true,
@@ -143,7 +165,7 @@ const moves: Record<MoveId, MoveDef> = {
   },
   usmash: {
     id: 'usmash', totalFrames: 40, chargeable: true, groundOnly: true,
-    hitboxes: [box(1, 12, 18, 2, -44, 15, 14, 88, 30, 74, 1)],
+    hitboxes: [box(1, 12, 18, 2, -44, 15, 14, 88, 30, 74, 1), ...javelinColumn(2, 12, 18, 12, 14, 88, 30, 74, 1)],
   },
   dsmash: {
     id: 'dsmash', totalFrames: 42, chargeable: true, groundOnly: true,
@@ -168,7 +190,7 @@ const moves: Record<MoveId, MoveDef> = {
   },
   uair: {
     id: 'uair', totalFrames: 26, landingLag: 9, airOnly: true,
-    hitboxes: [box(1, 6, 10, 2, -44, 12, 9, 85, 26, 79, 1)],
+    hitboxes: [box(1, 6, 10, 2, -44, 12, 9, 85, 26, 79, 1), ...javelinColumn(2, 6, 10, 10, 9, 85, 26, 79, 1)],
   },
   dair: {
     id: 'dair', totalFrames: 36, landingLag: 16, airOnly: true,
@@ -191,7 +213,12 @@ const moves: Record<MoveId, MoveDef> = {
   },
   uspecial: {
     id: 'uspecial', totalFrames: 48, helplessAfter: true,
-    hitboxes: [box(1, 8, 20, 2, -44, 14, 8, 80, 55, 66, 1)],
+    // The water column rides the body up for the whole rise (frames 8 to 20 of
+    // geyserVelocity): one circle on the head and one spout above it, same group.
+    hitboxes: [
+      box(1, 8, 20, 2, -44, 21, 8, 88, 72, 86, 1),
+      box(2, 8, 20, 2, -76, 21, 8, 88, 72, 86, 1),
+    ],
     velocity: geyserVelocity(),
   },
   dspecial: {
@@ -201,6 +228,8 @@ const moves: Record<MoveId, MoveDef> = {
 
   // Utility.
   taunt: { id: 'taunt', totalFrames: 90, hitboxes: [] },
+  taunt2: { id: 'taunt2', totalFrames: 90, hitboxes: [] },
+  taunt3: { id: 'taunt3', totalFrames: 90, hitboxes: [] },
   ledgeatk: {
     id: 'ledgeatk', totalFrames: 40, invuln: [0, 17],
     hitboxes: [box(1, 18, 24, 20, -14, 12, 8, SAKURAI, 20, 47, 1)],
@@ -214,18 +243,60 @@ const moves: Record<MoveId, MoveDef> = {
   },
 };
 
+/**
+ * Final Smash: Tidal Judgement. A command grab on the nearest opponent Aeval faces, a
+ * tsunami that carries them forward and up, a tornado that spirals them higher, then a
+ * launch. 15 + 20 + 10 = 45 base damage.
+ *
+ * Animation is pending the owner's animation overhaul: nothing here is drawn yet. The
+ * phases name the tsunami and tornado segments so the future renderer can hang its
+ * frames and effects on them (the sim announces each one with a 'finalSmash' event).
+ */
+function tornadoHits(): FinalSmashDef['hits'] {
+  const out: FinalSmashDef['hits'] = [];
+  for (let i = 0; i < 10; i++) out.push({ frame: 84 + i * 7, damage: 2 });
+  return out;
+}
+
+export const aevalFinalSmash: FinalSmashDef = {
+  target: 'nearestFacing',
+  startup: 20,
+  totalFrames: 170,
+  path: [
+    { frame: 20, x: 24, y: 0 },     // the catch
+    { frame: 80, x: 70, y: -20 },   // tsunami: forward and up
+    { frame: 110, x: 60, y: -50 },  // tornado: spiral up in place
+    { frame: 150, x: 70, y: -80 },
+  ],
+  hits: [
+    { frame: 26, damage: 3 },
+    { frame: 38, damage: 3 },
+    { frame: 50, damage: 3 },
+    { frame: 62, damage: 3 },
+    { frame: 74, damage: 3 },
+    ...tornadoHits(),
+  ],
+  // Tuned on tidegate from stage center: KOs a victim who started the Final Smash at 39
+  // percent or more (84 at the launch), so 0 survives and 60 dies.
+  launch: { frame: 152, damage: 10, angle: 80, bkb: 50, kbg: 90 },
+  phases: [
+    { name: 'tsunami', start: 20, end: 80 },
+    { name: 'tornado', start: 80, end: 150 },
+  ],
+};
+
 export const aevalDef: CharacterDef = {
   id: 'aeval',
   name: 'Aeval',
   weight: 88,
-  walkSpeed: 1.3,
-  runSpeed: 2.6,
-  dashSpeed: 2.8,
+  walkSpeed: 1.6,
+  runSpeed: 3.1,
+  dashSpeed: 3.4,
   dashFrames: 12,
-  groundAccel: 0.35,
+  groundAccel: 0.42,
   groundFriction: 0.22,
-  airSpeed: 1.7,
-  airAccel: 0.12,
+  airSpeed: 2.0,
+  airAccel: 0.14,
   airFriction: 0.03,
   gravity: 0.15,
   maxFall: 3.2,
@@ -239,4 +310,5 @@ export const aevalDef: CharacterDef = {
   crouchHurtbox: { w: 26, h: 26 },
   ledgeGrabBox: { w: 20, h: 24, yOff: -30 },
   moves,
+  finalSmash: aevalFinalSmash,
 };

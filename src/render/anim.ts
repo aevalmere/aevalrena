@@ -9,6 +9,7 @@ import type { AnimDef, AnimName, CharacterSprites, FighterState } from '../core/
 
 const FALLBACK_ANIM = 'idle';
 const CHARGE_SUFFIX = 'Charge';
+const AIR_JUMP_ANIM = 'airJump';
 const reportedMisses = new Set<string>();
 
 /**
@@ -45,7 +46,7 @@ function firstAnimName(sprites: CharacterSprites): AnimName | null {
  */
 export function pickAnimName(sprites: CharacterSprites, fighter: FighterState): AnimName | null {
   let name: AnimName;
-  const chosen = sprites.animFor(fighter.action, fighter.moveId);
+  const chosen = sprites.animFor(fighter.action, fighter.moveId, fighter);
   name = typeof chosen === 'string' ? chosen : FALLBACK_ANIM;
 
   if (fighter.charging) {
@@ -53,7 +54,8 @@ export function pickAnimName(sprites: CharacterSprites, fighter: FighterState): 
     if (sprites.anims[held] !== undefined) name = held;
   }
 
-  if (fighter.action === 'air' && fighter.vy > 0 && sprites.anims['fall'] !== undefined) {
+  // A mid-air jump's own animation plays through its descent instead of 'fall'.
+  if (fighter.action === 'air' && fighter.vy > 0 && name !== AIR_JUMP_ANIM && sprites.anims['fall'] !== undefined) {
     name = 'fall';
   }
 
@@ -69,6 +71,26 @@ export function pickAnimName(sprites: CharacterSprites, fighter: FighterState): 
 export function animFrameIndex(def: AnimDef, actionFrame: number): number {
   const count = def.frames.length;
   if (count <= 1) return 0;
+  const holds = def.holds;
+  if (holds !== undefined && holds.length > 0) {
+    // Walk the per-frame holds (sim frames). Looping wraps on the total;
+    // one-shots clamp on the last frame.
+    const n = holds.length < count ? holds.length : count;
+    let total = 0;
+    for (let i = 0; i < n; i++) total += holds[i] > 0 ? holds[i] : 1;
+    let t = actionFrame < 0 ? 0 : Math.floor(actionFrame);
+    if (def.loop) {
+      t %= total;
+    } else if (t >= total) {
+      return count - 1;
+    }
+    for (let i = 0; i < n; i++) {
+      const hold = holds[i] > 0 ? holds[i] : 1;
+      if (t < hold) return i;
+      t -= hold;
+    }
+    return n - 1;
+  }
   const fps = def.fps > 0 ? def.fps : 1;
   const frame = actionFrame < 0 ? 0 : actionFrame;
   const raw = Math.floor((frame * fps) / SIM_HZ);

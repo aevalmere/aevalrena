@@ -46,12 +46,27 @@ function applyMoveFrame(state: GameState, f: SimFighter, mv: MoveDef, frame: num
 }
 
 /**
- * The button that has to stay down for a move to keep charging. Smashes charge on
- * Attack, specials on Special; both the start and the hold check read it from here so
- * they can never disagree about which button is being held.
+ * The buttons that have to stay down for a move to keep charging, worked out once when the
+ * move starts. Smashes charge on Attack and specials on Special, but a smash fired by a
+ * shortcut that has no Attack key in it (the F&W up smash, the F&S down smash, the C-stick)
+ * would then never charge at all, so the smash's own direction holds the charge instead.
  */
-function chargeBit(mv: MoveDef): number {
-  return mv.chargeButton === 'special' ? Btn.Special : Btn.Attack;
+function chargeMaskFor(f: SimFighter, mv: MoveDef, id: MoveId): number {
+  if (mv.chargeable !== true) return 0;
+  if (mv.chargeButton === 'special') return Btn.Special;
+  let mask = Btn.Attack;
+  if ((f.inputHeld & Btn.Attack) === 0) {
+    // Started without Attack (a chord or the C-stick): the smash's own direction holds the charge.
+    if (id === 'usmash') mask |= Btn.Up | Btn.CUp;
+    else if (id === 'dsmash') mask |= Btn.Down | Btn.CDown;
+    else if (id === 'fsmash') mask |= f.facing === 1 ? (Btn.Right | Btn.CRight) : (Btn.Left | Btn.CLeft);
+  }
+  return mask;
+}
+
+/** True while the current move's charge is still being held down. */
+function chargeHeld(f: SimFighter): boolean {
+  return (f.inputHeld & f.chargeMask) !== 0;
 }
 
 export function startMove(state: GameState, f: SimFighter, def: CharacterDef, id: MoveId): void {
@@ -60,7 +75,8 @@ export function startMove(state: GameState, f: SimFighter, def: CharacterDef, id
   f.moveId = id;
   f.hitGroups = 0;
   f.charge = 0;
-  f.charging = mv.chargeable === true && (f.inputHeld & chargeBit(mv)) !== 0;
+  f.chargeMask = chargeMaskFor(f, mv, id);
+  f.charging = mv.chargeable === true && chargeHeld(f);
   if (!f.charging) applyMoveFrame(state, f, mv, 0);
 }
 
@@ -78,7 +94,7 @@ export function advanceMove(state: GameState, f: SimFighter, def: CharacterDef):
 
   if (f.charging) {
     f.actionFrame = 0;
-    const holding = (f.inputHeld & chargeBit(mv)) !== 0;
+    const holding = chargeHeld(f);
     if (holding && f.charge < TUNING.input.chargeMax) {
       f.charge++;
       return false;

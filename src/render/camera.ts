@@ -2,6 +2,7 @@ import { TUNING } from '../core/constants';
 import { clamp, lerp } from '../core/math';
 import type { Rect } from '../core/types';
 import { VIEW_H, VIEW_W } from '../core/types';
+import { liveView } from './scale';
 
 /**
  * Camera that frames every live fighter plus a margin, zooms and smooths with
@@ -86,6 +87,8 @@ function computeTarget(
 
   const needW = maxX - minX;
   const needH = maxY - minY;
+  // Framing uses the fixed 640x360 base view, so a bigger window shows more
+  // world around the same framing instead of zooming in further.
   const zoomFit = Math.min(VIEW_W / needW, VIEW_H / needH);
   const lead = clamp((sumVx / found) * LEAD_PER_VX, -LEAD_MAX, LEAD_MAX);
 
@@ -95,8 +98,8 @@ function computeTarget(
 }
 
 function clampToBounds(cam: CameraState, bounds: Rect): void {
-  const halfW = VIEW_W / (2 * cam.zoom);
-  const halfH = VIEW_H / (2 * cam.zoom);
+  const halfW = liveView.w / (2 * cam.zoom);
+  const halfH = liveView.h / (2 * cam.zoom);
   if (halfW * 2 >= bounds.w) {
     cam.x = bounds.x + bounds.w / 2;
   } else {

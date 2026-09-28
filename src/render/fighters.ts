@@ -1,13 +1,16 @@
+import { CHARACTER_DEFS } from '../characters/registry';
 import { SHIELD_MAX } from '../core/constants';
-import type { GameState } from '../core/types';
-import { frameNameFor } from './anim';
-import { getFrame, getOutline } from './bake';
-import { GLOW, INK, STONE, STONE_LIGHT, playerColor } from './colors';
+import { MAX_PLAYERS } from '../core/types';
+import type { FighterState, GameState } from '../core/types';
+import { animFrameIndex, pickAnimName } from './anim';
+import { getFrame, getFrameAnchor } from './bake';
+import { GLOW, INK, STONE, STONE_LIGHT, WHITE, slotColor } from './colors';
 import { getCharVisual } from './visuals';
 
 /**
- * Fighter drawing in world space: player-color outline, body, white flash,
- * shield bubble, invulnerability blink and the respawn platform.
+ * Fighter drawing in world space: body, white flash, shield bubble,
+ * invulnerability blink and the respawn platform. Sprites carry no player-colour
+ * outline (owner rule, 2026-09-28); the DOM name tag tells fighters apart.
  */
 
 const BLINK_PERIOD = 8;
@@ -17,6 +20,15 @@ const SHIELD_MAX_R = 24;
 const SHIELD_ALPHA = 0.34;
 const RESPAWN_PLAT_W = 44;
 const RESPAWN_PLAT_H = 5;
+
+// Placeholder box drawn in place of a body sprite when a frame is missing from
+// the baked sheet (a character without art, or a bad frame name).
+const PLACEHOLDER_W_FALLBACK = 26;
+const PLACEHOLDER_H_FALLBACK = 40;
+const PLACEHOLDER_FILL_ALPHA = 0.35;
+const PLACEHOLDER_FLASH_ALPHA = 0.8;
+const PLACEHOLDER_MARK_SIZE = 3;
+const PLACEHOLDER_MARK_INSET = 4;
 
 /** Respawn platforms sit under any fighter waiting to drop back in. */
 export function drawRespawnPlatforms(
@@ -62,12 +74,53 @@ function drawShieldBubble(
   ctx.globalAlpha = prevAlpha;
 }
 
+/**
+ * Stand-in for a fighter with no body sprite: a translucent box sized to the
+ * character's hurtbox filled in the player colour (no outline), and a small
+ * ink mark near the top on the side the fighter faces. Draws with no per-frame
+ * allocation: every value here is a number, and colours come from existing
+ * constants or `slotColor`.
+ */
+function drawPlaceholder(
+  ctx: CanvasRenderingContext2D,
+  fighter: FighterState,
+  x: number,
+  y: number,
+  color: string,
+  white: boolean
+): void {
+  const def = CHARACTER_DEFS[fighter.charId];
+  const box = def === undefined ? undefined : fighter.action === 'crouch' ? def.crouchHurtbox : def.hurtbox;
+  const w = box === undefined ? PLACEHOLDER_W_FALLBACK : box.w;
+  const h = box === undefined ? PLACEHOLDER_H_FALLBACK : box.h;
+  const left = Math.round(x - w / 2);
+  const top = Math.round(y - h);
+  const prevAlpha = ctx.globalAlpha;
+
+  ctx.globalAlpha = white ? PLACEHOLDER_FLASH_ALPHA : PLACEHOLDER_FILL_ALPHA;
+  ctx.fillStyle = white ? WHITE : color;
+  ctx.fillRect(left, top, w, h);
+
+  ctx.globalAlpha = 1;
+  const markX = fighter.facing === 1
+    ? left + w - PLACEHOLDER_MARK_INSET - PLACEHOLDER_MARK_SIZE
+    : left + PLACEHOLDER_MARK_INSET;
+  const markY = top + Math.round(h / 6);
+  ctx.fillStyle = INK;
+  ctx.fillRect(markX, markY, PLACEHOLDER_MARK_SIZE, PLACEHOLDER_MARK_SIZE);
+
+  ctx.globalAlpha = prevAlpha;
+}
+
 export interface FighterDrawDeps {
   /** Baked body sheet id per fighter index, empty string when the char is unknown. */
   sheetIds: string[];
   /** Frame name per fighter index, empty string when nothing resolves. */
   frameNames: string[];
 }
+
+/** Per fighter index: 1 when the resolved animation is drawn mirrored (AnimDef.mirror). */
+const animMirror = new Uint8Array(MAX_PLAYERS);
 
 /**
  * Resolve the frame name for every fighter once per render frame. Kept out of
@@ -78,14 +131,16 @@ export function resolveFighterFrames(state: GameState, deps: FighterDrawDeps): v
   for (let i = 0; i < count; i++) {
     const fighter = state.fighters[i];
     const visual = getCharVisual(fighter.charId);
-    if (visual === null) {
-      deps.sheetIds[i] = '';
-      deps.frameNames[i] = '';
-      continue;
-    }
-    const name = frameNameFor(visual.sprites, fighter);
-    deps.sheetIds[i] = visual.bodySheetId;
-    deps.frameNames[i] = name === null ? '' : name;
+    if (i < animMirror.length) animMirror[i] = 0;
+    deps.sheetIds[i] = visual === null ? '' : visual.bodySheetId;
+    deps.frameNames[i] = '';
+    if (visual === null) continue;
+    const animName = pickAnimName(visual.sprites, fighter);
+    if (animName === null) continue;
+    const def = visual.sprites.anims[animName];
+    if (def === undefined || def.frames.length === 0) continue;
+    deps.frameNames[i] = def.frames[animFrameIndex(def, fighter.actionFrame)];
+    if (def.mirror === true && i < animMirror.length) animMirror[i] = 1;
   }
 }
 
@@ -107,22 +162,29 @@ export function drawFighters(
 
     const sheetId = deps.sheetIds[i];
     const frameName = deps.frameNames[i];
-    const color = playerColor(fighter.slot);
+    const color = slotColor(state.config.players, fighter.slot);
     const x = posX[i];
     const y = posY[i];
 
     const hidden = fighter.invuln > 0 && blinkOff;
 
-    if (!hidden && sheetId !== '' && frameName !== '') {
+    if (!hidden) {
       const white = flash[i] > 0;
-      const body = getFrame(sheetId, frameName, fighter.facing === -1, white);
-      if (body !== null) {
-        const dx = Math.round(x - body.width / 2);
-        const dy = Math.round(y - body.height);
-        const outline = getOutline(sheetId, frameName, fighter.facing === -1, color);
-        if (outline !== null) ctx.drawImage(outline, dx - 1, dy - 1);
-        ctx.drawImage(body, dx, dy);
+      let drew = false;
+      if (sheetId !== '' && frameName !== '') {
+        // Sheets face right. Flip for a left-facing fighter, and flip again for
+        // an animation drawn mirrored (back-facing moves).
+        const flipped = (fighter.facing === -1) !== (i < animMirror.length && animMirror[i] === 1);
+        const body = getFrame(sheetId, frameName, flipped, white);
+        const anchor = body === null ? null : getFrameAnchor(sheetId, frameName, flipped);
+        if (body !== null && anchor !== null) {
+          const dx = Math.round(x - anchor.ax);
+          const dy = Math.round(y - anchor.ay);
+          ctx.drawImage(body, dx, dy);
+          drew = true;
+        }
       }
+      if (!drew) drawPlaceholder(ctx, fighter, x, y, color, white);
     }
 
     if (fighter.action === 'shield' || fighter.action === 'shieldStun') {

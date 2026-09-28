@@ -21,6 +21,10 @@ const VARIANT_COUNT = 4;
 
 interface FrameEntry {
   variants: (HTMLCanvasElement | null)[];
+  /** Anchor inside the frame, in frame pixels, for the unflipped frame. */
+  ax: number;
+  ay: number;
+  w: number;
   outlines: Map<string, (HTMLCanvasElement | null)[]>;
 }
 
@@ -131,7 +135,10 @@ function ignoreSet(colors: string[] | undefined): Set<number> | null {
   return out;
 }
 
-/** Solid for outline purposes: opaque, and not a colour the ring skips. */
+/**
+ * Solid for outline purposes: fully opaque (alpha 255), and not a colour the
+ * ring skips. Water in the crops is capped at alpha 254, so it never counts.
+ */
 function isSolid(
   pixels: Uint8ClampedArray<ArrayBuffer>,
   w: number,
@@ -142,7 +149,7 @@ function isSolid(
 ): boolean {
   if (x < 0 || x >= w || y < 0 || y >= h) return false;
   const i = (y * w + x) * 4;
-  if (pixels[i + 3] === 0) return false;
+  if (pixels[i + 3] !== 255) return false;
   if (ignore === null) return true;
   return !ignore.has(packRgb(pixels[i], pixels[i + 1], pixels[i + 2]));
 }
@@ -258,7 +265,12 @@ export async function bakeSheet(
   const frames = new Map<string, FrameEntry>();
   for (const frameName in sheet.frames) {
     const rect = sheet.frames[frameName];
-    const [x, y, w, h] = rect;
+    const x = rect[0];
+    const y = rect[1];
+    const w = rect[2];
+    const h = rect[3];
+    const ax = rect.length === 6 ? rect[4] : w / 2;
+    const ay = rect.length === 6 ? rect[5] : sheet.origin === 'center' ? h / 2 : h;
     if (w <= 0 || h <= 0) {
       throw new Error(`sprite frame "${frameName}" in sheet "${sheetId}" has an empty rect`);
     }
@@ -285,7 +297,7 @@ export async function bakeSheet(
         ]);
       }
     }
-    frames.set(frameName, { variants, outlines });
+    frames.set(frameName, { variants, outlines, ax, ay, w });
   }
   sheets.set(sheetId, frames);
 }
@@ -317,6 +329,29 @@ export function getOutline(
   const pair = entry.outlines.get(color);
   if (pair === undefined) return null;
   return pair[flipped ? 1 : 0];
+}
+
+/** Reused result of getFrameAnchor. Read it before the next call. */
+export interface FrameAnchor { ax: number; ay: number }
+const anchorOut: FrameAnchor = { ax: 0, ay: 0 };
+
+/**
+ * Anchor of a baked frame in frame pixels: the point drawn at the fighter's
+ * (or effect's) position. The flipped variant mirrors x to w - ax. Returns one
+ * shared object, overwritten on every call, so the draw path never allocates.
+ */
+export function getFrameAnchor(
+  sheetId: string,
+  frameName: string,
+  flipped: boolean
+): FrameAnchor | null {
+  const frames = sheets.get(sheetId);
+  if (frames === undefined) return null;
+  const entry = frames.get(frameName);
+  if (entry === undefined) return null;
+  anchorOut.ax = flipped ? entry.w - entry.ax : entry.ax;
+  anchorOut.ay = entry.ay;
+  return anchorOut;
 }
 
 /** Discard every baked canvas. Used when the renderer reloads its assets. */

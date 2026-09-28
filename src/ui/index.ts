@@ -1,30 +1,43 @@
 import type { ResultsData, UiCallbacks, UiController, UiDeps, UiScreen } from '../core/types';
 import { createDefaultMenuState, type MenuCtx } from './context';
+import { createPadNav } from './padnav';
 import { STYLE_CSS } from './styles';
-import { render as renderTitle } from './title';
-import { render as renderMode } from './mode';
-import { render as renderSelect } from './select';
-import { render as renderControls } from './controls';
-import { render as renderPause } from './pause';
-import { render as renderResults } from './results';
+import { THEME_CSS } from './theme';
+import { HUD_CSS } from './hud';
+import * as title from './title';
+import * as mode from './mode';
+import * as select from './select';
+import * as controls from './controls';
+import * as pause from './pause';
+import * as results from './results';
+import * as movelist from './movelist';
 
 type ScreenRenderer = (container: HTMLElement, ctx: MenuCtx) => void;
 
 const SCREEN_RENDERERS: Record<UiScreen, ScreenRenderer> = {
-  title: renderTitle,
-  mode: renderMode,
-  select: renderSelect,
-  controls: renderControls,
-  pause: renderPause,
-  results: renderResults,
+  title: title.render,
+  mode: mode.render,
+  select: select.render,
+  controls: controls.render,
+  pause: pause.render,
+  results: results.render,
+  movelist: movelist.render,
 };
+
+/** Screen modules may export a CSS string with their own rules. */
+const SCREEN_MODULES: object[] = [title, mode, select, controls, pause, results, movelist];
+
+function screenCss(mod: object): string {
+  const css = (mod as Record<string, unknown>).CSS;
+  return typeof css === 'string' ? css : '';
+}
 
 let styleInjected = false;
 
 function ensureStyles(): void {
   if (styleInjected) return;
   const styleEl = document.createElement('style');
-  styleEl.textContent = STYLE_CSS;
+  styleEl.textContent = THEME_CSS + STYLE_CSS + HUD_CSS + SCREEN_MODULES.map(screenCss).join('\n');
   document.head.appendChild(styleEl);
   styleInjected = true;
 }
@@ -40,6 +53,10 @@ export function createUi(root: HTMLElement, deps: UiDeps, callbacks: UiCallbacks
   function addListener(target: EventTarget, type: string, handler: EventListenerOrEventListenerObject): void {
     target.addEventListener(type, handler);
     cleanups.push(() => target.removeEventListener(type, handler));
+  }
+
+  function onCleanup(fn: () => void): void {
+    cleanups.push(fn);
   }
 
   function runCleanup(): void {
@@ -58,7 +75,14 @@ export function createUi(root: HTMLElement, deps: UiDeps, callbacks: UiCallbacks
     state: createDefaultMenuState(deps),
     results: null,
     addListener,
+    onCleanup,
   };
+
+  // UiController has no destroy path, so pad navigation runs for the app's lifetime.
+  createPadNav(
+    () => !root.hidden && currentScreen !== null,
+    () => deps.input.isCapturing()
+  );
 
   function show(screen: UiScreen, data?: ResultsData): void {
     runCleanup();

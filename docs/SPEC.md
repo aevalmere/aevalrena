@@ -16,7 +16,7 @@ Reference for feel and scope: bandit.rip (a browser Smash-like). We ship a clean
 In scope now:
 
 - Local multiplayer on one keyboard, 2 to 4 players (2 default). CPU fill-in for empty slots.
-- One character: **Aeval**, the Water Mage (reference art in `art/reference/`). Small body, big waves.
+- One character: **Aeval**, the Water Mage (reference art in `art/aeval/reference/aevalmere.png`). Small body, big waves.
 - One stage: **Tidegate**, a Battlefield-style layout (main platform, two side platforms, one top).
 - Full Smash move set: jab, 3 tilts, dash attack, 3 smashes (chargeable), 5 aerials, 4 specials, taunt.
 - Shield, spot dodge, roll, air dodge, ledge grab/hang/climb, double jump, fast fall, short hop.
@@ -198,15 +198,31 @@ export interface CharacterDef {
 
 // ---------------- Characters (render half) ----------------
 /**
- * Pixel sheet: each frame is an array of equal-length strings; each char indexes `palette`;
- * '.' is transparent. Origin is bottom-center of the frame.
+ * Sprite atlas. One packed PNG plus a frame table; `frames` maps a frame name
+ * to its [x, y, w, h] rect in atlas pixels. The atlas arrives as a data URL so
+ * no asset path is involved and a Pages deploy under a sub-path still works.
+ *
+ * `origin` says where a frame's rect anchors when drawn. Body frames are baked
+ * so the bottom row is the character's heel line and the horizontal middle is
+ * the body's middle; effect frames anchor at their middle in both axes.
  */
-export interface PixelSheet { palette: Record<string, string>; frames: Record<string, string[]> }
+export interface ImageSheetData {
+  url: string;
+  origin: 'bottom-center' | 'center';
+  frames: Record<string, [number, number, number, number]>;
+  /**
+   * Colours the player-colour outline ring skips, as '#rrggbb'. Aeval's attack
+   * frames have their water drawn into them; ringing every droplet in the
+   * player colour turns a clean sweep into confetti, so the ring traces the
+   * fighter and lets the water alone.
+   */
+  outlineIgnore?: string[];
+}
 export interface AnimDef { frames: string[]; fps: number; loop: boolean }
 export type AnimName = string;
 export interface CharacterSprites {
-  sheet: PixelSheet;                 // body frames
-  fx: PixelSheet;                    // projectiles and effect frames
+  sheet: ImageSheetData;              // body frames
+  fx: ImageSheetData;                 // projectiles and effect frames
   anims: Record<AnimName, AnimDef>;
   /** Map a sim action + move to an animation name. Must never return undefined. */
   animFor(action: ActionId, moveId: MoveId | null): AnimName;
@@ -469,45 +485,112 @@ order. Never use `Map` iteration where order could vary.
 
 ### 4.3 Action selection (the Smash decision table)
 
-Input buffer: a button press stays buffered for `INPUT_BUFFER` frames and is consumed by the first
-action that accepts it. Directions are read from `held`.
+Input buffer: a button press stays buffered for `TUNING.input.buffer` frames (6) and is consumed by
+the first action that accepts it. Directions are read from `held`. A direction pressed within
+`TUNING.input.smashTapWindow` frames (5) of Attack is a smash instead of a tilt, unless Walk is held:
+holding Walk always downgrades that flick to a tilt, whatever the timing, because a walking stick is
+tilted, not flicked. The C-stick and the smash/tilt shortcut keys (F and G modifiers, see Shortcuts
+below) reach the same moves with no timing at all, and are not gated by Walk.
 
-Ground, actionable (idle, walk, run, crouch, land after lag):
+Ground, actionable (idle, walk, run, dash, turn, crouch, land after lag):
 
-| Input | Result |
+| Input | Move |
 |---|---|
-| attack, no direction | jab |
-| attack, left/right held, dirTapAge > window | ftilt (faces that way first) |
-| attack, left/right tapped within window | fsmash (chargeable) |
-| attack, up held | utilt; up tapped within window: usmash |
-| attack, down held | dtilt; down tapped within window: dsmash |
-| attack during dash/run | dashatk |
-| special (+ direction) | nspecial / sspecial / uspecial / dspecial |
-| jump (or up if tapJump) | jumpsquat |
-| shield | shield |
-| shield + down | spotDodge |
-| shield + left/right | roll (direction) |
-| taunt | taunt |
+| Attack, no direction | jab |
+| Attack, left/right held while Walk is held, even on a fresh flick, or G&J | ftilt (faces that way) |
+| Attack, left/right within the smash tap window while Walk is not held (a flick, even out of a dash), C-stick left/right, or F&J | fsmash (chargeable) |
+| Attack, Up held | utilt (Up alone jumps; Walk suppresses tap jump so this is reachable on keyboard) |
+| Attack, Up within the smash tap window while Walk is not held, C-stick up, F&W, jump-cancelled from jumpsquat, or out of shield | usmash (chargeable) |
+| Attack, Down held, or G&S | dtilt |
+| Attack, Down within the smash tap window while Walk is not held, C-stick down, or F&S | dsmash (chargeable) |
+| Attack while dashing or running | dash attack |
+| Special, no direction | nspecial |
+| Special + a side | sspecial (faces that way) |
+| Special + Up, jump-cancelled from jumpsquat, or out of shield | uspecial (`helplessAfter` in the air) |
+| Special + Down | dspecial |
+| Grab, or Shield + Attack out of shield (unless Up is held or the tap reads as a vertical smash) | grab |
+| Jump, or Up when tap jump is on and Walk is not held | jumpsquat |
+| Shield | shield |
+| Double-tap left/right, or Dodge + a held direction | roll (toward that direction) |
+| Double-tap Down, or Dodge with no direction held | spot dodge |
+| Taunt, or Taunt + a side/Down | taunt / taunt2 / taunt3 |
 
 Air, actionable (air with no hitstun, not helpless):
 
-| Input | Result |
+| Input | Move |
 |---|---|
-| attack, no direction | nair |
-| attack, forward (facing dir) | fair |
-| attack, backward | bair |
-| attack, up | uair |
-| attack, down | dair |
-| special (+ direction) | specials. uspecial sets `helplessAfter` |
-| jump | double jump if jumpsLeft > 0 |
-| shield | airDodge |
-| down (while falling) | fast fall |
+| Attack, no direction, or C-stick with none | nair |
+| Attack toward the held facing direction, C-stick the same side, or the ftilt/fsmash/dashatk shortcut key held toward facing | fair |
+| Attack away from facing, C-stick the opposite side, or that same shortcut key held away from facing | bair |
+| Attack up, C-stick up, or the utilt/usmash shortcut key | uair |
+| Attack down, C-stick down, or the dtilt/dsmash shortcut key | dair |
+| Special (+ direction) | specials, same as on the ground |
+| Jump | double jump if `jumpsLeft > 0` |
+| Shield, or Dodge | air dodge toward the held direction |
+| Down while falling | fast fall |
 
-Smash charge: if `chargeable` and attack is still held on the frame the move would start, hold at
-frame 0 for up to `SMASH_CHARGE_MAX` frames. Damage scales by `1 + SMASH_CHARGE_BONUS * charge/max`.
+Smash charge: a `chargeable` move holds at frame 0 for up to `chargeMax` frames (60) while its charge
+button is held down. That button is Special for a move whose `chargeButton` is `'special'`; otherwise
+it depends on how the smash started. A smash started with Attack held (a flick, or a jump-cancelled /
+out-of-shield smash) charges on Attack. A smash started without Attack down at all — the F&W up
+smash, the F&S down smash, or the C-stick — has no Attack key in its input, so it charges instead on
+its own direction: Up for up smash, Down for down smash, the facing side (or the matching C-stick
+direction) for forward smash. Damage scales by `1 + chargeBonus * charge/max` (chargeBonus 0.4).
 
 Moves end at `totalFrames`, or earlier at `iasa` if a new action is requested. Aerials that reach the
-ground apply `landingLag`.
+ground apply `landingLag`. A shortcut move (its own key or a chord) that lands within
+`SHORTCUT_REPLACE_FRAMES` frames (3) of a button-started attack replaces that attack, so a chord
+pressed "together", in either order, still comes out as the chord's move.
+
+#### Grab, pummel, throws
+
+The Grab button grabs on the ground only. Out of shield, Attack grabs unless Up is held or the tap
+reads as a vertical smash, in which case it is an up smash instead. Attack while holding pummels. A
+throw direction still held after the grab's hold-frame delay picks that throw (fthrow, bthrow,
+uthrow, dthrow); bthrow turns the holder to face the other way first.
+
+#### Shield
+
+Shield only shields on the ground (`stepShield`). A Shield press in the air air dodges toward the
+held direction instead, the same as the Dodge button would. Out of shield, only Jump (jumps), Grab
+(grabs), Attack without Up or a vertical smash tap (grabs), Attack with Up or a vertical smash tap
+(usmash), Special with Up (uspecial), C-stick up (usmash), a direct usmash/uspecial key, and the
+double-tap roll/spot-dodge or the Dodge button (roll or spot dodge) come out; every other attack,
+special, C-stick direction, direct-move key, or taunt is dropped and shield HP keeps decaying.
+
+#### Dodges
+
+A double-tap of Left or Right on the ground rolls; a double-tap of Down spot dodges (the first tap of
+either never dodges by itself). The Dodge button rolls toward a held direction, spot dodges with
+none held, and air dodges toward the held direction in the air. Shield in the air also air dodges
+toward the held direction; Shield on the ground never rolls or spot dodges. A roll is `ROLL.total`
+frames long (24), dodges (`highDodge`) on frames `ROLL.invStart` to `ROLL.invEnd` (3 to 16), and
+covers `ROLL.distance` px (60). A roll's dodge does not stop a low hit: dtilt, dsmash, any hit
+centered within `LOW_HIT_HEIGHT` px (14) above the victim's feet from a grounded attacker, or a
+projectile flagged `low`, all still connect. In tumble, Shield is only a tech press (it does not end
+tumble or dodge by itself); Dodge (or the `airDodge` / `dirAirDodge` commands) air dodges out of
+tumble while airborne.
+
+#### Shortcuts
+
+A chord is two or more `KeyboardEvent.code`s (or pad codes) joined by `&` in a binding, e.g.
+`'KeyF&KeyJ'` ('&' is the separator because pad axis codes already use '+'). A chord is down while
+every member code is down, and it fires (counts as pressed) on the sample it becomes down, whichever
+member key was the last one pressed, so it fires the same whichever order the keys go down in. The
+plain presses of its member codes are suppressed on that sample, so bindings that share those codes
+do not also fire (the codes still count as held). A shortcut (its own key or a chord) that arrives
+within `SHORTCUT_REPLACE_FRAMES` frames of a button-started attack replaces it. Only the up smash and up special shortcuts, plus Up + Attack, Up + Special, or C-stick up, cancel a
+jumpsquat into their grounded move; this is the only jump-cancel Smash has. Any other shortcut
+pressed during jumpsquat stays buffered and comes out once airborne as its aerial (a forward shortcut
+becomes a fair, or a bair with back held).
+
+#### Tap jump
+
+Up jumps by default. A Jump key that is also bound to Up, and stick tap jump
+(`PlayerControls.tapJump`), are both suppressed while the Walk bit is held, so Walk + Up + Attack
+reaches up tilt on keyboard instead of jumping. On a gamepad, a stick tilted up but short of the walk
+threshold (`TUNING.input.walkAxis`) does not tap jump either, so a pad player can hold a gentle
+upward tilt and press Attack for an up tilt instead; only a full push up jumps.
 
 ### 4.4 Hit resolution
 
@@ -560,6 +643,20 @@ moment of respawn. 0 stocks = out. Last fighter with stocks wins. Time limit opt
 jump when opponent is above, recover with double jump and up special when off stage, shield or dodge
 sometimes when an opponent starts an attack (level 3 only), never walk off the stage on purpose.
 Use `state.rng` through a passed-in function, never `Math.random`. Keep it under 250 lines.
+
+#### CPU level 0
+
+Level 0 is a training dummy, not a difficulty: `cpuInput` hands it straight to `dummyInput` before
+any `CpuProfile` is looked up. It never presses Attack, Special, Grab, Shield, Dodge, Taunt, the
+C-stick, or Down. With the match rule `cpuZeroMoves` off (the Mode screen's "Lv 0 CPU" row reads
+"Stands still") it presses nothing at all, including while downed, so a knocked-down dummy lies there
+until the knockdown timer runs out on its own. With the rule on ("Wanders") it walks, runs, and jumps
+at random, turns back before walking off a ledge, and while off-stage drifts back toward the middle
+and spends a jump on the way down to recover; if it gets knocked down it presses Jump every
+`WANDER_JUMP_CD` frames to stand back up instead of lying there for the full knockdown timer. The
+`cpuZeroMoves` choice itself carries into a rematch (`rematch()` in `main.ts` copies it into the next
+`MatchConfig`), so Wanders stays chosen without returning to Mode Select. It uses `rand()` (backed by
+`state.rng`) for every choice, so it still replays deterministically for a given seed.
 
 ---
 
@@ -637,38 +734,32 @@ Palette base (from the reference art): `#1a1b26 #2b2d42 #6e7a94 #9aa5b8 #c9d1e0 
 
 ## 7. Aeval sprites (art worker)
 
-The reference sheet is `art/reference/aeval-ref.png`: gray-blue messy hair with a dark hairband and
-one antenna strand, blue eyes, pale skin, dark navy coat with white trim, white scarf, black
-trousers, gray boots, blue water orb in the right hand. Chibi proportions: head is about 45% of the
-height.
+The character art is being rebuilt from the ground up (2026-09-14: every old
+frame, preview and atlas was deleted; fighters draw as placeholder boxes until
+the new atlases are packed). The prompt the art agent follows is
+`art/aeval/PROMPT.md`; the frozen animation manifest (names, frame counts,
+per-frame holds, loop flags, hit circles) is `art/aeval/anims.json`. Read
+those; do not duplicate them here. One approval gate: the owner approves the
+character design (idle) before anything else is drawn.
 
-Sprite frame size: 32 wide x 40 tall (feet at bottom-center). Draw every frame facing right; the
-renderer flips for left. Palette keys: `h` hair light `#9aa5b8`, `H` hair shade `#6e7a94`, `b` hairband
-`#5a2e3e`, `s` skin `#f0ead6`, `e` eye `#5b7fbf`, `c` coat `#2b2d42`, `C` coat shade `#1a1b26`, `w`
-white trim/scarf `#c9d1e0`, `t` trousers `#1a1b26`, `g` boots `#6e7a94`, `o` outline `#0e0f17`, `a`
-water `#7fb2ff`, `A` water bright `#b8e3ff`.
+Summary of the contract (details and the animation table live in the prompt
+and the manifest):
 
-Required animations (names are the contract with the renderer; `animFor` maps sim actions to these):
+- Reference sheet: `art/aeval/reference/aevalmere.png` (the "Water Mage" sheet).
+- Engine: the claude-code-sprite-maker plugin, driven through `tools/spritemaker/sm.mjs`.
+- Frames are crops from the four generated sheets in `art/aeval/sheets`, cut by `tools/sheetcut/cut.py` (per-crop heel anchor in `crops/manifest.json`).
+- `tools/sheetcut/pack.py` packs them into the body and fx atlases plus `anims.ts` in `src/characters/aeval/art/` (generated, do not edit).
+- Which crops, holds, loop and mirror flags make each animation is mapped by `art/aeval/sheetmap.json` (lead-owned).
+- The locked palette is `art/aeval/palette.json`. Water keys are the only
+  colours the player outline ring skips (`outlineIgnore`).
+- Attack water is drawn into the body frame (the sweep is the frame); only
+  water that travels or outlives the move is on the effect sheet.
+- Animation names are the contract with the renderer through `animFor`; the
+  full list, frame counts and holds are in the brief.
 
-```
-idle(3f, 6fps loop)  walk(4f, 10fps loop)  run(4f, 14fps loop)  turn(1f)  crouch(1f)
-jumpsquat(1f)  jump(1f)  fall(1f)  land(1f)  helpless(1f)
-jab(2f)  ftilt(2f)  utilt(2f)  dtilt(2f)  dashatk(2f)
-fsmash(3f: charge, swing, follow)  usmash(3f)  dsmash(3f)
-nair(2f)  fair(2f)  bair(2f)  uair(2f)  dair(2f)
-nspecial(2f)  sspecial(2f)  uspecial(2f)  dspecial(2f)
-shield(1f, renderer draws the bubble)  spotDodge(1f)  roll(2f)  airDodge(1f)
-hitLight(1f)  hitStrong(1f)  tumble(2f, 8fps loop)  ledgeHang(1f)  ledgeClimb(2f)
-taunt(2f, 4fps loop)  dead(1f)
-```
-
-Reuse frames where the pose is the same (a `walk` frame can serve as `ledgeClimb`). Fewer, better
-frames beat many bad ones. Effect sheet (`fx`) frames: `orb` (3f, 12x12), `crescent` (2f, 36x20),
-`geyser` (3f, 24x48), `whirl` (3f, 40x24), `splash` (3f, 16x12), `hitspark` (3f, 12x12),
-`dust` (3f, 12x6), `ko` (4f, 32x32).
-
-Anti-slop rules for pixel art: hard outlines in `o` on the body, no anti-aliasing, no gradients,
-readable silhouette at 1x, water effects use only `a` and `A` plus outline.
+Anti-slop rules: hard 1 px ink outline on the body, no anti-aliasing, no
+gradients, readable silhouette at 1x, chibi proportions with the hair cloud as
+the primary read.
 
 ---
 
@@ -679,7 +770,7 @@ readable silhouette at 1x, water effects use only `a` and `A` plus outline.
 - Camera: frames all live fighters plus 60 px margin, zoom between 1.0 and 1.8, position and zoom
   smoothed with a 0.12 lerp per render frame, clamped to `stage.cameraBounds`. Round the final
   translate to whole screen pixels.
-- Sprite baking: at load, every `PixelSheet` frame becomes an offscreen canvas; a flipped copy for
+- Sprite baking: at load, every `atlas` frame becomes an offscreen canvas; a flipped copy for
   facing left. Drawing a fighter is one `drawImage`.
 - Interpolation: `render(state, prevState, alpha)` lerps fighter and projectile positions between
   the previous and current sim frames for smooth motion at any refresh rate. Only positions
@@ -689,10 +780,11 @@ readable silhouette at 1x, water effects use only `a` and `A` plus outline.
 - Particles: fixed pool of 512, structs of arrays (Float32Array x, y, vx, vy, life, type). Spawned
   from `SimEvent`s: hit sparks, KO burst, landing dust, dash dust, water droplets on specials.
 - Screen shake on hit and KO, decays over 12 frames, max 4 px, never during menus.
-- HUD (bottom): one card per player: portrait (idle frame 0), percent in a chunky pixel font that
-  tints from white to yellow to red with percent and scales up briefly when it changes, stock icons.
-  Player colors: P1 `#7fb2ff`, P2 `#ff7f7f`, P3 `#ffd27f`, P4 `#9fff7f`. Fighters get a 1 px
-  outline tint in their player color so identical characters are distinguishable.
+- HUD: the renderer no longer draws one. The in-match HUD is a DOM layer built by `src/ui/hud.ts`
+  (`createHud(host, deps)`) in the `#hud` host, which `main.ts` keeps sized to the canvas box on
+  every resize. Its look and card layout are fixed by `docs/UI_STYLE.md` section 5, the UI
+  contract. Player colors: P1 `#7fb2ff`, P2 `#ff7f7f`, P3 `#ffd27f`, P4 `#9fff7f`. Fighters get a
+  1 px outline tint in their player color so identical characters are distinguishable.
 - Debug overlay (toggle keys handled by main): F1 hitboxes (red circles) and hurtboxes (yellow
   boxes) and ledge boxes, F2 action name, actionFrame, percent, vx/vy per fighter, F3 sim ms, render
   ms, fps.
@@ -711,16 +803,23 @@ fighters and 200 particles. No `ctx.filter`, no `shadowBlur`, no per-frame `getI
 - `InputMapper`: per player, maps the held key set to an `InputFrame` (held, pressed, released)
   once per sim frame. Pressed/released are computed against the previous sim frame, not per event,
   so a key tapped between frames still counts (latch presses until sampled).
-- `ControlsStore`: load and save `ControlsConfig` to localStorage key `aevalrena.controls.v1`.
-  Defaults:
+- `ControlsStore`: load and save `ControlsConfig` to localStorage key `aevalrena.controls.v3` (see
+  `src/input/defaults.ts` for the full per-action tables, including chords and direct-move keys).
+  Saves under the earlier `v1` or `v2` keys are ignored, not migrated, and left untouched in storage.
+  Every keyboard player has a Walk key, so every player can reach forward tilt and up tilt; only P1
+  also has the F/G smash/tilt chords. Defaults:
 
 ```
-P1: left KeyA, right KeyD, up KeyW, down KeyS, jump Space, attack KeyJ, special KeyK,
-    shield KeyL, taunt KeyT, start Escape, tapJump false
-P2: left ArrowLeft, right ArrowRight, up ArrowUp, down ArrowDown, jump ShiftRight,
-    attack Comma, special Period, shield Slash, taunt Quote, start Enter, tapJump false
-P3: left KeyF, right KeyH, up KeyT... (pick non-conflicting keys; P3/P4 defaults may overlap
-    P1/P2 keys only if the doc says so; prefer numpad for P4)
+P1: left KeyA, right KeyD, up/jump KeyW, jump also Space, down KeyS, walk ShiftLeft, attack KeyJ,
+    special KeyK, shield KeyL, grab Semicolon, dodge KeyE, taunt KeyT, start Escape, tapJump true
+P2: left ArrowLeft, right ArrowRight, up ArrowUp, down ArrowDown, walk ShiftRight,
+    jump ArrowUp and ControlRight, attack Comma, special Period, shield Slash, grab Quote,
+    taunt BracketRight, start Enter, tapJump true
+P3: left/right/up/down Numpad4/Numpad6/Numpad8/Numpad5, walk Numpad2, jump Numpad0,
+    attack Numpad7, special Numpad9, shield NumpadAdd, grab Numpad1, dodge Numpad3,
+    taunt NumpadDecimal, start NumpadEnter, tapJump true
+P4: left KeyB, right KeyM, up KeyH, down KeyN, walk KeyX, jump KeyH and KeyR, attack KeyY,
+    special KeyU, shield KeyI, grab KeyV, dodge KeyC, taunt KeyO, start KeyP, tapJump true
 ```
 
 - `LocalSession implements SessionAdapter`: `inputsForFrame(frame)` samples every mapper and
@@ -734,23 +833,16 @@ P3: left KeyF, right KeyH, up KeyT... (pick non-conflicting keys; P3/P4 defaults
 
 ## 10. UI (ui worker)
 
-DOM overlay above the canvas, pixel-art styled (chunky borders, the palette in section 6, a pixel
-web font is allowed here: use a system monospace fallback stack, no external font CDN dependency at
-runtime). Screens:
-
-1. Title: logo text AEVALRENA, "press any key". Small version string.
-2. Mode select: Local (enabled), LAN (disabled, label "soon"), Online (disabled, label "soon"),
-   Controls, and a Stocks selector (1 to 5, default 3).
-3. Character select: 4 slots. Each slot toggles Off / Human / CPU (level 1-3). Only Aeval exists;
-   the grid is built from the registry so more characters appear automatically. Each human slot
-   shows its attack and jump keys. Start needs at least 2 active slots.
-4. Controls: per player table of action -> key, click a cell then press a key to rebind, conflict
-   cells highlighted, tap-jump toggle, reset to defaults, back.
-5. Pause (Escape or Enter during a match): resume, controls, quit to title.
-6. Results: winner, per player stocks left and percent, rematch, back to character select.
-
-The UI worker exports a small `UiController` with methods `show(screen, data)`, `hide()`, and
-callbacks (`onStartMatch(config)`, `onQuit()`, `onResume()`). It never touches the sim.
+`docs/UI_STYLE.md` is the UI contract; every screen follows it and this section only points there.
+The UI is a DOM overlay (`#ui`) above the canvas with thin chamfered frames, uppercase mono labels
+and serif display type, recolored per player through `--accent`. Screens: title, mode select,
+character select, controls, pause, the `movelist` screen (reached from pause or mode select), and
+split-screen results with one column per player. The in-match HUD is DOM too, in `src/ui/hud.ts`
+over the canvas (section 8). Fonts are bundled woff2 files under `public/fonts` (no CDN at
+runtime). Image assets live under `public/ui` and are cut from the owner references in
+`art/ui/ref` by `tools/uicut/cut.py`; the bust and stock icons under `public/icons` come from
+`tools/uicut/portrait.py`. The UI exports `UiController` (`show(screen, data)`, `hide()`, and the
+`onStartMatch`, `onQuit`, `onResume` callbacks) and never touches the sim.
 
 ---
 
@@ -764,7 +856,10 @@ steps, then `render(alpha)`. Uses `performance.now()`. Pauses when the tab is hi
 match start: build `MatchConfig`, `createGameState`, `LocalSession`, register CPU providers, start
 loop. Each step: `inputs = session.inputsForFrame(frame)`, if null skip (stall), else `stepGame`.
 Keep `prevState` by copying fighter and projectile positions only (not a deep clone) for
-interpolation. Debug keys F1/F2/F3. Pause toggles the loop.
+interpolation. Debug keys F1/F2/F3. Pause toggles the loop. In a CPU-only match no slot can ever
+press Start, so `main.ts` pauses instead from a raw `keydown` listener matching player 1's Start
+binding directly; when that binding is a chord, the match pauses on the chord's last key rather than
+needing every member key held down together.
 
 ---
 
@@ -805,3 +900,39 @@ interpolation. Debug keys F1/F2/F3. Pause toggles the loop.
    via a small relay. The `SessionAdapter` seam is where it plugs in.
 5. Second character and stage using the registries.
 6. Sound through `SimEvent`.
+
+---
+
+## 15. Pending animations
+
+The full animation overhaul is underway (see `art/aeval/PROMPT.md` and `art/aeval/anims.json`).
+Until the new atlases land, `src/characters/aeval/sprites.ts` exposes empty sheets and the renderer
+draws every fighter as a placeholder box. The table is the list the new art must cover; the manifest
+names for each row are in `anims.json` (throws are `throwF/B/U/D`, Final Smash phases are
+`fsStart/fsTsunami/fsTornado/fsLaunch/fsVictim`).
+
+| Action or move | Reuses now | Real anim should show |
+|---|---|---|
+| `tech` | `roll` | Aeval slaps the ground on landing and pops back up in place. |
+| `techRoll` | `roll` | A quick roll along the ground out of the landing. |
+| `downed` | `tumble` | Lying flat on the ground, face up. |
+| `getUp` | `ledgeClimb` | Pushing up from lying flat to standing. |
+| `getUpRoll` | `roll` | Rolling sideways from lying flat to a crouch. |
+| `footstooled` | `hitLight` | Knocked flat or squashed down by a foot on the head. |
+| `grab` | `jab` | Reaching forward with one hand, a water tendril at the fingertips. |
+| `grabHold` | `idle` | Holding the victim at arm's length in a water grip. |
+| `pummel` | `jab` | A short knee or water squeeze on the held victim. |
+| `throw` | `ftilt` | One pose per throw: fling forward, turn and fling back, heave up, slam down. |
+| `grabbed` | `hitLight` | Struggling in the grip, limbs flailing. |
+| `taunt2` | `taunt` | A second taunt: spinning a small water orb on one finger. |
+| `taunt3` | `taunt` | A third taunt: a crouched pose with water pooling around the boots. |
+| `ledgeatk` | `ftilt` | Climbing onto the stage with a low water sweep. |
+| `getupatk` | `ftilt` | Sweeping water to both sides while rising from the ground. |
+| `finalSmash` startup (frames 0 to 20) | `nspecial` | Aeval raises both hands and a water grip lunges out to catch. |
+| `finalSmash` tsunami (frames 20 to 80) | `nspecial` | A wave rises under the victim and carries them forward and up. |
+| `finalSmash` tornado (frames 80 to 150) | `nspecial` | A water tornado spirals the victim higher. |
+| `finalSmash` launch (frame 152) | `nspecial` | Aeval swings both arms up and the tornado bursts, launching the victim. |
+| `finalSmashVictim` | `tumble` | Tumbling helpless inside the water, carried along the path. |
+
+The sim sends a `finalSmash` event with phase `start`, then `tsunami`, `tornado`, then `launch`, so the
+renderer can switch frames and effects on those events.

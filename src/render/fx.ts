@@ -1,15 +1,16 @@
 import { CHARACTER_DEFS } from '../characters/registry';
 import { TUNING } from '../core/constants';
-import { SIM_HZ } from '../core/types';
+import { MAX_PLAYERS, SIM_HZ } from '../core/types';
 import type { FighterState, GameState, ProjectileDef } from '../core/types';
-import { getFrame } from './bake';
+import { getFrame, getFrameAnchor } from './bake';
 import { GLOW, PALE, WHITE } from './colors';
 import type { CharVisual } from './visuals';
 import { getCharVisual, getProjectileVisual } from './visuals';
 
 /**
- * Effect-sheet drawing: the up-special geyser and down-special whirl anchored
- * on the fighter, hit sparks from a small fixed pool, and projectiles.
+ * Effect-sheet drawing: the up-special geyser left standing at the takeoff
+ * point, the down-special whirl anchored on the fighter, hit sparks from a
+ * small fixed pool, and projectiles.
  */
 
 const SPARK_POOL = 24;
@@ -111,15 +112,19 @@ function drawCentered(
 ): boolean {
   const canvas = getFrame(sheetId, frameName, flipped, false);
   if (canvas === null) return false;
+  // The frame's own anchor when it has one (the sheet default is the middle).
+  const anchor = getFrameAnchor(sheetId, frameName, flipped);
+  const ax = anchor === null ? canvas.width / 2 : anchor.ax;
+  const ay = anchor === null ? canvas.height / 2 : anchor.ay;
   if (scale === 1) {
-    ctx.drawImage(canvas, Math.round(x - canvas.width / 2), Math.round(y - canvas.height / 2));
+    ctx.drawImage(canvas, Math.round(x - ax), Math.round(y - ay));
     return true;
   }
   // Whole-pixel destination size with smoothing off, so a charged sprite grows
   // in hard pixels rather than blurring.
   const w = Math.max(1, Math.round(canvas.width * scale));
   const h = Math.max(1, Math.round(canvas.height * scale));
-  ctx.drawImage(canvas, Math.round(x - w / 2), Math.round(y - h / 2), w, h);
+  ctx.drawImage(canvas, Math.round(x - ax * scale), Math.round(y - ay * scale), w, h);
   return true;
 }
 
@@ -129,6 +134,7 @@ export function drawSparks(ctx: CanvasRenderingContext2D, pool: SparkPool): void
     const visual = pool.source[i];
     if (visual === null) continue;
     const frames = visual.hitspark;
+    if (frames.length === 0) continue;
     let idx = Math.floor((pool.age[i] * SPARK_FPS) / SIM_HZ);
     if (idx >= frames.length) idx = frames.length - 1;
     if (idx < 0) idx = 0;
@@ -225,14 +231,106 @@ function drawChargeRing(
   }
 }
 
-/** Geyser and whirl follow the fighter for the duration of the special. */
+/**
+ * Render-side geyser slots, one per fighter. While uspecial is before its
+ * launch frame the slot tracks the fighter's heel; on the launch frame that
+ * point is frozen and the column plays out there on its own clock (sim frames
+ * since launch), even if the fighter leaves uspecial. Never written to the sim.
+ */
+const geyArmed = new Uint8Array(MAX_PLAYERS);    // in uspecial, before launch
+const geyLive = new Uint8Array(MAX_PLAYERS);     // a latched column is playing
+const geyX = new Float32Array(MAX_PLAYERS);
+const geyY = new Float32Array(MAX_PLAYERS);
+const geyFacing = new Int8Array(MAX_PLAYERS);
+const geyStart = new Float64Array(MAX_PLAYERS);  // state.frame of the launch
+const geyVisual: (CharVisual | null)[] = new Array(MAX_PLAYERS).fill(null);
+
+function updateGeyser(
+  i: number,
+  fighter: FighterState,
+  visual: CharVisual | null,
+  frame: number,
+  x: number,
+  y: number
+): void {
+  const launch = visual === null ? -1 : visual.geyserLaunch;
+  if (launch < 0 || fighter.action !== 'attack' || fighter.moveId !== 'uspecial') {
+    geyArmed[i] = 0;
+    return;
+  }
+  if (fighter.actionFrame < launch) {
+    // Track the takeoff heel until the launch frame.
+    geyArmed[i] = 1;
+    geyX[i] = x;
+    geyY[i] = y;
+    geyFacing[i] = fighter.facing;
+    return;
+  }
+  if (geyArmed[i] === 0) return;
+  // Launch: freeze the last pre-launch heel point and start the column.
+  geyArmed[i] = 0;
+  geyLive[i] = 1;
+  geyStart[i] = frame - (fighter.actionFrame - launch);
+  geyVisual[i] = visual;
+}
+
+function drawGeyser(ctx: CanvasRenderingContext2D, i: number, frame: number): void {
+  if (geyLive[i] === 0) return;
+  const visual = geyVisual[i];
+  const age = frame - geyStart[i];
+  if (visual === null || age < 0) {
+    geyLive[i] = 0;
+    return;
+  }
+  let t = age;
+  let k = 0;
+  const holds = visual.geyserHolds;
+  while (k < holds.length && t >= holds[k]) {
+    t -= holds[k];
+    k++;
+  }
+  if (k >= holds.length || k >= visual.geyser.length) {
+    geyLive[i] = 0;
+    geyVisual[i] = null;
+    return;
+  }
+  drawCentered(ctx, visual.fxSheetId, visual.geyser[k], geyX[i], geyY[i], geyFacing[i] === -1, 1);
+}
+
+/**
+ * The latched up-special geysers. Drawn before the fighters, so the column
+ * stands behind the body rising out of it. The geyser stays where the fighter
+ * took off (see updateGeyser).
+ */
+export function drawGeysers(
+  ctx: CanvasRenderingContext2D,
+  state: GameState,
+  posX: Float32Array,
+  posY: Float32Array
+): void {
+  const count = Math.min(state.fighters.length, posX.length, MAX_PLAYERS);
+  for (let i = count; i < MAX_PLAYERS; i++) {
+    geyArmed[i] = 0;
+    geyLive[i] = 0;
+  }
+  for (let i = 0; i < count; i++) {
+    const fighter = state.fighters[i];
+    updateGeyser(i, fighter, getCharVisual(fighter.charId), state.frame, posX[i], posY[i]);
+    drawGeyser(ctx, i, state.frame);
+  }
+}
+
+/**
+ * Effects drawn over the fighters: the charge ring and the whirl, which
+ * follows the fighter for the duration of dspecial.
+ */
 export function drawFighterFx(
   ctx: CanvasRenderingContext2D,
   state: GameState,
   posX: Float32Array,
   posY: Float32Array
 ): void {
-  const count = Math.min(state.fighters.length, posX.length);
+  const count = Math.min(state.fighters.length, posX.length, MAX_PLAYERS);
   for (let i = 0; i < count; i++) {
     const fighter = state.fighters[i];
     if (fighter.charging) {
@@ -248,16 +346,12 @@ export function drawFighterFx(
         fighter.facing
       );
     }
-    if (fighter.action !== 'attack') continue;
-    if (fighter.moveId !== 'uspecial' && fighter.moveId !== 'dspecial') continue;
+    if (fighter.action !== 'attack' || fighter.moveId !== 'dspecial') continue;
     const visual = getCharVisual(fighter.charId);
     if (visual === null) continue;
 
-    // The geyser is a one-shot rise, so it clamps; the whirlpool keeps cycling
-    // for the whole of dspecial instead of freezing on its last frame.
-    const isGeyser = fighter.moveId === 'uspecial';
-    const frames = isGeyser ? visual.geyser : visual.whirl;
-    const name = frameForAction(frames, fighter.actionFrame, 12, !isGeyser);
+    // The whirlpool keeps cycling for the whole of dspecial.
+    const name = frameForAction(visual.whirl, fighter.actionFrame, 12, true);
     if (name === null) continue;
 
     const canvas = getFrame(visual.fxSheetId, name, fighter.facing === -1, false);

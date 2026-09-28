@@ -1,22 +1,30 @@
 import { TUNING } from '../core/constants';
 import type { ActionId, CharacterDef, GameState, Rect, StageDef } from '../core/types';
-import { AIR_DODGE_LAND_LAG, HELPLESS_LAND_LAG, LAND_LAG, TUMBLE_GETUP } from './actions';
+import { AIR_DODGE_LAND_LAG, HELPLESS_LAND_LAG, LAND_LAG } from './actions';
 import { heldDir } from './input';
 import { isLedgeAction, tryLedgeGrab } from './ledge';
 import { koFighter } from './match';
+import { isGrabAction } from './grab';
 import { fighterHurtbox, setAction, stageOf, type SimFighter } from './state';
+import { landTumble } from './tech';
 
 const BOX: Rect = { x: 0, y: 0, w: 0, h: 0 };
+
+/** Grabbing, holding, pummelling or throwing: held directions never move these. */
+function isGrabberAction(action: ActionId): boolean {
+  return action === 'grab' || action === 'grabHold' || action === 'pummel' || action === 'throw';
+}
 
 function usesGroundFriction(action: ActionId): boolean {
   return action === 'idle' || action === 'crouch' || action === 'turn' || action === 'land'
     || action === 'attack' || action === 'shield' || action === 'shieldStun'
-    || action === 'shieldBreak' || action === 'spotDodge';
+    || action === 'shieldBreak' || action === 'spotDodge' || isGrabberAction(action)
+    || action === 'tech' || action === 'downed' || action === 'getUp' || action === 'footstooled';
 }
 
 function keepsActionOffLedge(action: ActionId): boolean {
   return action === 'attack' || action === 'hitstun' || action === 'tumble'
-    || action === 'spotDodge' || action === 'roll';
+    || action === 'spotDodge' || action === 'roll' || isGrabberAction(action);
 }
 
 function applyFriction(f: SimFighter, def: CharacterDef): void {
@@ -26,7 +34,8 @@ function applyFriction(f: SimFighter, def: CharacterDef): void {
 
 function airDrift(f: SimFighter, def: CharacterDef): void {
   if (f.action === 'airDodge') return;
-  const dir = heldDir(f);
+  // A footstooled fighter cannot act, and drifting is acting.
+  const dir = isGrabberAction(f.action) || f.action === 'footstooled' ? 0 : heldDir(f);
   if (dir === 0) {
     if (f.vx > 0) f.vx = Math.max(0, f.vx - def.airFriction);
     else if (f.vx < 0) f.vx = Math.min(0, f.vx + def.airFriction);
@@ -60,6 +69,8 @@ function landOn(state: GameState, f: SimFighter, def: CharacterDef, top: number,
   f.ledge = -1;
   state.events.push({ type: 'land', x: f.x, y: f.y, slot: f.slot, hard: impactVy >= def.fastFall });
 
+  // Techs and knockdowns own every tumble landing and teched hitstun landings.
+  if (landTumble(state, f)) return;
   if (f.action === 'hitstun') {
     f.kbDirY = 0;
     f.kbFall = 0;
@@ -67,17 +78,16 @@ function landOn(state: GameState, f: SimFighter, def: CharacterDef, top: number,
   }
   f.kbSpeed = 0;
   f.kbFall = 0;
+  // A grab in progress survives touching down; landing lag would break the hold.
+  if (isGrabAction(f.action)) return;
+  // A footstooled fighter stays stunned through the landing; stepFootstooled ends it on its own timer.
+  if (f.action === 'footstooled') return;
   if (f.action === 'attack') {
     if (f.moveId === null) return;
     const mv = def.moves[f.moveId];
     if (mv.landingLag === undefined) return;
     setAction(f, 'land');
     f.stateTimer = mv.landingLag;
-    return;
-  }
-  if (f.action === 'tumble') {
-    setAction(f, 'land');
-    f.stateTimer = TUMBLE_GETUP;
     return;
   }
   if (f.action === 'airDodge') {
@@ -159,12 +169,30 @@ function checkBlast(state: GameState, f: SimFighter, stage: StageDef): void {
 export function stepPhysics(state: GameState, f: SimFighter, def: CharacterDef): void {
   if (f.action === 'dead' || f.action === 'respawn' || isLedgeAction(f.action)) return;
   const stage = stageOf(state);
+  // A grabbed fighter hangs in the holder's hand; syncGrabbed places it every frame.
+  if (f.action === 'grabbed') {
+    checkBlast(state, f, stage);
+    return;
+  }
+  // A Final Smash attacker hangs where it started and its victim rides syncFinalSmash's
+  // path: no gravity, no integration, no platforms. Only the blast zone still applies.
+  if (f.action === 'finalSmash' || f.action === 'finalSmashVictim') {
+    checkBlast(state, f, stage);
+    return;
+  }
 
   // Launch speed decays only while hitstun lasts. A tumbling fighter is out of
   // hitstun and falls under normal air physics, so drifting back is possible.
   if (f.hitstun > 0 && (f.action === 'hitstun' || f.action === 'tumble')) {
     knockbackDecay(f, def);
   } else {
+    // A move frame that set an upward vy (a rising special started on the floor) lifts
+    // the fighter off the ground this frame, the way a jump does, instead of the ground
+    // zeroing it. The move keeps running, so the action stays 'attack'.
+    if (f.onGround && f.skipGravity && f.vy < 0) {
+      f.onGround = false;
+      f.fastFalling = false;
+    }
     if (f.onGround) {
       f.vy = 0;
       if (usesGroundFriction(f.action)) applyFriction(f, def);
@@ -187,6 +215,6 @@ export function stepPhysics(state: GameState, f: SimFighter, def: CharacterDef):
   }
   if (!f.onGround) resolveSolids(state, f, def, stage);
   if (f.onGround) checkSupport(f, stage);
-  if (!f.onGround) tryLedgeGrab(state, f, def);
+  if (!f.onGround && !isGrabAction(f.action)) tryLedgeGrab(state, f, def);
   checkBlast(state, f, stage);
 }

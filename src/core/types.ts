@@ -8,17 +8,40 @@ export const Btn = {
   Left: 1 << 0, Right: 1 << 1, Up: 1 << 2, Down: 1 << 3,
   Jump: 1 << 4, Attack: 1 << 5, Special: 1 << 6, Shield: 1 << 7,
   Taunt: 1 << 8, Start: 1 << 9,
+  Walk: 1 << 10, Dodge: 1 << 11, Grab: 1 << 12,
+  CUp: 1 << 13, CDown: 1 << 14, CLeft: 1 << 15, CRight: 1 << 16,
 } as const;
 
-/** One player's input for one sim frame. Bitmasks of Btn. */
-export interface InputFrame { held: number; pressed: number; released: number }
+/**
+ * One player's input for one sim frame. Bitmasks of Btn.
+ * `direct` is (index in DIRECT_CODES) + 1 of a direct-move or command binding
+ * pressed this frame; 0 or undefined means none.
+ */
+export interface InputFrame { held: number; pressed: number; released: number; direct?: number }
 
-export type InputAction =
-  'left' | 'right' | 'up' | 'down' | 'jump' | 'attack' | 'special' | 'shield' | 'taunt' | 'start';
-/** KeyboardEvent.code per action, e.g. { left: 'KeyA', ... } */
-export type Bindings = Record<InputAction, string>;
-export interface PlayerControls { bindings: Bindings; tapJump: boolean }
+export type ButtonAction =
+  'left' | 'right' | 'up' | 'down' | 'walk' | 'jump' | 'attack' | 'special' | 'shield' | 'grab' |
+  'dodge' | 'taunt' | 'start' | 'cUp' | 'cDown' | 'cLeft' | 'cRight';
+/** Anything bindable: a button action, a move fired directly by its own key, or a command. */
+export type InputAction = ButtonAction | DirectMoveId | CommandAction;
+/**
+ * Two binding slots per action. Each slot is '' (unbound), one code, or a chord: two or
+ * more codes joined by '&', for example 'KeyF&KeyJ'. A chord is down while every code in
+ * it is down, and it fires on the sample it becomes down. When a chord fires, the plain
+ * presses of its member codes are suppressed for that sample. '&' is the separator
+ * because pad axis codes already contain '+'.
+ */
+export type BindingPair = [string, string];
+export type Bindings = Record<InputAction, BindingPair>;
+export type BindDevice = 'keys' | 'pad';
+/**
+ * `keys` holds KeyboardEvent.code strings. `pad` holds pad codes: 'B<n>' for
+ * button n, 'A<n>+' / 'A<n>-' for axis n past the deadzone (W3C standard mapping).
+ * padIndex -1 = auto, the Nth connected pad for player N.
+ */
+export interface PlayerControls { keys: Bindings; pad: Bindings; padIndex: number; tapJump: boolean }
 export interface ControlsConfig { players: PlayerControls[] }   // length MAX_PLAYERS
+export interface BindConflict { player: number; device: BindDevice; action: InputAction; slot: 0 | 1; code: string }
 
 /** Seam for local / LAN / online. Only 'local' is implemented in the MVP. */
 export interface SessionAdapter {
@@ -42,7 +65,33 @@ export type MoveId =
   'fsmash' | 'usmash' | 'dsmash' |
   'nair' | 'fair' | 'bair' | 'uair' | 'dair' |
   'nspecial' | 'sspecial' | 'uspecial' | 'dspecial' |
-  'taunt' | 'ledgeatk' | 'getupatk';
+  'taunt' | 'taunt2' | 'taunt3' | 'ledgeatk' | 'getupatk';
+
+/** Moves a player can bind to their own key. Their DIRECT_CODES index is their index here. */
+export const DIRECT_MOVES = [
+  'jab', 'ftilt', 'utilt', 'dtilt', 'dashatk', 'fsmash', 'usmash', 'dsmash',
+  'nair', 'fair', 'bair', 'uair', 'dair', 'nspecial', 'sspecial', 'uspecial', 'dspecial',
+] as const;
+export type DirectMoveId = typeof DIRECT_MOVES[number];
+
+/**
+ * Context commands a player can bind to their own key. Each one only does
+ * something in its context (pummel and throws while holding a grab, ledge
+ * options while hanging, getupAttack while downed...); outside it the press is
+ * consumed and ignored.
+ */
+export const COMMAND_ACTIONS = [
+  'pummel', 'fthrow', 'bthrow', 'uthrow', 'dthrow', 'spotDodge', 'rollForward', 'rollBack',
+  'airDodge', 'dirAirDodge', 'ledgeAttack', 'ledgeRoll', 'ledgeGetUp', 'ledgeJump', 'getupAttack',
+  'tech', 'footstool', 'finalSmash', 'taunt2', 'taunt3',
+] as const;
+export type CommandAction = typeof COMMAND_ACTIONS[number];
+
+/**
+ * Every code an InputFrame's `direct` can carry, as index + 1. DIRECT_MOVES come
+ * first so they keep the codes they had before commands existed.
+ */
+export const DIRECT_CODES = [...DIRECT_MOVES, ...COMMAND_ACTIONS] as const;
 
 /** Circle hitbox in fighter-local space, facing right. Mirror x when facing left. */
 export interface HitboxDef {
@@ -58,6 +107,8 @@ export interface HitboxDef {
   group: number;          // a victim can be hit by only one hitbox per group per move use
   hitlagMul?: number;     // default 1
   shieldDamage?: number;  // default = damage
+  low?: boolean;          // counts as a low hit, so rolls do not dodge it
+  grab?: GrabSpec;        // catches the victim instead of hitting
 }
 
 /**
@@ -95,6 +146,8 @@ export interface ProjectileDef {
   returnFrame?: number;
   /** Damage multiplier applied on the return pass. Defaults to 0.5. */
   returnPower?: number;
+  /** Counts as a low hit, so rolls do not dodge it. */
+  low?: boolean;
 }
 
 export interface MoveDef {
@@ -115,6 +168,36 @@ export interface MoveDef {
   groundOnly?: boolean;
 }
 
+export type ThrowId = 'fthrow' | 'bthrow' | 'uthrow' | 'dthrow';
+
+/** One throw. holdX/holdY place the victim, fighter-local, facing right. */
+export interface ThrowDef {
+  totalFrames: number;
+  releaseFrame: number;     // frame the victim is launched
+  damage: number; angle: number; bkb: number; kbg: number;
+  holdX: number; holdY: number;
+}
+
+/**
+ * Turns a hitbox into a grab. `force` = command grab: no mash out.
+ * `throwNow` throws on catch instead of holding. `holdFrames` overrides the hold length.
+ */
+export interface GrabSpec { force?: boolean; throwNow?: ThrowId | ThrowDef; holdFrames?: number }
+
+/** Grab reach circle, fighter-local, facing right, active from start to end inclusive. */
+export interface GrabBoxDef { totalFrames: number; start: number; end: number; x: number; y: number; r: number }
+
+/** Everything a character needs to grab, hold, pummel and throw. */
+export interface GrabKit {
+  stand: GrabBoxDef;
+  dash: GrabBoxDef;
+  holdX: number; holdY: number;
+  holdBase: number; holdPerPercent: number;
+  mashFrames: number;
+  pummel: { damage: number; totalFrames: number; hitFrame: number };
+  throws: Record<ThrowId, ThrowDef>;
+}
+
 export interface CharacterDef {
   id: string;
   name: string;
@@ -128,6 +211,28 @@ export interface CharacterDef {
   crouchHurtbox: { w: number; h: number };
   ledgeGrabBox: { w: number; h: number; yOff: number };
   moves: Record<MoveId, MoveDef>;
+  /** Grab and throw data. Undefined = DEFAULT_GRAB_KIT. */
+  grabKit?: GrabKit;
+  /** Final Smash data. Undefined = no Final Smash: Special stays a special, the meter still fills. */
+  finalSmash?: FinalSmashDef;
+}
+
+/**
+ * A cinematic Final Smash: catch one opponent, carry them along a path while
+ * dealing damage, then launch. The attacker is invulnerable for the whole action.
+ */
+export interface FinalSmashDef {
+  /** Closest living opponent with (victim.x - attacker.x) * facing >= -8, any distance. */
+  target: 'nearestFacing';
+  startup: number;          // frames before the catch
+  totalFrames: number;
+  /** Victim offset from attacker feet, facing right, linear between keys, held after the last key. */
+  path: { frame: number; x: number; y: number }[];
+  /** Damage only, no knockback: the victim stays caught. */
+  hits: { frame: number; damage: number }[];
+  launch: { frame: number; damage: number; angle: number; bkb: number; kbg: number };
+  /** Labels for future animation and fx, e.g. 'tsunami', 'tornado'. */
+  phases: { name: string; start: number; end: number }[];
 }
 
 // ---------------- Characters (render half) ----------------
@@ -143,23 +248,42 @@ export interface CharacterDef {
 export interface ImageSheetData {
   url: string;
   origin: 'bottom-center' | 'center';
-  frames: Record<string, [number, number, number, number]>;
   /**
-   * Colours the player-colour outline ring skips, as '#rrggbb'. Aeval's attack
-   * frames have their water drawn into them; ringing every droplet in the
-   * player colour turns a clean sweep into confetti, so the ring traces the
-   * fighter and lets the water alone.
+   * Frame name -> [x, y, w, h] or [x, y, w, h, ax, ay]. The optional ax, ay is
+   * the anchor inside the frame, in frame pixels: the point that sits on the
+   * fighter's position (body frames: the heel point) or the effect's centre.
+   * Absent, the anchor follows `origin`: (w/2, h) or (w/2, h/2).
+   */
+  frames: Record<string, [number, number, number, number] | [number, number, number, number, number, number]>;
+  /**
+   * Extra colours the player-colour outline ring skips, as '#rrggbb'. The ring
+   * already treats only fully opaque pixels (alpha 255) as solid, and the water
+   * drawn into Aeval's crops is capped at alpha 254, so the ring traces the
+   * body and skips the water without any list. This is for anything opaque
+   * that should still be skipped.
    */
   outlineIgnore?: string[];
 }
-export interface AnimDef { frames: string[]; fps: number; loop: boolean }
+export interface AnimDef {
+  frames: string[];
+  fps: number;
+  loop: boolean;
+  /** Sim frames (60/s) each frame is held. When present it wins over fps. */
+  holds?: number[];
+  /** Draw the whole animation mirrored (back-facing moves). */
+  mirror?: boolean;
+}
 export type AnimName = string;
 export interface CharacterSprites {
   sheet: ImageSheetData;             // body frames
   fx: ImageSheetData;                // projectiles and effect frames
   anims: Record<AnimName, AnimDef>;
-  /** Map a sim action + move to an animation name. Must never return undefined. */
-  animFor(action: ActionId, moveId: MoveId | null): AnimName;
+  /**
+   * Map a sim action + move to an animation name. Must never return undefined.
+   * `fighter` is the full state for cases action and move cannot tell apart
+   * (a mid-air jump versus ordinary airtime).
+   */
+  animFor(action: ActionId, moveId: MoveId | null, fighter: FighterState): AnimName;
 }
 
 // ---------------- Stages ----------------
@@ -194,7 +318,10 @@ export type ActionId =
   'attack' |
   'shield' | 'shieldStun' | 'shieldBreak' | 'spotDodge' | 'roll' | 'airDodge' |
   'hitstun' | 'tumble' | 'ledgeGrab' | 'ledgeHang' | 'ledgeClimb' | 'ledgeRoll' | 'ledgeJump' |
-  'dead' | 'respawn';
+  'dead' | 'respawn' |
+  'grab' | 'grabHold' | 'pummel' | 'throw' | 'grabbed' |
+  'tech' | 'techRoll' | 'downed' | 'getUp' | 'getUpRoll' | 'footstooled' |
+  'finalSmash' | 'finalSmashVictim';
 
 export interface FighterState {
   slot: number;
@@ -211,6 +338,12 @@ export interface FighterState {
   percent: number;
   stocks: number;
   jumpsLeft: number;
+  /**
+   * True while the current 'air' action was entered by a mid-air jump. Set by
+   * the sim's double jump after it restarts the action; any later action change
+   * clears it, so actionFrame counts frames since that jump.
+   */
+  airJumped: boolean;
   fastFalling: boolean;
   hitstun: number;               // frames remaining
   hitlag: number;                // freeze frames remaining
@@ -225,6 +358,43 @@ export interface FighterState {
   inputHeld: number;             // last InputFrame.held, for renderer/AI convenience
   dirTapAge: number;             // frames since last left/right press, for smash detection
   dirTapDir: number;             // -1, 0, 1
+  fsMeter: number;               // 0..FS_METER.max, public so the HUD can draw it
+  /** Match records for the results screen. Sim-owned, deterministic, cloned with the state. */
+  stats: FighterStats;
+}
+
+/**
+ * Per-fighter match records, the Smash results/records set. Frame counts are sim frames
+ * (60/s); damage is percent; distanceRun is world px of walking and running on the ground.
+ */
+export interface FighterStats {
+  kos: number;               // opponents KO'd (last hitter within KO_CREDIT_FRAMES gets it)
+  falls: number;             // times this fighter was KO'd
+  sds: number;               // KO'd with no valid last-hitter credit
+  damageGiven: number;
+  damageTaken: number;
+  peakDamage: number;        // highest percent reached in any stock
+  maxCombo: number;          // longest chain of hits on one victim still in hitstun or held
+  totalHits: number;
+  hitsTaken: number;
+  mostUsedMove: Record<string, number>;   // move or throw id -> starts
+  grabs: number;             // grabs landed
+  throws: number;
+  shieldBreaks: number;      // inflicted on others
+  ledgeGrabs: number;
+  techs: number;
+  dodges: number;            // spot dodge + roll + air dodge starts
+  shieldTime: number;        // frames
+  airTime: number;           // frames
+  groundTime: number;        // frames
+  distanceRun: number;       // px
+  jumps: number;
+  finalSmashes: number;      // used
+  finalSmashHits: number;    // victims caught
+  projectilesFired: number;
+  projectilesHit: number;
+  timeInLead: number;        // frames holding the unique best stocks-then-percent standing
+  firstBloodFrame: number;   // frame of this fighter's first KO, -1 none
 }
 
 export interface ProjectileState {
@@ -255,14 +425,35 @@ export type SimEvent =
   | { type: 'projectileDie'; x: number; y: number; defId: string }
   | { type: 'shieldBreak'; x: number; y: number; slot: number }
   | { type: 'respawn'; x: number; y: number; slot: number }
+  | { type: 'grab'; x: number; y: number; attacker: number; victim: number }
+  | { type: 'throw'; x: number; y: number; attacker: number; victim: number; throwId: ThrowId | 'custom' }
+  /** winner = owner slot whose projectile survived, -1 if both died. */
+  | { type: 'projectileClash'; x: number; y: number; ownerA: number; ownerB: number; winner: number }
+  /** roll = the tech travelled (techRoll) rather than staying in place. */
+  | { type: 'tech'; x: number; y: number; slot: number; roll: boolean }
+  | { type: 'footstool'; x: number; y: number; attacker: number; victim: number }
+  /**
+   * phase 'start' at activation (victim -1 on a whiff), then each FinalSmashDef
+   * phases[] name as it begins, then 'launch'.
+   */
+  | { type: 'finalSmash'; x: number; y: number; attacker: number; victim: number; phase: string }
   | { type: 'matchEnd'; winner: number };
 
 export interface MatchConfig {
   stageId: string;
-  players: { slot: number; charId: string; cpu: boolean; cpuLevel: number }[];
+  players: {
+    slot: number; charId: string; cpu: boolean; cpuLevel: number;
+    /** Typed display name for a human slot (max 12 chars); absent for CPUs. */
+    name?: string;
+    /** Team colour, an index into PLAYER_COLORS; absent = the slot's own colour. */
+    team?: number;
+  }[];
   stocks: number;
   timeLimitSec: number;          // 0 = none
   seed: number;
+  finalSmash?: boolean;          // rule; the sim treats anything but true as off
+  cpuZeroMoves?: boolean;        // rule; level 0 CPUs wander (walk, jump, never attack) instead of standing still
+  teams?: boolean;               // rule; players sharing a team colour are one side, no friendly fire
 }
 
 export interface GameState {
@@ -277,6 +468,10 @@ export interface GameState {
   winner: number;                // slot or -1
   timeLeft: number;              // frames, or -1
   nextProjectileId: number;
+  /** Frame the match finished on (stats stop there), -1 while running. */
+  endFrame: number;
+  /** Teams rule only: the winning team colour index, -1 on a draw. Absent otherwise. */
+  winnerTeam?: number;
 }
 
 // ---- src/sim/index.ts ----
@@ -304,10 +499,17 @@ export interface InputSystem {
   controls: ControlsConfig;
   save(): void;
   resetDefaults(player: number): void;
-  setBinding(player: number, action: InputAction, code: string): void;
+  setBinding(player: number, device: BindDevice, action: InputAction, slot: 0 | 1, code: string): void;
   setTapJump(player: number, on: boolean): void;
-  listenForNextKey(): Promise<string>;              // resolves with KeyboardEvent.code; Escape cancels (rejects)
-  conflicts(): { player: number; action: InputAction; code: string }[];
+  setPadIndex(player: number, index: number): void;  // -1 = auto
+  /** Resolves with KeyboardEvent.code. Backspace/Delete resolve '' (unbind). Escape rejects Error('cancelled'). */
+  listenForNextKey(): Promise<string>;
+  /** -1 = any pad. Resolves a pad code. Escape key or cancelCapture() rejects Error('cancelled'). */
+  listenForNextPad(padIndex: number): Promise<string>;
+  cancelCapture(): void;
+  isCapturing(): boolean;
+  conflicts(): BindConflict[];
+  connectedPads(): { index: number; id: string }[];
   /** true while any bound key for any player is down; UI uses it for "press any key" */
   anyKeyDown(): boolean;
 }
@@ -323,8 +525,23 @@ export interface LocalSession extends SessionAdapter {
 // export function cpuInput(state: GameState, slot: number, level: number, rand: () => number): InputFrame
 
 // ---- src/ui/index.ts ----
-export type UiScreen = 'title' | 'mode' | 'select' | 'controls' | 'pause' | 'results';
-export interface ResultsData { winner: number; players: { slot: number; charId: string; stocks: number; percent: number }[] }
+export type UiScreen = 'title' | 'mode' | 'select' | 'controls' | 'pause' | 'results' | 'movelist';
+export interface ResultsData {
+  winner: number;
+  seed: number;
+  players: {
+    slot: number; charId: string; stocks: number; percent: number; cpu: boolean; cpuLevel: number;
+    stats: FighterStats;
+    /** Typed display name for a human slot. */
+    name?: string;
+    /** Team colour index (PLAYER_COLORS); the slot's own colour when absent. */
+    team?: number;
+  }[];
+  /** Teams rule only: the winning team colour index, -1 on a draw. */
+  winnerTeam?: number;
+  /** Frames the match ran, for time-share stats. */
+  matchFrames: number;
+}
 export interface UiDeps {
   characters: { id: string; name: string; icon?: string }[];
   stages: { id: string; name: string }[];

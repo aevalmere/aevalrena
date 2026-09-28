@@ -312,6 +312,9 @@ export function createTuner(opts: TunerOptions): Tuner {
   fieldRow(inputGroup, 'dashRetapWindow', inp, 'dashRetapWindow', 6, 24, 1);
   fieldRow(inputGroup, 'chargeMax', inp, 'chargeMax', 20, 120, 1);
   fieldRow(inputGroup, 'chargeBonus', inp, 'chargeBonus', 0, 1, 0.05);
+  fieldRow(inputGroup, 'rollTapWindow', inp, 'rollTapWindow', 4, 24, 1);
+  fieldRow(inputGroup, 'walkAxis', inp, 'walkAxis', 0.3, 1, 0.05);
+  fieldRow(inputGroup, 'padDeadzone', inp, 'padDeadzone', 0.1, 0.8, 0.05);
 
   const camera = group('Camera', false);
   const cam: Record<string, number> = TUNING.camera;

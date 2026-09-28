@@ -9,7 +9,7 @@ import type {
   StageArt,
   StageDef,
 } from '../core/types';
-import { MAX_PLAYERS, VIEW_H, VIEW_W } from '../core/types';
+import { MAX_PLAYERS } from '../core/types';
 import { STAGE_ART, STAGE_DEFS } from '../stages/registry';
 import { clearBakes } from './bake';
 import { createCamera, snapCamera, updateCamera } from './camera';
@@ -22,12 +22,12 @@ import {
   clearSparks,
   createSparks,
   drawFighterFx,
+  drawGeysers,
   drawProjectiles,
   drawSparks,
   spawnSpark,
   stepSparks,
 } from './fx';
-import { createHudState, drawHud, resetHudState, stepHud } from './hud';
 import {
   clearParticles,
   createParticles,
@@ -39,7 +39,7 @@ import {
   spawnLandDust,
   stepParticles,
 } from './particles';
-import { fitCanvas } from './scale';
+import { fitCanvas, liveView } from './scale';
 import { addShake, createShake, resetShake, stepShake } from './shake';
 import { buildVisuals } from './visuals';
 
@@ -63,7 +63,7 @@ const SHIELD_BREAK_SHAKE = 2;
 
 /** Optional hook a StageArt module can expose so its layers bake during load. */
 interface PreparableStageArt extends StageArt {
-  prepare?: () => void;
+  prepare?: () => void | Promise<void>;
 }
 
 function fontColors(): string[] {
@@ -89,7 +89,6 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
   const shakeState = createShake();
   const particles = createParticles();
   const sparks = createSparks();
-  const hud = createHudState(MAX_PLAYERS);
 
   const posX = new Float32Array(MAX_PLAYERS);
   const posY = new Float32Array(MAX_PLAYERS);
@@ -128,7 +127,6 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
     clearParticles(particles);
     clearSparks(sparks);
     resetShake(shakeState);
-    resetHudState(hud);
     flash.fill(0);
     cameraPrimed = false;
     lastConsumedFrame = -1;
@@ -270,7 +268,7 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
       bakeFont(fontColors());
       for (const stageId in STAGE_ART) {
         const art = STAGE_ART[stageId] as PreparableStageArt;
-        if (typeof art.prepare === 'function') art.prepare();
+        if (typeof art.prepare === 'function') await art.prepare();
       }
       fitCanvas(canvas);
       ctx.imageSmoothingEnabled = false;
@@ -314,7 +312,6 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
         consumeEvents(state);
         lastConsumedFrame = state.frame;
       }
-      stepHud(hud, state, steps);
 
       const clampedAlpha = alpha < 0 ? 0 : alpha > 1 ? 1 : alpha;
       interpolate(state, prev, clampedAlpha);
@@ -336,18 +333,20 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
       ctx.imageSmoothingEnabled = false;
       ctx.globalAlpha = 1;
       ctx.fillStyle = INK;
-      ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+      ctx.fillRect(0, 0, liveView.w, liveView.h);
 
       if (art !== null) drawLayers(art.layers, t);
 
-      const tx = Math.round(VIEW_W / 2 - camera.x * camera.zoom) + shakeState.x;
-      const ty = Math.round(VIEW_H / 2 - camera.y * camera.zoom) + shakeState.y;
+      const tx = Math.round(liveView.w / 2 - camera.x * camera.zoom) + shakeState.x;
+      const ty = Math.round(liveView.h / 2 - camera.y * camera.zoom) + shakeState.y;
       ctx.setTransform(camera.zoom, 0, 0, camera.zoom, tx, ty);
 
       if (art !== null && stage !== null) art.drawPlatforms(ctx, stage, t);
       drawRespawnPlatforms(ctx, state, posX, posY);
       drawProjectiles(ctx, state, projX, projY);
       resolveFighterFrames(state, drawDeps);
+      // The up-special column stands behind the fighter rising out of it.
+      drawGeysers(ctx, state, posX, posY);
       drawFighters(ctx, state, posX, posY, flash, drawDeps, renderTick);
       drawFighterFx(ctx, state, posX, posY);
       drawSparks(ctx, sparks);
@@ -358,7 +357,6 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
 
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.globalAlpha = 1;
-      drawHud(ctx, state, hud);
       drawDebugText(ctx, state, debug, perf);
     },
   };

@@ -1,7 +1,7 @@
 import { LEDGE_HANG_INVULN, LEDGE_MAX_REGRABS, ROLL } from '../core/constants';
 import { Btn } from '../core/types';
 import type { ActionId, CharacterDef, GameState, Platform } from '../core/types';
-import { heldDir, heldDown, heldUp, takeBuffered } from './input';
+import { commandOf, heldDir, heldDown, heldUp, peekBufferedDirect, takeBuffered, takeBufferedDirect } from './input';
 import { setAction, simFighters, stageOf, type SimFighter } from './state';
 import { startMove } from './moves';
 
@@ -58,6 +58,7 @@ function grabLedge(
   f.fastFalling = false;
   f.jumpsLeft = def.jumps;
   setAction(f, 'ledgeHang');
+  f.stats.ledgeGrabs++;
   f.ledgeRegrabs++;
   if (f.ledgeRegrabs <= LEDGE_MAX_REGRABS) f.invuln = LEDGE_HANG_INVULN;
 }
@@ -71,7 +72,7 @@ function grabLedge(
 export function tryLedgeGrab(state: GameState, f: SimFighter, def: CharacterDef): void {
   if (f.ledge >= 0 || f.onGround || f.vy <= 0) return;
   if (f.hitstun > 0 || f.ledgeCooldown > 0) return;
-  if (f.action === 'attack' || f.action === 'hitstun' || f.action === 'tumble') return;
+  if (f.action === 'attack' || f.action === 'hitstun' || f.action === 'tumble' || f.action === 'footstooled') return;
   if (isLedgeAction(f.action)) return;
 
   const box = def.ledgeGrabBox;
@@ -126,7 +127,11 @@ export function stepLedge(state: GameState, f: SimFighter, def: CharacterDef): v
     f.vx = 0;
     f.vy = 0;
 
-    if (takeBuffered(f, Btn.Jump)) {
+    // The ledge commands do exactly what Jump, Attack, Dodge and a climb do here. Any
+    // other command has nothing to do while hanging and is dropped.
+    const cmd = commandOf(peekBufferedDirect(f));
+    if (cmd !== null) takeBufferedDirect(f);
+    if (takeBuffered(f, Btn.Jump) || cmd === 'ledgeJump') {
       releaseLedge(f);
       setAction(f, 'air');
       f.x = cornerX + inward * 6;
@@ -134,19 +139,20 @@ export function stepLedge(state: GameState, f: SimFighter, def: CharacterDef): v
       f.jumpsLeft = def.jumps - 1;
       f.ledgeCooldown = LEDGE_DROP_COOLDOWN;
       state.events.push({ type: 'jump', x: f.x, y: f.y, slot: f.slot, double: false });
+      if (!state.finished) f.stats.jumps++;
       return;
     }
-    if (takeBuffered(f, Btn.Attack)) {
+    if (takeBuffered(f, Btn.Attack) || cmd === 'ledgeAttack') {
       placeOnStage(f, def, p, cornerX, inward, CLIMB_INSET);
       startMove(state, f, def, 'ledgeatk');
       return;
     }
-    if (takeBuffered(f, Btn.Shield)) {
+    if (takeBuffered(f, Btn.Dodge) || cmd === 'ledgeRoll') {
       setAction(f, 'ledgeRoll');
       return;
     }
     const dir = heldDir(f);
-    if (heldUp(f) || dir === inward) {
+    if (cmd === 'ledgeGetUp' || heldUp(f) || dir === inward) {
       setAction(f, 'ledgeClimb');
       return;
     }

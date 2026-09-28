@@ -1,4 +1,10 @@
 import type { MenuCtx } from './context';
+import { buildMenuPanel, menuRow } from './mode';
+
+/** Pause menu: the mode panel look (its CSS lives in mode.ts), over the frozen match. */
+
+/** Row to restore when coming back from MOVE LIST or CONTROLS; a fresh pause starts on RESUME. */
+let returnIndex = 0;
 
 interface PauseItem {
   el: HTMLElement;
@@ -6,30 +12,19 @@ interface PauseItem {
 }
 
 export function render(container: HTMLElement, ctx: MenuCtx): void {
-  const panel = document.createElement('div');
-  panel.className = 'aev-panel aev-panel-narrow';
-  container.appendChild(panel);
-
-  const heading = document.createElement('h1');
-  heading.className = 'aev-heading';
-  heading.textContent = 'Paused';
-  panel.appendChild(heading);
-
-  const list = document.createElement('div');
-  list.className = 'aev-list';
-  panel.appendChild(list);
+  const { panel, list } = buildMenuPanel(container, 'Pause menu');
+  panel.classList.add('aev-menu-compact');
 
   const items: PauseItem[] = [];
-  let selected = 0;
+  let selected = returnIndex;
+  returnIndex = 0;
 
   function updateHighlight(): void {
-    items.forEach((it, i) => it.el.classList.toggle('aev-item-selected', i === selected));
+    items.forEach((it, i) => it.el.classList.toggle('ui-item-selected', i === selected));
   }
 
   function addItem(label: string, activate: () => void): void {
-    const el = document.createElement('div');
-    el.className = 'aev-item';
-    el.textContent = label;
+    const el = menuRow(label);
     list.appendChild(el);
     const item: PauseItem = { el, activate };
     items.push(item);
@@ -41,11 +36,17 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
   }
 
   addItem('Resume', () => ctx.callbacks.resume());
+  addItem('Move list', () => {
+    ctx.state.movelistReturnTo = 'pause';
+    returnIndex = selected;
+    ctx.go('movelist');
+  });
   addItem('Controls', () => {
     ctx.state.controlsReturnTo = 'pause';
+    returnIndex = selected;
     ctx.go('controls');
   });
-  addItem('Quit to Title', () => ctx.callbacks.quit());
+  addItem('Quit', () => ctx.callbacks.quit());
 
   updateHighlight();
 

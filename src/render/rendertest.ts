@@ -150,6 +150,13 @@ class FakeContext {
   }
 
   strokeRect(): void {}
+  putImageData(): void {}
+
+  /** Blank pixels: the atlas contents never matter to these checks. */
+  getImageData(_x: number, _y: number, w: number, h: number): { data: Uint8ClampedArray } {
+    return { data: new Uint8ClampedArray(w * h * 4) };
+  }
+
   beginPath(): void {}
   arc(): void {}
   fill(): void {}
@@ -167,11 +174,51 @@ class FakeCanvas {
   }
 }
 
+/** Width and height from a base64 PNG data URL's IHDR chunk. */
+function pngSize(url: string): SizedImage {
+  const comma = url.indexOf(',');
+  const b64 = url.slice(comma + 1, comma + 1 + 44);
+  const bin = atob(b64);
+  const at = (i: number): number => bin.charCodeAt(i);
+  const width = ((at(16) << 24) | (at(17) << 16) | (at(18) << 8) | at(19)) >>> 0;
+  const height = ((at(20) << 24) | (at(21) << 16) | (at(22) << 8) | at(23)) >>> 0;
+  return { width, height };
+}
+
+/** An Image that "decodes" a PNG data URL by reading its size, then fires onload. */
+class FakeImage {
+  width = 0;
+  height = 0;
+  onload: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+
+  set src(url: string) {
+    const size = pngSize(url);
+    this.width = size.width;
+    this.height = size.height;
+    setTimeout(() => {
+      if (this.onload !== null) this.onload();
+    }, 0);
+  }
+}
+
+class FakeImageData {
+  constructor(
+    readonly data: Uint8ClampedArray,
+    readonly width: number,
+    readonly height: number
+  ) {}
+}
+
 function installDom(): FakeCanvas {
   const globals = globalThis as unknown as {
     document?: { createElement(tag: string): FakeCanvas };
     window?: { innerWidth: number; innerHeight: number };
+    Image?: unknown;
+    ImageData?: unknown;
   };
+  globals.Image = FakeImage;
+  globals.ImageData = FakeImageData;
   globals.document = {
     createElement(tag: string): FakeCanvas {
       if (tag !== 'canvas') throw new Error('fake document only makes canvases, asked for ' + tag);

@@ -1,8 +1,9 @@
+import { grabKitOf } from '../characters/common/grabkit';
 import { CHARACTER_DEFS } from '../characters/registry';
-import type { DebugFlags, GameState, PerfSample } from '../core/types';
-import { VIEW_H } from '../core/types';
+import type { DebugFlags, FighterState, GameState, PerfSample } from '../core/types';
 import { missingAnims } from './anim';
 import { drawText, GLYPH_H } from './font';
+import { liveView } from './scale';
 import { getProjectileVisual } from './visuals';
 
 /**
@@ -11,11 +12,15 @@ import { getProjectileVisual } from './visuals';
  */
 
 const HITBOX_COLOR = '#ff4d4d';
+const GRAB_COLOR = '#b266ff';
 const HURTBOX_COLOR = '#ffe066';
 const LEDGE_COLOR = '#66e0ff';
 const TEXT_COLOR = '#c9d1e0';
 const TEXT_SCALE = 1;
 const LINE_H = GLYPH_H + 2;
+
+/** The one sim-private field the grab box overlay reads. Absent on a plain FighterState. */
+interface SimGrabFlags { grabDash?: boolean }
 
 function strokeCircle(ctx: CanvasRenderingContext2D, x: number, y: number, r: number): void {
   ctx.beginPath();
@@ -66,7 +71,23 @@ export function drawDebugWorld(
     );
   }
 
-  ctx.strokeStyle = HITBOX_COLOR;
+  ctx.strokeStyle = GRAB_COLOR;
+  for (let i = 0; i < fcount; i++) {
+    const fighter = state.fighters[i] as FighterState & SimGrabFlags;
+    if (fighter.action !== 'grab') continue;
+    const def = CHARACTER_DEFS[fighter.charId];
+    if (def === undefined) continue;
+    const kit = grabKitOf(def);
+    const grab = fighter.grabDash === true ? kit.dash : kit.stand;
+    if (fighter.actionFrame < grab.start || fighter.actionFrame > grab.end) continue;
+    strokeCircle(
+      ctx,
+      Math.round(posX[i] + grab.x * fighter.facing) + 0.5,
+      Math.round(posY[i] + grab.y) + 0.5,
+      grab.r
+    );
+  }
+
   for (let i = 0; i < fcount; i++) {
     const fighter = state.fighters[i];
     if (fighter.action !== 'attack' || fighter.moveId === null) continue;
@@ -77,6 +98,7 @@ export function drawDebugWorld(
     for (let h = 0; h < move.hitboxes.length; h++) {
       const hitbox = move.hitboxes[h];
       if (fighter.actionFrame < hitbox.start || fighter.actionFrame > hitbox.end) continue;
+      ctx.strokeStyle = hitbox.grab === undefined ? HITBOX_COLOR : GRAB_COLOR;
       strokeCircle(
         ctx,
         Math.round(posX[i] + hitbox.x * fighter.facing) + 0.5,
@@ -84,6 +106,22 @@ export function drawDebugWorld(
         hitbox.r
       );
     }
+  }
+
+  // Final Smash phase name over the attacker. Placeholder until the animation overhaul
+  // draws the phases for real; the string is only built while the overlay is on.
+  for (let i = 0; i < fcount; i++) {
+    const fighter = state.fighters[i];
+    if (fighter.action !== 'finalSmash') continue;
+    const def = CHARACTER_DEFS[fighter.charId];
+    if (def === undefined || def.finalSmash === undefined) continue;
+    let label = 'FS';
+    const phases = def.finalSmash.phases;
+    for (let p = 0; p < phases.length; p++) {
+      if (fighter.actionFrame >= phases[p].start && fighter.actionFrame < phases[p].end) label = phases[p].name.toUpperCase();
+    }
+    if (fighter.actionFrame < def.finalSmash.startup) label = 'FS STARTUP';
+    drawText(ctx, label, posX[i] - label.length * 2, posY[i] - def.hurtbox.h - LINE_H * 2, TEXT_SCALE, GRAB_COLOR);
   }
 
   for (let i = 0; i < pcount; i++) {
@@ -123,7 +161,7 @@ export function drawDebugText(
   if (!debug.frameData) return;
 
   const misses = missingAnims();
-  let y = VIEW_H - 60 - state.fighters.length * LINE_H;
+  let y = liveView.h - 60 - state.fighters.length * LINE_H;
   if (y < 4) y = 4;
   if (misses.size > 0) {
     drawText(ctx, 'MISSING ANIMS ' + misses.size, 4, y - LINE_H, TEXT_SCALE, TEXT_COLOR);

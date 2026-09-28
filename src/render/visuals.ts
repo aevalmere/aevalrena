@@ -1,10 +1,17 @@
+import { AEVAL_FX_ANIMS } from '../characters/aeval/art/anims';
 import { CHARACTER_DEFS, CHARACTER_SPRITES } from '../characters/registry';
-import type { CharacterSprites, ImageSheetData, ProjectileDef } from '../core/types';
+import type { AnimDef, CharacterSprites, ImageSheetData, ProjectileDef } from '../core/types';
 import { portraitFrameName } from './anim';
 import { bakeSheet } from './bake';
-import { PLAYER_COLORS } from './colors';
 
 const NO_OUTLINES: readonly string[] = [];
+
+/** Per-character effect animations (frame order and holds), by character id. */
+const FX_ANIMS: Record<string, Record<string, AnimDef>> = {
+  aeval: AEVAL_FX_ANIMS,
+};
+/** Hold per geyser frame when a character has no fx anim entry for it. */
+const GEYSER_DEFAULT_HOLD = 5;
 
 /**
  * Per-character render data assembled once at load: baked sheet ids, the
@@ -19,6 +26,10 @@ export interface CharVisual {
   sprites: CharacterSprites;
   portrait: string | null;
   geyser: string[];
+  /** Sim frames each geyser frame is shown, counted from the launch. */
+  geyserHolds: number[];
+  /** uspecial frame that launches the fighter (first setY velocity), or -1. */
+  geyserLaunch: number;
   whirl: string[];
   hitspark: string[];
   splash: string[];
@@ -54,7 +65,8 @@ export async function buildVisuals(): Promise<void> {
     const sprites = CHARACTER_SPRITES[charId];
     const bodySheetId = charId + ':body';
     const fxSheetId = charId + ':fx';
-    await bakeSheet(bodySheetId, sprites.sheet, PLAYER_COLORS);
+    // No per-player outlines: sprites carry no coloured outline (owner rule, 2026-09-28).
+    await bakeSheet(bodySheetId, sprites.sheet, NO_OUTLINES);
     await bakeSheet(fxSheetId, sprites.fx, NO_OUTLINES);
 
     const visual: CharVisual = {
@@ -63,12 +75,15 @@ export async function buildVisuals(): Promise<void> {
       fxSheetId,
       sprites,
       portrait: portraitFrameName(sprites),
-      geyser: probeFrames(sprites.fx, 'geyser'),
+      geyser: [],
+      geyserHolds: [],
+      geyserLaunch: -1,
       whirl: probeFrames(sprites.fx, 'whirl'),
       hitspark: probeFrames(sprites.fx, 'hitspark'),
       splash: probeFrames(sprites.fx, 'splash'),
       ko: probeFrames(sprites.fx, 'ko'),
     };
+    geyserTiming(visual, charId);
     charVisuals.set(charId, visual);
   }
 
@@ -88,6 +103,36 @@ export async function buildVisuals(): Promise<void> {
           frames: probeFrames(owner.sprites.fx, projectile.sprite),
         });
       }
+    }
+  }
+}
+
+/**
+ * The geyser is world-anchored: it is latched where the fighter took off. Frame
+ * order and holds come from the fx anim when there is one, the launch frame
+ * from the uspecial move's first vertical-velocity set.
+ */
+function geyserTiming(visual: CharVisual, charId: string): void {
+  const fx = visual.sprites.fx;
+  const anims = FX_ANIMS[charId];
+  const anim = anims === undefined ? undefined : anims.geyser;
+  if (anim !== undefined && anim.frames.every((n) => fx.frames[n] !== undefined)) {
+    visual.geyser = anim.frames.slice();
+    visual.geyserHolds = anim.frames.map((_, k) =>
+      anim.holds !== undefined && anim.holds[k] !== undefined ? anim.holds[k] : GEYSER_DEFAULT_HOLD
+    );
+  } else {
+    visual.geyser = probeFrames(fx, 'geyser');
+    visual.geyserHolds = visual.geyser.map(() => GEYSER_DEFAULT_HOLD);
+  }
+  const def = CHARACTER_DEFS[charId];
+  const move = def === undefined ? undefined : def.moves.uspecial;
+  const velocity = move === undefined ? undefined : move.velocity;
+  if (velocity === undefined) return;
+  for (const v of velocity) {
+    if (v.setY === true) {
+      visual.geyserLaunch = v.frame;
+      return;
     }
   }
 }

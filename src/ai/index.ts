@@ -1,10 +1,22 @@
 import type {
-  FighterState, GameState, InputFrame, MatchConfig, MoveDef, MoveId,
+  CharacterDef, FighterState, GameState, GrabKit, InputFrame, MatchConfig, MoveDef, MoveId, ProjectileDef,
+  ProjectileState, Rect,
 } from '../core/types';
-import { Btn, MAX_PLAYERS } from '../core/types';
-import { ROLL, SPOT_DODGE, TUNING } from '../core/constants';
+import { Btn, DIRECT_CODES, MAX_PLAYERS } from '../core/types';
+import { FOOTSTOOL, FS_METER, KNOCKDOWN, ROLL, SPOT_DODGE, TECH, TUNING } from '../core/constants';
+import { circleRectOverlap } from '../core/math';
 import { STAGE_DEFS } from '../stages/registry';
 import { CHARACTER_DEFS } from '../characters/registry';
+import { DEFAULT_GRAB_KIT, grabKitOf } from '../characters/common/grabkit';
+import { isLowHit } from '../sim/dodge';
+import { canFinalSmash } from '../sim/finalsmash';
+import { canBeHit, projectileChargePower, projectileChargeScale } from '../sim/hits';
+import { isLedgeAction } from '../sim/ledge';
+import { PROJECTILE_DEFS } from '../sim/projectiles';
+import { fighterHurtbox, sameTeam, type SimFighter } from '../sim/state';
+import { aevalmereInput, warmAevalmere } from './aevalmere';
+
+export { warmAevalmere };
 
 // Per-slot scratch state. Preallocated once; cpuInput only mutates these, never allocates.
 interface CpuMem {
@@ -14,8 +26,7 @@ interface CpuMem {
   shieldTimer: number;  // raw frames left forcing Shield held (reaction defense)
   aerialCd: number;     // real frames left before another aerial attack from this slot
   lastAerial: number;   // sim frame the last aerial actually started on, or a far-past sentinel
-  dashPhase: number;    // 0/1 toggle used to fake a tap-release-tap dash approach
-  uairPhase: number;    // 0 idle, 1 = jumped intending to follow up with uair
+  uairPhase: number;   // 0 idle, 1 = jumped intending to follow up with uair
   vertBit: number;      // Btn.Up or Btn.Down currently being held toward a tilt, or 0
   vertFrames: number;   // consecutive real frames vertBit has been held continuously
   smashPending: number; // direction bit released this frame, to be tapped fresh next frame, or 0
@@ -38,8 +49,7 @@ interface CpuMem {
 
   // --- defensive mixups and pattern reading ---
   dodgeCd: number;      // real frames until another dodge is allowed
-  dodgeIntent: number;  // 1 while a direction held under Shield is meant to become a roll/spot dodge
-  attackLock: number;   // 1 while a grounded Attack could be launched into an aerial before it resolves
+  attackLock: number;  // 1 while a grounded Attack could be launched into an aerial before it resolves
   oppMove: MoveId | null;    // opponent's move id last frame, so a move *start* can be spotted
   oppStarted: MoveId | null; // the last move the opponent actually started
   oppRepeat: number;         // how many times in a row they started that same move
@@ -63,6 +73,39 @@ interface CpuMem {
   chargeFrames: number; // real frames Attack stays held to charge a smash
   dropPhase: number;    // 0/1 toggle so a platform drop-through Down is a fresh press
   orbHold: number;      // real frames Special stays held to charge a neutral-special orb
+  jabPending: number;   // 1 = an Attack held back off a dash/run, pressed next frame so it is not a dash attack
+
+  // --- double-tap guard: sim frames of the last press of each direction, mirroring the sim's tap timers ---
+  lastLeftPress: number;
+  lastRightPress: number;
+  lastUpPress: number;
+  lastDownPress: number;
+  intendedRolls: number; // debug: grounded Dodge presses with a direction held, i.e. rolls asked for on purpose
+
+  // --- grabs ---
+  pummelGoal: number;   // pummels wanted in the current hold, -1 until the hold is first seen
+  pummels: number;      // pummels already pressed in the current hold
+  mashLast: number;     // bit pressed on the last mash frame, so the next one is a different, fresh press
+
+  // --- projectile counter ---
+  counterWait: number;  // real frames a fired counter-shot's press is protected until its move starts
+
+  // --- techs, knockdowns and footstools ---
+  techPlan: number;     // TECH_UNROLLED / TECH_ARMED / TECH_DECLINED / TECH_PRESSED for the current airtime
+  techDir: number;      // Btn.Left or Btn.Right held into the landing for a tech roll, 0 in place
+  techAge: number;      // real frames since the tech press, so a window that closed in the air is re-thought
+  downWait: number;     // real frames left lying downed before a get-up option, -1 until picked
+  stoolRolled: number;  // 1 once the current footstool opportunity has been rolled for
+
+  // --- Final Smash ---
+  fsDelay: number;      // real frames left before a full meter is spent, -1 until it is seen full
+  fsWait: number;       // real frames a ready Final Smash has been held for an invulnerable opponent
+
+  // --- level 0 wandering, used only by dummyInput under the cpuZeroMoves rule ---
+  wanderMode: number;   // WANDER_STAND / WANDER_WALK / WANDER_RUN / WANDER_JUMP
+  wanderDir: number;    // -1 or 1, the way the current walk or run is heading
+  wanderTimer: number;  // frames left on the current plan, 0 = pick a new one
+  wanderJumpCd: number; // frames until another recovery jump is allowed
 }
 
 /**
@@ -72,18 +115,25 @@ interface CpuMem {
 function initMem(mem: CpuMem): void {
   mem.prevHeld = 0; mem.dirHeld = 0; mem.cooldown = 0; mem.shieldTimer = 0; mem.aerialCd = 0;
   mem.lastAerial = -99999;
-  mem.dashPhase = 0; mem.uairPhase = 0; mem.vertBit = 0; mem.vertFrames = 0; mem.smashPending = 0;
+  mem.uairPhase = 0; mem.vertBit = 0; mem.vertFrames = 0; mem.smashPending = 0;
   mem.egPhase = 0; mem.egFrames = 0; mem.ffPhase = 0; mem.dancePhase = 0; mem.danceTimer = 0;
   mem.spaceTimer = 0; mem.prevMove = null;
   mem.stallFrames = 0; mem.stallSample = 0; mem.sampleX = 0; mem.sampleY = 0; mem.sampleDamage = 0;
   mem.forceMode = 0; mem.forceFrames = 0;
-  mem.dodgeCd = 0; mem.dodgeIntent = 0; mem.attackLock = 0; mem.oppMove = null; mem.oppStarted = null; mem.oppRepeat = 0;
+  mem.dodgeCd = 0; mem.attackLock = 0; mem.oppMove = null; mem.oppStarted = null; mem.oppRepeat = 0;
   mem.oppShots = 0; mem.oppShotAge = 0;
   mem.tiltBit = 0; mem.tiltFrames = 0;
   mem.bairPhase = 0;
   mem.matchRef = null; mem.matchFrame = -1;
   mem.jumpHold = 0; mem.chargePending = 0; mem.chargeFrames = 0; mem.dropPhase = 0;
-  mem.orbHold = 0;
+  mem.orbHold = 0; mem.jabPending = 0;
+  mem.lastLeftPress = -99999; mem.lastRightPress = -99999; mem.lastUpPress = -99999; mem.lastDownPress = -99999;
+  mem.intendedRolls = 0;
+  mem.pummelGoal = -1; mem.pummels = 0; mem.mashLast = 0;
+  mem.counterWait = 0;
+  mem.techPlan = TECH_UNROLLED; mem.techDir = 0; mem.techAge = 0; mem.downWait = -1; mem.stoolRolled = 0;
+  mem.fsDelay = -1; mem.fsWait = 0;
+  mem.wanderMode = WANDER_STAND; mem.wanderDir = 1; mem.wanderTimer = 0; mem.wanderJumpCd = 0;
 }
 
 /**
@@ -98,6 +148,15 @@ export function resetCpu(slot?: number): void {
     return;
   }
   if (slot >= 0 && slot < memSlots.length) initMem(memSlots[slot]);
+}
+
+/**
+ * Debug read for the harness: rolls this slot asked for on purpose (a grounded Dodge press with a
+ * direction held) since its current match began. Any roll the sim saw beyond these was a double
+ * tap the output guard let slip.
+ */
+export function cpuIntendedRolls(slot: number): number {
+  return slot >= 0 && slot < memSlots.length ? memSlots[slot].intendedRolls : 0;
 }
 
 interface GroundInfo {
@@ -151,6 +210,21 @@ interface CpuProfile {
   juggle: number;
   /** How fast a repeated opponent move is recognised as a pattern and run down during its recovery. */
   adaptRate: number;
+  /**
+   * Chance per decision of grabbing a shield sitting inside grab reach. A shield is the one thing
+   * a grab beats outright, so a CPU that never grabs lets a turtle block forever.
+   */
+  grabRate: number;
+  /**
+   * Chance of shooting an inbound projectile down with a quicker one of our own, when the clash is
+   * one our shot wins or trades, instead of spending shield or a dodge on it.
+   */
+  projBlock: number;
+  /**
+   * Longest random extra wait, in frames, before a full Final Smash meter is spent. A bad player
+   * sits on it for seconds; a good one takes it the moment it is safe.
+   */
+  fsPatience: number;
 }
 
 /**
@@ -159,18 +233,20 @@ interface CpuProfile {
  */
 const CPU_PROFILES: readonly CpuProfile[] = Object.freeze([
   // 0 (unused, mirrors level 1)
-  { period: 14, reactMs: 250, shieldChance: 0.05, punishChance: 0, edgeguard: 0, comboChance: 0, smashAccuracy: 0, diQuality: 0, spacing: 0, missChance: 0.30, dodgeSkill: 0, mixupRate: 0, shieldFloor: 2, bairRate: 0, juggle: 0, adaptRate: 0 },
-  { period: 14, reactMs: 250, shieldChance: 0.05, punishChance: 0, edgeguard: 0, comboChance: 0, smashAccuracy: 0, diQuality: 0, spacing: 0, missChance: 0.30, dodgeSkill: 0, mixupRate: 0, shieldFloor: 2, bairRate: 0, juggle: 0, adaptRate: 0 },
-  { period: 11, reactMs: 200, shieldChance: 0.12, punishChance: 0, edgeguard: 0, comboChance: 0, smashAccuracy: 0.10, diQuality: 0, spacing: 0, missChance: 0.24, dodgeSkill: 0.03, mixupRate: 0.05, shieldFloor: 4, bairRate: 0.02, juggle: 0.05, adaptRate: 0.02 },
-  { period: 8, reactMs: 155, shieldChance: 0.22, punishChance: 0, edgeguard: 0, comboChance: 0.05, smashAccuracy: 0.20, diQuality: 0.10, spacing: 0.05, missChance: 0.18, dodgeSkill: 0.08, mixupRate: 0.12, shieldFloor: 6, bairRate: 0.05, juggle: 0.12, adaptRate: 0.06 },
-  { period: 6, reactMs: 120, shieldChance: 0.35, punishChance: 0.15, edgeguard: 0, comboChance: 0.15, smashAccuracy: 0.35, diQuality: 0.25, spacing: 0.15, missChance: 0.12, dodgeSkill: 0.18, mixupRate: 0.22, shieldFloor: 9, bairRate: 0.12, juggle: 0.22, adaptRate: 0.14 },
-  { period: 5, reactMs: 95, shieldChance: 0.50, punishChance: 0.30, edgeguard: 0.10, comboChance: 0.30, smashAccuracy: 0.50, diQuality: 0.45, spacing: 0.30, missChance: 0.05, dodgeSkill: 0.32, mixupRate: 0.35, shieldFloor: 12, bairRate: 0.22, juggle: 0.35, adaptRate: 0.26 },
-  { period: 4, reactMs: 75, shieldChance: 0.65, punishChance: 0.50, edgeguard: 0.30, comboChance: 0.50, smashAccuracy: 0.65, diQuality: 0.60, spacing: 0.50, missChance: 0.03, dodgeSkill: 0.48, mixupRate: 0.50, shieldFloor: 15, bairRate: 0.35, juggle: 0.50, adaptRate: 0.42 },
-  { period: 3, reactMs: 55, shieldChance: 0.80, punishChance: 0.70, edgeguard: 0.55, comboChance: 0.70, smashAccuracy: 0.80, diQuality: 0.75, spacing: 0.70, missChance: 0.015, dodgeSkill: 0.65, mixupRate: 0.66, shieldFloor: 17, bairRate: 0.50, juggle: 0.66, adaptRate: 0.60 },
-  { period: 2, reactMs: 35, shieldChance: 0.92, punishChance: 0.88, edgeguard: 0.80, comboChance: 0.88, smashAccuracy: 0.92, diQuality: 0.90, spacing: 0.85, missChance: 0.005, dodgeSkill: 0.82, mixupRate: 0.80, shieldFloor: 19, bairRate: 0.68, juggle: 0.82, adaptRate: 0.78 },
-  { period: 1, reactMs: 17, shieldChance: 1.0, punishChance: 1.0, edgeguard: 1.0, comboChance: 1.0, smashAccuracy: 1.0, diQuality: 1.0, spacing: 1.0, missChance: 0, dodgeSkill: 0.95, mixupRate: 0.92, shieldFloor: 20, bairRate: 0.85, juggle: 0.95, adaptRate: 0.94 },
+  { period: 14, reactMs: 250, shieldChance: 0.05, punishChance: 0, edgeguard: 0, comboChance: 0, smashAccuracy: 0, diQuality: 0, spacing: 0, missChance: 0.30, dodgeSkill: 0, mixupRate: 0, shieldFloor: 2, bairRate: 0, juggle: 0, adaptRate: 0, grabRate: 0, projBlock: 0, fsPatience: 300 },
+  { period: 14, reactMs: 250, shieldChance: 0.05, punishChance: 0, edgeguard: 0, comboChance: 0, smashAccuracy: 0, diQuality: 0, spacing: 0, missChance: 0.30, dodgeSkill: 0, mixupRate: 0, shieldFloor: 2, bairRate: 0, juggle: 0, adaptRate: 0, grabRate: 0, projBlock: 0, fsPatience: 300 },
+  { period: 11, reactMs: 200, shieldChance: 0.12, punishChance: 0, edgeguard: 0, comboChance: 0, smashAccuracy: 0.10, diQuality: 0, spacing: 0, missChance: 0.24, dodgeSkill: 0.03, mixupRate: 0.05, shieldFloor: 4, bairRate: 0.02, juggle: 0.05, adaptRate: 0.02, grabRate: 0.05, projBlock: 0, fsPatience: 300 },
+  { period: 8, reactMs: 155, shieldChance: 0.22, punishChance: 0, edgeguard: 0, comboChance: 0.05, smashAccuracy: 0.20, diQuality: 0.10, spacing: 0.05, missChance: 0.18, dodgeSkill: 0.08, mixupRate: 0.12, shieldFloor: 6, bairRate: 0.05, juggle: 0.12, adaptRate: 0.06, grabRate: 0.12, projBlock: 0.10, fsPatience: 10 },
+  { period: 6, reactMs: 120, shieldChance: 0.35, punishChance: 0.15, edgeguard: 0, comboChance: 0.15, smashAccuracy: 0.35, diQuality: 0.25, spacing: 0.15, missChance: 0.12, dodgeSkill: 0.18, mixupRate: 0.22, shieldFloor: 9, bairRate: 0.12, juggle: 0.22, adaptRate: 0.14, grabRate: 0.25, projBlock: 0.22, fsPatience: 8 },
+  { period: 5, reactMs: 95, shieldChance: 0.50, punishChance: 0.30, edgeguard: 0.10, comboChance: 0.30, smashAccuracy: 0.50, diQuality: 0.45, spacing: 0.30, missChance: 0.05, dodgeSkill: 0.32, mixupRate: 0.35, shieldFloor: 12, bairRate: 0.22, juggle: 0.35, adaptRate: 0.26, grabRate: 0.40, projBlock: 0.38, fsPatience: 6 },
+  { period: 4, reactMs: 75, shieldChance: 0.65, punishChance: 0.50, edgeguard: 0.30, comboChance: 0.50, smashAccuracy: 0.65, diQuality: 0.60, spacing: 0.50, missChance: 0.03, dodgeSkill: 0.48, mixupRate: 0.50, shieldFloor: 15, bairRate: 0.35, juggle: 0.50, adaptRate: 0.42, grabRate: 0.55, projBlock: 0.55, fsPatience: 4 },
+  { period: 3, reactMs: 55, shieldChance: 0.80, punishChance: 0.70, edgeguard: 0.55, comboChance: 0.70, smashAccuracy: 0.80, diQuality: 0.75, spacing: 0.70, missChance: 0.015, dodgeSkill: 0.65, mixupRate: 0.66, shieldFloor: 17, bairRate: 0.50, juggle: 0.66, adaptRate: 0.60, grabRate: 0.70, projBlock: 0.72, fsPatience: 3 },
+  { period: 2, reactMs: 35, shieldChance: 0.92, punishChance: 0.88, edgeguard: 0.80, comboChance: 0.88, smashAccuracy: 0.92, diQuality: 0.90, spacing: 0.85, missChance: 0.005, dodgeSkill: 0.82, mixupRate: 0.80, shieldFloor: 19, bairRate: 0.68, juggle: 0.82, adaptRate: 0.78, grabRate: 0.85, projBlock: 0.88, fsPatience: 2 },
+  { period: 1, reactMs: 17, shieldChance: 1.0, punishChance: 1.0, edgeguard: 1.0, comboChance: 1.0, smashAccuracy: 1.0, diQuality: 1.0, spacing: 1.0, missChance: 0, dodgeSkill: 0.95, mixupRate: 0.92, shieldFloor: 20, bairRate: 0.85, juggle: 0.95, adaptRate: 0.94, grabRate: 0.95, projBlock: 0.97, fsPatience: 1 },
 ]);
 
+// Level 0 is not a difficulty and never reaches here: cpuInput hands it to dummyInput first, and
+// level 10 and up never does either: cpuInput hands it to aevalmereInput.
 /** Clamps any incoming level into 1..9 and returns its profile. */
 function profileFor(level: number): CpuProfile {
   return CPU_PROFILES[Math.max(1, Math.min(9, Math.round(level) || 1))];
@@ -226,11 +302,26 @@ const ORB_RANGE = 186;
 const ORB_CHARGE_FRAMES = 24;
 const ORB_CHARGE_MIN_FRAMES = 6;
 /**
- * The side special's crescent turns around on frame 20 and sweeps back through the thrower for
- * the rest of its 56-frame life, so it covers about 100 px in front and about 80 px behind.
+ * How far in front of the thrower the side special's shot reaches before it turns around, and how
+ * far behind the thrower it sweeps before it dies. Worked out once at module init from Aeval's own
+ * sspecial projectile def (spawn offset, speed, returnFrame, lifetime), so a retune of the shot can
+ * never leave these two readings stale. With the current def (x 20, vx 4.25, turn on 31, life 82)
+ * that is about 152 px out and about 65 px back.
  */
-const CRESCENT_OUT = 150;
-const CRESCENT_BACK = 80;
+function crescentReach(): { out: number; back: number } {
+  const def = CHARACTER_DEFS.aeval;
+  const shots = def ? def.moves.sspecial.projectiles : undefined;
+  if (shots === undefined || shots.length === 0) return { out: 150, back: 65 };
+  const pd = shots[0];
+  const speed = Math.abs(pd.vx);
+  const turn = pd.returnFrame === undefined ? pd.lifetime : Math.min(pd.returnFrame, pd.lifetime);
+  const out = pd.x + speed * turn;
+  const end = out - speed * (pd.lifetime - turn);
+  return { out, back: end < 0 ? -end : 0 };
+}
+const CRESCENT = crescentReach();
+const CRESCENT_OUT = CRESCENT.out;
+const CRESCENT_BACK = CRESCENT.back;
 /** How far mid-range counts, for a bare (uncharged) neutral-special poke; inside ORB_RANGE. */
 const MID_RANGE_MIN = 34;
 const MID_RANGE_MAX = 120;
@@ -241,12 +332,6 @@ const THREAT_RANGE = 46;
 /** Band we dash-dance in: outside the opponent's reach but close enough to punish a step in. */
 const SPACING_MIN = 40;
 const SPACING_MAX = 78;
-/**
- * Spacing from which a CPU stutter-steps its approach (breaking the hold every other decision)
- * instead of walking straight in. Below it the approach is a plain hold, which is both what a
- * mediocre player does and, measurably, what works better without the follow-up game to back it.
- */
-const STUTTER_SPACING = 0.45;
 /** Real frames a dash-dance step is held before flipping, so a 1-frame CPU still actually moves. */
 const DANCE_HOLD = 7;
 /**
@@ -329,22 +414,95 @@ function armTilt(mem: CpuMem, bit: number): number {
 
 /** Grounded frames a queued retreating bair stays armed for before it is abandoned. */
 const BAIR_WINDUP = 8;
+/**
+ * Grab rate from which a profile owns the dash grab (the level 6 row and up). A dash grab whiffed
+ * is 38 frames stood in front of someone, so the sloppier profiles only ever grab standing.
+ */
+const DASH_GRAB_RATE = 0.5;
+/** Distance inside which a shielding opponent is worth closing on for a grab at all. */
+const GRAB_APPROACH = 90;
+/** Distance in px inside which the nearer ledge counts as near, for a back throw off it. */
+const THROW_LEDGE_NEAR = 90;
+/** Percent from which an up throw is taken for its height, and under which a down throw starts a combo. */
+const UTHROW_PERCENT = 110;
+const DTHROW_PERCENT = 50;
+/** comboChance from which a hold is worth a pummel or two before the throw. */
+const PUMMEL_COMBO = 0.3;
+/**
+ * Every bit a grabbed CPU mashes with. The sim counts each fresh press of any of these. Shield and
+ * Dodge are left out on purpose: either press is a tech press, which starts TECH.lockout, and a
+ * throw launches straight into the tumble that lockout would then stop us teching.
+ */
+const MASH_BITS: readonly number[] = [
+  Btn.Left, Btn.Right, Btn.Up, Btn.Down, Btn.Jump, Btn.Attack, Btn.Special, Btn.Grab,
+];
+
+/** CpuMem.techPlan: nothing rolled yet for this airtime, a tech armed, declined, or already pressed. */
+const TECH_UNROLLED = 0;
+const TECH_ARMED = 1;
+const TECH_DECLINED = 2;
+const TECH_PRESSED = 3;
+/**
+ * Frames ahead of a predicted landing inside which the tech is decided and pressed. Half of
+ * TECH.window, so the press still counts if the prediction is off by as much again either way.
+ */
+const TECH_LOOK = 10;
+/** Distance from the main stage's edge inside which a tech or get-up roll goes toward the middle. */
+const EDGE_ROLL = 50;
+/** comboChance from which a profile owns the footstool at all. */
+const FOOTSTOOL_COMBO = 0.3;
+/** How close to a ledge the opponent has to be for a footstool to be worth taking. */
+const FOOTSTOOL_LEDGE_NEAR = 60;
+/** Share of the footstool urge left when the opponent is safely in the middle of the stage. */
+const FOOTSTOOL_RARE = 0.05;
+/** InputFrame.direct code of the footstool command: it jumps off a head, and does nothing without one. */
+const FOOTSTOOL_CODE = DIRECT_CODES.indexOf('footstool') + 1;
+/** Real frames a ready Final Smash is held back for an opponent who is invulnerable right now. */
+const FS_INVULN_WAIT = 60;
+/**
+ * Slack on top of the sim's roll tap window. A second press of the same direction closer than
+ * this to the first is held back, so the CPU never double taps into a roll or spot dodge it did
+ * not ask for.
+ */
+const TAP_GUARD_SLACK = 2;
+/** Buttons that, pressed on the same frame, start an action before locomotion ever reads a tap. */
+const TAP_CONSUMERS = Btn.Attack | Btn.Special | Btn.Jump | Btn.Grab | Btn.Dodge;
+
+/**
+ * CpuMem.wanderMode: the four plans a level 0 CPU picks between under the cpuZeroMoves rule.
+ * Declared above the preallocation loop below, because initMem reads WANDER_STAND while that loop
+ * is still running.
+ */
+const WANDER_STAND = 0;
+const WANDER_WALK = 1;
+const WANDER_RUN = 2;
+const WANDER_JUMP = 3;
+/** Distance from the main platform's edge at which a wandering level 0 turns around. */
+const WANDER_EDGE = 40;
+/** Depth below the main platform's top from which a level 0 in the air counts as needing to recover. */
+const WANDER_FALL = 40;
+/** Frames between one recovery jump and the next, so a level 0 never burns every jump at once. */
+const WANDER_JUMP_CD = 30;
 
 const inputFrames: InputFrame[] = [];
 const memSlots: CpuMem[] = [];
 for (let i = 0; i < MAX_PLAYERS; i++) {
-  inputFrames.push({ held: 0, pressed: 0, released: 0 });
+  inputFrames.push({ held: 0, pressed: 0, released: 0, direct: 0 });
   const mem: CpuMem = {
     prevHeld: 0, dirHeld: 0, cooldown: 0, shieldTimer: 0, aerialCd: 0, lastAerial: -99999,
-    dashPhase: 0, uairPhase: 0, vertBit: 0, vertFrames: 0, smashPending: 0,
+    uairPhase: 0, vertBit: 0, vertFrames: 0, smashPending: 0,
     egPhase: 0, egFrames: 0, ffPhase: 0, dancePhase: 0, danceTimer: 0, spaceTimer: 0, prevMove: null,
     stallFrames: 0, stallSample: 0, sampleX: 0, sampleY: 0, sampleDamage: 0,
     forceMode: 0, forceFrames: 0,
-    dodgeCd: 0, dodgeIntent: 0, attackLock: 0, oppMove: null, oppStarted: null, oppRepeat: 0,
+    dodgeCd: 0, attackLock: 0, oppMove: null, oppStarted: null, oppRepeat: 0,
     oppShots: 0, oppShotAge: 0,
     tiltBit: 0, tiltFrames: 0,
     bairPhase: 0, matchRef: null, matchFrame: -1,
-    jumpHold: 0, chargePending: 0, chargeFrames: 0, dropPhase: 0, orbHold: 0,
+    jumpHold: 0, chargePending: 0, chargeFrames: 0, dropPhase: 0, orbHold: 0, jabPending: 0,
+    lastLeftPress: 0, lastRightPress: 0, lastUpPress: 0, lastDownPress: 0, intendedRolls: 0,
+    pummelGoal: -1, pummels: 0, mashLast: 0, counterWait: 0,
+    techPlan: 0, techDir: 0, techAge: 0, downWait: -1, stoolRolled: 0, fsDelay: -1, fsWait: 0,
+    wanderMode: WANDER_STAND, wanderDir: 1, wanderTimer: 0, wanderJumpCd: 0,
   };
   initMem(mem);
   memSlots.push(mem);
@@ -371,7 +529,7 @@ function getGround(stageId: string): GroundInfo {
       }
     }
   }
-  const b = stage ? stage.blast : { x: -420, y: -300, w: 840, h: 540 };
+  const b = stage ? stage.blast : { x: -483, y: -480, w: 966, h: 720 };
   const info: GroundInfo = { minX, maxX, topY, blastTop: b.y };
   groundCache.set(stageId, info);
   return info;
@@ -390,7 +548,7 @@ function nearestOpponent(state: GameState, slot: number, me: FighterState): Figh
   let bestD = Infinity;
   for (let i = 0; i < state.fighters.length; i++) {
     const f = state.fighters[i];
-    if (f.slot === slot) continue;
+    if (f.slot === slot || sameTeam(state, slot, f.slot)) continue;
     if (f.stocks <= 0 || f.action === 'dead') continue;
     const dx = f.x - me.x;
     const dy = f.y - me.y;
@@ -498,17 +656,360 @@ function vulnerableFor(f: FighterState): number {
 function incomingProjectile(state: GameState, slot: number, me: FighterState): number {
   let soonest = -1;
   for (let i = 0; i < state.projectiles.length; i++) {
-    const pr = state.projectiles[i];
-    if (!pr.alive || pr.owner === slot) continue;
-    const dx = me.x - pr.x;
-    if (dx * pr.vx <= 0) continue;                       // moving away from us
-    const dy = Math.abs((me.y - 22) - pr.y);
-    if (dy > 42) continue;
-    const t = Math.abs(dx) / Math.abs(pr.vx);
-    if (t > 40) continue;
+    const t = inboundFrames(state, state.projectiles[i], slot, me);
+    if (t < 0) continue;
     if (soonest < 0 || t < soonest) soonest = t;
   }
   return soonest;
+}
+
+/**
+ * The one inbound test every projectile read shares: frames until a live hostile shot reaches us
+ * along its current line, or -1 when it is ours, moving away, outside our height band, or more
+ * than 40 frames out.
+ */
+function inboundFrames(state: GameState, pr: ProjectileState, slot: number, me: FighterState): number {
+  // A teammate's shot cannot hurt us under the Teams rule, so it is never a threat.
+  if (!pr.alive || pr.owner === slot || sameTeam(state, slot, pr.owner)) return -1;
+  const dx = me.x - pr.x;
+  if (dx * pr.vx <= 0) return -1;                        // moving away from us
+  if (Math.abs((me.y - 22) - pr.y) > 42) return -1;
+  const t = Math.abs(dx) / Math.abs(pr.vx);
+  return t > 40 ? -1 : t;
+}
+
+/**
+ * True when the soonest inbound projectile (the one incomingProjectile timed) would hit low, i.e.
+ * a roll would not dodge it. Only its height is read: the projectile defs live inside the sim.
+ */
+function incomingLow(state: GameState, slot: number, me: FighterState): boolean {
+  let soonest = -1;
+  let low = false;
+  for (let i = 0; i < state.projectiles.length; i++) {
+    const pr = state.projectiles[i];
+    const t = inboundFrames(state, pr, slot, me);
+    if (t < 0) continue;
+    if (soonest < 0 || t < soonest) {
+      soonest = t;
+      low = isLowHit(me, pr.y, undefined, null, true);
+    }
+  }
+  return low;
+}
+
+// ---------------------------------------------------------------------------
+// Projectile counter: shooting an inbound shot down with a quicker one of our own. Everything is
+// a prediction off present state and the projectile data of both moves, stepped frame by frame
+// exactly the way sim/projectiles.ts flies them and sim/hits.ts clashes them.
+// ---------------------------------------------------------------------------
+
+/**
+ * Mirrors CLASH_TOLERANCE in sim/hits.ts, which is not exported: two shots whose effective damage
+ * sits within this share of the stronger one both die, otherwise the stronger survives.
+ */
+const CLASH_TOLERANCE = 0.1;
+/** projBlock from which a winning counter that flies on into the shooter is taken over any block. */
+const PROJ_PRESSURE_SKILL = 0.55;
+/** Real frames a fired counter's press is protected from being replaced before its move starts. */
+const COUNTER_WAIT = 3;
+
+/**
+ * The inputs a counter-shot can be fired with. A `turns` move faces the held direction as it
+ * starts (sim/actions.ts specialAttack); the rest keep the current facing. A `standing` move turns
+ * into something else out of a dash or run (a jab becomes a dash attack). Whether each one throws
+ * anything at all, and what, is read off the character's own move data.
+ */
+interface CounterInput { id: MoveId; btn: number; turns: boolean; standing: boolean }
+const COUNTER_INPUTS: readonly CounterInput[] = [
+  { id: 'jab', btn: Btn.Attack, turns: false, standing: true },
+  { id: 'nspecial', btn: Btn.Special, turns: false, standing: false },
+  { id: 'sspecial', btn: Btn.Special, turns: true, standing: false },
+];
+
+interface CounterPlan {
+  moveBtn: number;
+  dirBit: number;
+  /** Frames from now until the two shots meet. */
+  clashIn: number;
+  outcome: 'win' | 'trade';
+  /** A win whose surviving shot flies on into the shooter. Only worked out for profiles that use it. */
+  pressure: boolean;
+}
+
+/** A shot being flown ahead of time. Two are preallocated: the inbound one and our answer. */
+interface ShotSim { x: number; y: number; vx: number; vy: number; age: number; power: number; returned: boolean }
+
+const counterPlan: CounterPlan = { moveBtn: 0, dirBit: 0, clashIn: 0, outcome: 'trade', pressure: false };
+const simIn: ShotSim = { x: 0, y: 0, vx: 0, vy: 0, age: 0, power: 1, returned: false };
+const simMine: ShotSim = { x: 0, y: 0, vx: 0, vy: 0, age: 0, power: 1, returned: false };
+const COUNTER_HURT: Rect = { x: 0, y: 0, w: 0, h: 0 };
+/** The last simulateClash: 0 they never meet, 1 ours survives, 2 both die, 3 ours dies. */
+let clashResult = 0;
+let clashT = -1;
+/** Where the inbound shot was when they met, which is where its burst goes off. */
+let clashX = 0;
+let clashY = 0;
+
+let projBlockOverride: number | null = null;
+
+/**
+ * TEST HOOK ONLY (src/ai/aitest.ts). Forces every profile's projBlock to `value`, or restores the
+ * table with null, so the harness can replay a scenario with the counter switched off.
+ */
+export function setCpuProjBlockOverrideForTest(value: number | null): void {
+  projBlockOverride = value;
+}
+
+function loadShot(s: ShotSim, pr: ProjectileState): void {
+  s.x = pr.x; s.y = pr.y; s.vx = pr.vx; s.vy = pr.vy;
+  s.age = pr.age; s.power = pr.power; s.returned = pr.returned;
+}
+
+/** One frame of sim/projectiles.ts stepProjectiles on a copy. False once the shot has expired. */
+function stepShot(s: ShotSim, d: ProjectileDef): boolean {
+  if (d.returnFrame !== undefined && !s.returned && s.age >= d.returnFrame) {
+    s.vx = -s.vx;
+    s.power *= d.returnPower === undefined ? 0.5 : d.returnPower;
+    s.returned = true;
+  }
+  s.x += s.vx;
+  s.y += s.vy;
+  s.vy += d.gravity;
+  s.age++;
+  return s.age < d.lifetime;
+}
+
+/** Ground friction for one frame, as sim/physics.ts applies it. */
+function frictionStep(vx: number, def: CharacterDef): number {
+  if (vx > 0) return Math.max(0, vx - def.groundFriction);
+  if (vx < 0) return Math.min(0, vx + def.groundFriction);
+  return 0;
+}
+
+/** Standing hurtbox with the feet at (x, me.y). Firing anything leaves us standing. */
+function standingHurt(me: FighterState, def: CharacterDef, x: number): Rect {
+  COUNTER_HURT.x = x - def.hurtbox.w / 2;
+  COUNTER_HURT.y = me.y - def.hurtbox.h;
+  COUNTER_HURT.w = def.hurtbox.w;
+  COUNTER_HURT.h = def.hurtbox.h;
+  return COUNTER_HURT;
+}
+
+/**
+ * Frames until a hostile shot really overlaps our hurtbox, flying its actual path (gravity, the
+ * turnaround, its lifetime) rather than a straight line, or -1 when it never does. Our own slide
+ * is stepped alongside, since whatever we do next roots us into ground friction.
+ */
+function shotHitIn(pr: ProjectileState, pd: ProjectileDef, me: FighterState, def: CharacterDef): number {
+  loadShot(simIn, pr);
+  const r = pd.r * pr.scale;
+  let x = me.x;
+  let vx = me.vx;
+  for (let k = 1; k <= pd.lifetime; k++) {
+    if (!stepShot(simIn, pd)) return -1;
+    if (me.onGround) vx = frictionStep(vx, def);
+    x += vx;
+    if (circleRectOverlap(simIn.x, simIn.y, r, standingHurt(me, def, x))) return k;
+  }
+  return -1;
+}
+
+/**
+ * Where our feet stand when a move pressed now reaches move frame `frame`, `delay` frames after
+ * the press lands. Friction every frame, plus the move's own momentum as it comes due. Actions
+ * run before physics, so the injection on `frame` itself has not moved us yet.
+ */
+function selfXAt(me: FighterState, def: CharacterDef, mv: MoveDef, facing: number, delay: number, frame: number): number {
+  let x = me.x;
+  let vx = me.vx;
+  const vel = mv.velocity;
+  for (let k = 1; k < delay + frame; k++) {
+    const j = k - delay;
+    if (vel !== undefined && j >= 0) {
+      for (let i = 0; i < vel.length; i++) {
+        const v = vel[i];
+        if (v.frame !== j || v.vx === undefined) continue;
+        vx = v.setX === true ? v.vx * facing : vx + v.vx * facing;
+      }
+    }
+    if (me.onGround) vx = frictionStep(vx, def);
+    x += vx;
+  }
+  return x;
+}
+
+/**
+ * Flies an inbound shot and one of ours, spawned on step `spawnStep` (step 1 is the frame our
+ * press is read on), together until they overlap or `limit` steps run out. A shot spawns before
+ * the projectile step of its own frame and can clash on that same frame, and an expired shot is
+ * gone before clashes are checked, both exactly as the sim orders them. Leaves the result in the
+ * clash scratch, with simMine holding our shot as it stands after the meeting.
+ */
+function simulateClash(
+  pr: ProjectileState, pd: ProjectileDef, sd: ProjectileDef, facing: number,
+  spawnX: number, spawnY: number, spawnStep: number, power: number, scale: number, limit: number,
+): void {
+  clashResult = 0;
+  clashT = -1;
+  loadShot(simIn, pr);
+  const reach = pd.r * pr.scale + sd.r * scale;
+  for (let k = 1; k < limit; k++) {
+    if (!stepShot(simIn, pd)) return;
+    if (k < spawnStep) continue;
+    if (k === spawnStep) {
+      simMine.x = spawnX; simMine.y = spawnY; simMine.vx = sd.vx * facing; simMine.vy = sd.vy;
+      simMine.age = 0; simMine.power = power; simMine.returned = false;
+    }
+    if (!stepShot(simMine, sd)) return;
+    const dx = simIn.x - simMine.x;
+    const dy = simIn.y - simMine.y;
+    if (dx * dx + dy * dy > reach * reach) continue;
+    const inD = pd.damage * simIn.power;
+    const myD = sd.damage * simMine.power;
+    const gap = inD > myD ? inD - myD : myD - inD;
+    clashT = k;
+    clashX = simIn.x;
+    clashY = simIn.y;
+    if (gap <= Math.max(inD, myD) * CLASH_TOLERANCE) {
+      clashResult = 2;
+    } else if (myD > inD) {
+      clashResult = 1;
+      simMine.power *= gap / myD;
+    } else {
+      clashResult = 3;
+    }
+    return;
+  }
+}
+
+/** True when the burst an inbound shot leaves where it dies would still catch us. */
+function burstHurts(pd: ProjectileDef, me: FighterState, def: CharacterDef): boolean {
+  if (pd.burstId === undefined) return false;
+  const bd = PROJECTILE_DEFS[pd.burstId];
+  if (bd === undefined) return false;
+  return circleRectOverlap(clashX, clashY, bd.r, standingHurt(me, def, me.x));
+}
+
+/**
+ * True when our shot that just won (simMine) keeps flying into the shooter: it outlasts the burst
+ * the dead shot leaves behind, is travelling at them, and has the life left to arrive.
+ */
+function counterPresses(state: GameState, pr: ProjectileState, pd: ProjectileDef, sd: ProjectileDef): boolean {
+  if (pd.burstId !== undefined) {
+    const bd = PROJECTILE_DEFS[pd.burstId];
+    if (bd !== undefined) {
+      const myD = sd.damage * simMine.power;
+      if (myD <= bd.damage || myD - bd.damage <= myD * CLASH_TOLERANCE) return false;
+    }
+  }
+  const shooter = fighterBySlot(state, pr.owner);
+  if (shooter === null || shooter.stocks <= 0 || shooter.action === 'dead') return false;
+  const gapX = shooter.x - simMine.x;
+  if (gapX * simMine.vx <= 0) return false;
+  let life = sd.lifetime - simMine.age;
+  if (sd.returnFrame !== undefined && !simMine.returned) life = Math.min(life, sd.returnFrame - simMine.age);
+  return Math.abs(simMine.vx) * life >= Math.abs(gapX) - hurtHalfWidth(shooter);
+}
+
+/** Half the standing hurtbox width we credit a fighter with, from their own character data. */
+function hurtHalfWidth(f: FighterState): number {
+  const def = CHARACTER_DEFS[f.charId];
+  return def ? def.hurtbox.w / 2 : 13;
+}
+
+/**
+ * Plans shooting an inbound projectile down. For every hostile shot heading at us, and every
+ * projectile move we could start right now that throws toward it, both shots are flown frame by
+ * frame to the first overlap. A plan counts only when the meeting lands before the soonest real
+ * hit of any inbound shot (a counter that stops one shot while another connects has still eaten
+ * the hit) and our shot wins or trades by the sim's clash rule, and when the burst the dead shot
+ * leaves behind cannot reach us. Wins beat trades, then the earliest meeting wins. Returns the
+ * preallocated plan, or null when nothing qualifies.
+ */
+function planProjectileCounter(
+  state: GameState, slot: number, me: FighterState, def: CharacterDef, prof: CpuProfile,
+): CounterPlan | null {
+  let soonest = -1;
+  for (let i = 0; i < state.projectiles.length; i++) {
+    const pr = state.projectiles[i];
+    if (inboundFrames(state, pr, slot, me) < 0) continue;
+    const pd = PROJECTILE_DEFS[pr.defId];
+    if (pd === undefined) continue;
+    const h = shotHitIn(pr, pd, me, def);
+    if (h >= 0 && (soonest < 0 || h < soonest)) soonest = h;
+  }
+  if (soonest < 0) return null;
+  const limit = soonest - 1;
+  const running = me.action === 'dash' || me.action === 'run';
+
+  let bestRank = -1;
+  let bestT = 0;
+  for (let i = 0; i < state.projectiles.length; i++) {
+    const pr = state.projectiles[i];
+    if (inboundFrames(state, pr, slot, me) < 0) continue;
+    const pd = PROJECTILE_DEFS[pr.defId];
+    if (pd === undefined) continue;
+    const facing = pr.x > me.x ? 1 : pr.x < me.x ? -1 : 0;
+    if (facing === 0) continue;
+
+    for (let c = 0; c < COUNTER_INPUTS.length; c++) {
+      const ci = COUNTER_INPUTS[c];
+      const mv = def.moves[ci.id];
+      if (mv === undefined || mv.projectiles === undefined) continue;
+      if ((mv.groundOnly === true && !me.onGround) || (mv.airOnly === true && me.onGround)) continue;
+      if (ci.standing && running) continue;
+      if (!ci.turns && me.facing !== facing) continue;
+      // Out of a shield only an Attack comes straight out; anything else waits a frame for the
+      // shield to drop. Otherwise a chargeable move pressed with its own charge button starts
+      // charging and lets go into its frame 0 a frame later, as a tap.
+      let delay = 1;
+      if (me.action === 'shield' && ci.btn !== Btn.Attack) delay++;
+      else if (mv.chargeable === true && (mv.chargeButton === 'special' ? Btn.Special : Btn.Attack) === ci.btn) delay++;
+      const power = projectileChargePower(0, mv.chargeable);
+      const scale = projectileChargeScale(0, mv.chargeable);
+      const shots = mv.projectiles;
+      for (let s = 0; s < shots.length; s++) {
+        const sd = shots[s];
+        if (sd.spawnFrame < 0) continue;              // a burst payload, not thrown by the move
+        const spawnStep = delay + sd.spawnFrame;
+        if (spawnStep >= limit) continue;
+        const x = selfXAt(me, def, mv, facing, delay, sd.spawnFrame);
+        simulateClash(pr, pd, sd, facing, x + sd.x * facing, me.y + sd.y, spawnStep, power, scale, limit);
+        if (clashResult !== 1 && clashResult !== 2) continue;
+        const rank = clashResult === 1 ? 1 : 0;
+        if (rank < bestRank || (rank === bestRank && clashT >= bestT)) continue;
+        if (burstHurts(pd, me, def)) continue;
+        bestRank = rank;
+        bestT = clashT;
+        counterPlan.moveBtn = ci.btn;
+        counterPlan.dirBit = ci.turns ? (facing === 1 ? Btn.Right : Btn.Left) : 0;
+        counterPlan.clashIn = clashT;
+        counterPlan.outcome = rank === 1 ? 'win' : 'trade';
+        counterPlan.pressure = rank === 1 && prof.projBlock >= PROJ_PRESSURE_SKILL &&
+          counterPresses(state, pr, pd, sd);
+      }
+    }
+  }
+  return bestRank < 0 ? null : counterPlan;
+}
+
+/**
+ * Fires a planned counter. Everything that could eat or bend the press is let go first: a held
+ * shield strips the direction a side special needs, and a pending charge or smash would replace
+ * the buffer. The attack lock is dropped for this frame because the plan already proved the
+ * clash lands before the shot does.
+ */
+function fireCounter(mem: CpuMem, plan: CounterPlan): number {
+  mem.shieldTimer = 0;
+  mem.orbHold = 0;
+  mem.chargeFrames = 0;
+  mem.chargePending = 0;
+  mem.smashPending = 0;
+  mem.tiltFrames = 0;
+  mem.attackLock = 0;
+  mem.counterWait = COUNTER_WAIT;
+  mem.dirHeld = plan.dirBit;
+  return plan.moveBtn;
 }
 
 /** One of our own moves, straight out of the character data. Null when the id is missing. */
@@ -669,35 +1170,58 @@ function canReturn(me: FighterState, g: GroundInfo): boolean {
   return outX <= EG_MAX_OUT;
 }
 
+/** Clearance in px a chasing jump's apex has to keep from the top blast line. */
+const CEILING_MARGIN = 50;
+
+/**
+ * True when a jump launched now at `vel` px/frame peaks safely under the top blast line. A juggle
+ * chase from a high platform toward an opponent already near the ceiling carries straight through
+ * it: the uair keeps the rising momentum, so the chase has to be refused before the jump.
+ */
+function jumpClearsCeiling(me: FighterState, g: GroundInfo, vel: number): boolean {
+  const def = CHARACTER_DEFS[me.charId];
+  const grav = def ? def.gravity : 0.15;
+  const rise = Math.max(vel, -me.vy);
+  const peak = me.y - (rise * rise) / (2 * grav);
+  return peak > g.blastTop + CEILING_MARGIN;
+}
+
+/** Full hop velocity, or the double jump's when `double` is set, from the character data. */
+function jumpVel(me: FighterState, double: boolean): number {
+  const def = CHARACTER_DEFS[me.charId];
+  if (!def) return 5;
+  return double ? def.doubleJumpVel : def.jumpVel;
+}
+
 /** True while there is enough shield left to spend a block without flirting with a break. */
 function shieldAffordable(prof: CpuProfile, me: FighterState, cost: number): boolean {
   return me.shieldHp - cost > prof.shieldFloor + SHIELD_RESERVE;
 }
 
 /**
- * Shield plus Down for a frame. The sim reads that out of `shield` (or straight out of idle) as a
- * spot dodge: invincible on frames 3-17 of 22. dodgeIntent tells cpuInput to let the direction
- * through instead of stripping it, which is what keeps a plain block a plain block.
+ * Dodge with no direction held on the ground: a spot dodge, invincible on frames 3-17 of 22. The
+ * shield is dropped for it, since Shield only shields now and a held one adds nothing.
  */
 function spotDodgeNow(mem: CpuMem): number {
-  mem.shieldTimer = 2;
-  mem.dodgeIntent = 1;
+  mem.shieldTimer = 0;
   mem.dodgeCd = DODGE_COOLDOWN;
-  mem.dirHeld = Btn.Down;
-  return 0;
-}
-
-/** Shield plus a direction: a roll, invincible on frames 4-19 of 30, travelling ROLL.distance px. */
-function rollNow(mem: CpuMem, dirBit: number): number {
-  mem.shieldTimer = 2;
-  mem.dodgeIntent = 1;
-  mem.dodgeCd = DODGE_COOLDOWN;
-  mem.dirHeld = dirBit;
-  return 0;
+  mem.dirHeld = 0;
+  return Btn.Dodge;
 }
 
 /**
- * Shield pressed while airborne: an air dodge, invincible on frames 3-27 of 30. A held direction
+ * Dodge with a direction held on the same frame: a roll, travelling ROLL.distance px and dodging
+ * frames 4-19 of 30. It dodges everything except low hits, so callers check the threat first.
+ */
+function rollNow(mem: CpuMem, dirBit: number): number {
+  mem.shieldTimer = 0;
+  mem.dodgeCd = DODGE_COOLDOWN;
+  mem.dirHeld = dirBit;
+  return Btn.Dodge;
+}
+
+/**
+ * Dodge pressed while airborne: an air dodge, invincible on frames 3-27 of 30. A held direction
  * gives it momentum, so it doubles as a movement and recovery mixup.
  */
 function airDodgeSafe(me: FighterState, g: GroundInfo): boolean {
@@ -706,10 +1230,30 @@ function airDodgeSafe(me: FighterState, g: GroundInfo): boolean {
 
 function airDodgeNow(mem: CpuMem, dirBit: number): number {
   mem.dodgeCd = DODGE_COOLDOWN;
-  mem.dodgeIntent = 0;
   mem.shieldTimer = 0;
   mem.dirHeld = dirBit;
-  return Btn.Shield;
+  return Btn.Dodge;
+}
+
+/**
+ * True when the move the opponent is in has any hitbox a roll cannot dodge (see sim/dodge.ts):
+ * a flagged low box, a low move by id, or a box whose centre sits down by our feet. Rolling into
+ * a sweep is rolling into the hit, so every roll answer checks this first.
+ */
+function threatIsLow(me: FighterState, opp: FighterState): boolean {
+  const mv = activeMove(opp);
+  if (mv === null) return false;
+  for (let i = 0; i < mv.hitboxes.length; i++) {
+    const h = mv.hitboxes[i];
+    if (isLowHit(me, opp.y + h.y, h.low, opp.moveId, opp.onGround)) return true;
+  }
+  return false;
+}
+
+/** The grab data a fighter's character grabs with. */
+function kitFor(f: FighterState): GrabKit {
+  const def = CHARACTER_DEFS[f.charId];
+  return def ? grabKitOf(def) : DEFAULT_GRAB_KIT;
 }
 
 /**
@@ -806,10 +1350,9 @@ function onSoftPlatform(state: GameState, me: FighterState): boolean {
   return false;
 }
 
-/** A plain block, with nothing held that the sim could read as a roll or a spot dodge. */
+/** A plain block, with nothing held that the sim could read as a double-tap roll or spot dodge. */
 function holdShield(mem: CpuMem, frames: number): number {
   mem.shieldTimer = frames;
-  mem.dodgeIntent = 0;
   mem.dirHeld = 0;
   return 0;
 }
@@ -822,7 +1365,7 @@ function holdShield(mem: CpuMem, frames: number): number {
  */
 function defend(
   prof: CpuProfile, rand: () => number, me: FighterState, mem: CpuMem, g: GroundInfo,
-  frames: number, cost: number, towardBit: number, awayBit: number, wantIn: boolean,
+  frames: number, cost: number, towardBit: number, awayBit: number, wantIn: boolean, low: boolean,
 ): number {
   const canShield = shieldAffordable(prof, me, cost);
   // Only part of the profile's dodge skill is spent dodging. A dodge is 22-30 committed frames,
@@ -843,33 +1386,23 @@ function defend(
     if (frames >= 3 && frames <= SPOT_DODGE.invEnd - 1 && rand() < 0.34 + 0.24 * prof.mixupRate) {
       return spotDodgeNow(mem);
     }
-    if (frames >= ROLL.invStart && frames <= ROLL.invEnd) {
+    // A roll dodges everything but a low hit, so against a sweep it is never the answer: the spot
+    // dodge is fully invincible, and failing that a jump clears the sweep or the shield eats it.
+    if (!low && frames >= ROLL.invStart && frames <= ROLL.invEnd) {
       const inward = wantIn && rand() < 0.4 + 0.6 * prof.adaptRate;
       return rollNow(mem, inward ? towardBit : awayBit);
     }
+    if (low && frames >= 3 && frames <= SPOT_DODGE.invEnd - 1) return spotDodgeNow(mem);
     if (frames >= 7 && rand() < 0.35 + 0.45 * prof.mixupRate) {
       return armJump(prof, rand, mem, true, wantIn ? towardBit : 0);
     }
     if (!canShield) {
       // Out of shield budget and out of dodges: simply stop being in the line of fire.
-      mem.dirHeld = awayBit;
+      mem.dirHeld = safeStep(me, g, awayBit) | Btn.Walk;
       return 0;
     }
   }
   return holdShield(mem, Math.max(6, Math.min(18, Math.round(frames) + 5)));
-}
-
-/**
- * Turns a held approach direction into a dash: the sim only dashes on a second tap of the same
- * direction, so the hold is broken for one decision to produce that tap.
- */
-function approachDir(prof: CpuProfile, mem: CpuMem, me: FighterState, dir: number): number {
-  if (prof.spacing < STUTTER_SPACING || dir === 0) return dir;
-  // Already dashing or running: releasing the direction now skids to a stop, which at a one-frame
-  // decision cadence turns the whole approach into a stutter that never travels anywhere.
-  if (me.action === 'dash' || me.action === 'run') return dir;
-  mem.dashPhase = mem.dashPhase === 0 ? 1 : 0;
-  return mem.dashPhase === 1 ? 0 : dir;
 }
 
 /**
@@ -948,12 +1481,14 @@ function ledgeApproach(
   // walking into it; the rest still crowd the edge the way they always did.
   const stop = prof.spacing > 0.4 ? LEDGE_TRAP : LEDGE_STOP;
   const backoff = stop - (LEDGE_STOP - LEDGE_BACKOFF);
+  // Walked, never run: a dash carries far past a 10 px stop band and turns the approach into a
+  // skid back and forth that never gets to throw anything.
   if (distInward > stop) {
-    mem.dirHeld = towardEdgeBit;
+    mem.dirHeld = towardEdgeBit | Btn.Walk;
     return 0;
   }
   if (distInward < backoff) {
-    mem.dirHeld = stageBit;
+    mem.dirHeld = stageBit | Btn.Walk;
     return 0;
   }
 
@@ -1051,7 +1586,7 @@ function juggle(
   // No vertical hitbox reaches sideways, so being under them is the whole prerequisite.
   const usSpan = us === null ? 17 : moveSpan(us) + 12;
   if (adx > Math.max(usSpan, VERT_ALIGN)) {
-    mem.dirHeld = towardBit;
+    mem.dirHeld = towardBit | Btn.Walk;
     return 0;
   }
 
@@ -1101,13 +1636,13 @@ function juggle(
   // Above everything grounded: chase with a jumped uair, held through jumpsquat so it is a full
   // hop rather than the short hop a one-frame tap produces. Only with the jumps to come home.
   if (ua !== null && dy < ceiling && mem.aerialCd === 0 && canReturn(me, g) &&
-      rand() < 0.15 + 0.85 * skill) {
+      jumpClearsCeiling(me, g, jumpVel(me, false)) && rand() < 0.15 + 0.85 * skill) {
     mem.uairPhase = UAIR_WINDUP;
     return armJump(prof, rand, mem, true, 0);
   }
 
   // Nothing connects yet. Stay under them and wait for them to fall into something; never drift.
-  mem.dirHeld = adx > 8 ? towardBit : 0;
+  mem.dirHeld = adx > 8 ? towardBit | Btn.Walk : 0;
   return 0;
 }
 
@@ -1166,7 +1701,23 @@ function groundFight(
   // Shield HP budgeting. Holding a shield down to zero is a shield break, and a shield break is
   // 180 stunned frames, i.e. a free stock. Bail out well before that: roll away and reset.
   if (me.action === 'shield' && me.shieldHp <= prof.shieldFloor + SHIELD_RESERVE) {
-    return rollNow(mem, awayBit);
+    // Out of the same shield a sweep would catch the roll, so spot dodge that one instead.
+    return threatIsLow(me, opp) ? spotDodgeNow(mem) : rollNow(mem, awayBit);
+  }
+
+  // Shielding against a grab wind-up is standing still for it: a grab goes straight through a
+  // shield. Jump out or spot dodge before the box is live, as often as this profile blocks at all.
+  if (me.action === 'shield' && opp.action === 'grab' && opp.onGround && Math.abs(dy) < 30) {
+    // Which box is coming is not on the public state, so the longer dash grab bounds both.
+    const kit = kitFor(opp);
+    const reach = Math.max(kit.stand.x + kit.stand.r, kit.dash.x + kit.dash.r) + 8;
+    const lastLive = Math.max(kit.stand.end, kit.dash.end);
+    const facingUs = (me.x - opp.x) * opp.facing > 0;
+    if (facingUs && adx <= reach && opp.actionFrame < lastLive && rand() < prof.shieldChance) {
+      mem.shieldTimer = 0;
+      if (mem.dodgeCd === 0 && rand() < 0.5) return spotDodgeNow(mem);
+      return armJump(prof, rand, mem, false, 0);
+    }
   }
 
   // Punish a dodge. A spot dodge and a roll both end in a window with no invincibility left, and a
@@ -1179,7 +1730,7 @@ function groundFight(
         mem.dirHeld = 0;
         return Btn.Attack;
       }
-      mem.dirHeld = adx > MY_REACH - 8 ? towardBit : 0;
+      mem.dirHeld = adx > MY_REACH - 8 ? towardBit | Btn.Walk : 0;
       return 0;
     }
     const left = Math.max(0, ROLL.total - opp.actionFrame);
@@ -1187,7 +1738,7 @@ function groundFight(
     const destAdx = Math.abs(destX - me.x);
     // Rolling through us: a forward smash covers one side, a down smash covers both.
     const through = (destX - me.x) * (opp.x - me.x) < 0;
-    // So does the crescent, now that it comes home: thrown out in front it turns on frame 20 and
+    // So does the crescent, now that it comes home: thrown out in front it turns (returnFrame) and
     // sweeps back through us into the space they rolled to, which is a cleaner answer to a
     // cross-up roll than turning around and guessing. Only profiles that read patterns find it.
     if (through && destAdx < CRESCENT_BACK && prof.adaptRate > 0.5 && left >= 6 &&
@@ -1207,8 +1758,40 @@ function groundFight(
       mem.dirHeld = 0;
       return Btn.Attack;
     }
-    mem.dirHeld = destAdx > 10 ? (destX < me.x ? Btn.Left : Btn.Right) : 0;
+    mem.dirHeld = destAdx > 10 ? (destX < me.x ? Btn.Left : Btn.Right) | Btn.Walk : 0;
     return 0;
+  }
+
+  // Grab a shield. A shield blocks every hit and nothing else, and a long shield stun is the same
+  // standing target. Standing grab from inside its reach while facing them; from a dash already
+  // under way, the longer dash grab slides into them from further out.
+  const shieldLocked = opp.action === 'shield' || opp.action === 'shieldStun';
+  if (shieldLocked && prof.grabRate > 0 && opp.onGround && Math.abs(dy) < 24) {
+    const kit = kitFor(me);
+    const standReach = kit.stand.x + kit.stand.r + 6;
+    const running = me.action === 'dash' || me.action === 'run';
+    if (running && me.facing === towardNum && prof.grabRate >= DASH_GRAB_RATE) {
+      const slide = Math.abs(me.vx) * kit.dash.start * 0.5;
+      const dashReach = kit.dash.x + kit.dash.r + 6 + slide;
+      if (adx <= dashReach && rand() < prof.grabRate) {
+        mem.dirHeld = towardBit;
+        return Btn.Grab;
+      }
+    }
+    if (settled && !running && me.facing === towardNum && adx <= standReach && rand() < prof.grabRate) {
+      mem.shieldTimer = 0;
+      mem.dirHeld = 0;
+      return Btn.Grab;
+    }
+    // Close the gap on purpose. A profile that owns the dash grab runs in; the rest walk up.
+    if (settled && adx <= GRAB_APPROACH && rand() < prof.grabRate) {
+      mem.shieldTimer = 0;
+      if (adx > standReach || me.facing !== towardNum) {
+        const dash = prof.grabRate >= DASH_GRAB_RATE && adx > standReach + 16;
+        mem.dirHeld = safeStep(me, ground, towardBit) | (dash ? 0 : Btn.Walk);
+        return 0;
+      }
+    }
   }
 
   // Whirlpool. 50 frames, four pulling hits and a launching fifth: a stock on a hard read and a
@@ -1259,7 +1842,7 @@ function groundFight(
     const eta = framesUntilLevel(opp, me.y, 80);
     if (eta >= SMASH_STARTUP + CHARGE_MIN + 1 && rand() < rate(prof, 6.0 * prof.smashAccuracy)) {
       if (adx > MY_REACH) {
-        mem.dirHeld = safeStep(me, ground, towardBit);   // get under the landing spot first
+        mem.dirHeld = safeStep(me, ground, towardBit) | Btn.Walk;   // get under the landing spot first
         return 0;
       }
       return chargeSmashFor(prof, rand, mem, eta, towardBit);
@@ -1292,7 +1875,29 @@ function groundFight(
   if (settled && inStartup(opp) && adx < THREAT_RANGE &&
       framesToActive(opp) >= reactFrames(prof) && rand() < prof.shieldChance) {
     return defend(prof, rand, me, mem, ground, framesToActive(opp), SHIELD_COST_MELEE,
-                  towardBit, awayBit, false);
+                  towardBit, awayBit, false, threatIsLow(me, opp));
+  }
+
+  // Shoot it down. A shot met by a quicker shot of our own dies in the air, which costs neither
+  // shield nor a dodge's committed frames, and a counter that wins flies on into the shooter.
+  // Same reaction gate as the answers below; with no qualifying plan they run unchanged.
+  if (settled && me.buffer.btn === 0 && mem.orbHold === 0) {
+    const projBlock = projBlockOverride === null ? prof.projBlock : projBlockOverride;
+    const inbound = projBlock > 0 ? incomingProjectile(state, slot, me) : -1;
+    const def = CHARACTER_DEFS[me.charId];
+    if (inbound >= reactFrames(prof) && def) {
+      const plan = planProjectileCounter(state, slot, me, def, prof);
+      // The output stage drops an Attack near an edge or on a soft platform while the aerial gate
+      // is up, and a button still held from before is no press at all.
+      const stripped = plan !== null && plan.moveBtn === Btn.Attack && mem.aerialCd > 0 &&
+        (me.x < ground.minX + 24 || me.x > ground.maxX - 24 || onSoftPlatform(state, me));
+      if (plan !== null && !stripped && (mem.prevHeld & plan.moveBtn) === 0) {
+        // A disciplined profile takes a winning counter that carries on into the shooter outright,
+        // even with shield to spare: blocking hands the tempo back, this takes it.
+        const pressing = projBlock >= PROJ_PRESSURE_SKILL && plan.outcome === 'win' && plan.pressure;
+        if (pressing || rand() < projBlock) return fireCounter(mem, plan);
+      }
+    }
   }
 
   // Answer an inbound projectile. Same reaction gate: it only counts if there is still time to do
@@ -1303,7 +1908,7 @@ function groundFight(
     if (inbound >= reactFrames(prof) && inbound < 26 && rand() < prof.shieldChance) {
       const wantIn = spammy && rand() < prof.adaptRate;
       return defend(prof, rand, me, mem, ground, inbound, SHIELD_COST_SHOT,
-                    towardBit, awayBit, wantIn);
+                    towardBit, awayBit, wantIn, incomingLow(state, slot, me));
     }
   }
 
@@ -1318,7 +1923,7 @@ function groundFight(
         mem.dirHeld = towardBit;
         return Btn.Attack;                       // dash attack straight out of the run-in
       }
-      mem.dirHeld = approachDir(prof, mem, me, towardBit);
+      mem.dirHeld = towardBit;                   // a plain hold runs
       return 0;
     }
     if (open >= SMASH_STARTUP + 2 && rand() < prof.smashAccuracy) {
@@ -1333,7 +1938,7 @@ function groundFight(
   if (settled && adx <= 120 && adx > MY_REACH && vulnerableFor(opp) >= 18 &&
       Math.abs(dy) < 50 && rand() < prof.punishChance) {
     mem.spaceTimer = 0;
-    mem.dirHeld = approachDir(prof, mem, me, towardBit);
+    mem.dirHeld = towardBit;
     return 0;
   }
 
@@ -1341,7 +1946,8 @@ function groundFight(
   // resetting to neutral.
   if (opp.hitstun > 0 && rand() < prof.comboChance) {
     if (dy < -40 && adx < 44) {
-      if (mem.aerialCd === 0 && rand() < prof.comboChance) {
+      if (mem.aerialCd === 0 && jumpClearsCeiling(me, ground, jumpVel(me, false)) &&
+          rand() < prof.comboChance) {
         mem.uairPhase = UAIR_WINDUP;
         return armJump(prof, rand, mem, true, 0);
       }
@@ -1372,6 +1978,7 @@ function groundFight(
   if (dy < -VERT_MIN) {
     if (prof.juggle < JUGGLE_MIN || rand() > 0.15 + 0.85 * prof.juggle) {
       if (adx > VERT_ALIGN) { mem.dirHeld = towardBit; return 0; }
+      if (!jumpClearsCeiling(me, ground, jumpVel(me, false))) { mem.dirHeld = 0; return 0; }
       return armJump(prof, rand, mem, true, 0);
     }
     return juggle(prof, rand, me, opp, mem, ground, dy, adx, towardBit);
@@ -1385,8 +1992,10 @@ function groundFight(
   else if (mem.spaceTimer < 1000) mem.spaceTimer += prof.period;
   if (inBand && mem.spaceTimer <= SPACING_PATIENCE && opp.hitstun === 0 &&
       me.x > ground.minX + 34 && me.x < ground.maxX - 34 && rand() < prof.spacing) {
+    // Every step in the band is walked: a dash covers the whole band in a few frames and hands
+    // the spacing away the moment it starts.
     if (inStartup(opp)) {
-      mem.dirHeld = awayBit;
+      mem.dirHeld = awayBit | Btn.Walk;
       return 0;
     }
     // Retreating back air. Jump while still facing them, then hold away in the air: the sim reads
@@ -1400,12 +2009,12 @@ function groundFight(
       return armJump(prof, rand, mem, false, 0);
     }
     if (mem.danceTimer > 0) {
-      mem.dirHeld = mem.dancePhase === 1 ? towardBit : awayBit;
+      mem.dirHeld = (mem.dancePhase === 1 ? towardBit : awayBit) | Btn.Walk;
       return 0;
     }
     mem.danceTimer = DANCE_HOLD;
     mem.dancePhase = mem.dancePhase === 1 ? 0 : 1;
-    mem.dirHeld = mem.dancePhase === 1 ? towardBit : awayBit;
+    mem.dirHeld = (mem.dancePhase === 1 ? towardBit : awayBit) | Btn.Walk;
     return 0;
   }
 
@@ -1439,8 +2048,8 @@ function groundFight(
         return Btn.Special;
       }
     }
-    // Side special. The crescent flies about 100 px out, turns on frame 20 and sweeps back
-    // through the thrower for the rest of its 56 frames, so one throw covers both sides and an
+    // Side special. The crescent flies CRESCENT_OUT px out, turns on its returnFrame and sweeps
+    // back through the thrower for the rest of its lifetime, so one throw covers both sides and an
     // opponent who jumps or rolls behind is still in its path. Thrown from outside the
     // dash-dance band, where the move's own 42 frames cannot be walked through and punished.
     if (adx > SPACING_MAX && adx < CRESCENT_OUT && Math.abs(dy) < 60 && vulnerableFor(opp) === 0 &&
@@ -1468,7 +2077,9 @@ function groundFight(
       if (adx < 140 && rand() < 0.3 + 0.7 * prof.spacing) pulse |= Btn.Jump;
     }
     if (adx <= 90 && dir !== 0 && rand() < rate(prof, 0.02 * (1 - prof.spacing))) pulse |= Btn.Special;
-    if (adx > 90) dir = approachDir(prof, mem, me, dir);
+    // Run the long approach, walk the last stretch: arriving at a run turns the first Attack into
+    // a dash attack and carries the fighter straight through the range it meant to stop at.
+    if (adx <= 90 && dir !== 0) dir |= Btn.Walk;
     mem.dirHeld = dir;
     return pulse;
   }
@@ -1510,7 +2121,7 @@ function groundFight(
     mem.dirHeld = 0;
     return Btn.Attack;
   }
-  mem.dirHeld = towardBit;
+  mem.dirHeld = towardBit | Btn.Walk;
   return staleTap ? Btn.Attack : 0;
 }
 
@@ -1541,7 +2152,8 @@ function airFight(
       return Btn.Attack;
     }
     const overStage = me.x > ground.minX + 8 && me.x < ground.maxX - 8;
-    if (pdy < moveTop(ua) && me.jumpsLeft > 0 && me.vy > -1.2 && overStage && canReturn(me, ground)) {
+    if (pdy < moveTop(ua) && me.jumpsLeft > 0 && me.vy > -1.2 && overStage && canReturn(me, ground) &&
+        jumpClearsCeiling(me, ground, jumpVel(me, true))) {
       // A double jump needs a fresh press, so release for one frame if Jump is still held.
       if ((mem.prevHeld & Btn.Jump) !== 0) {
         mem.jumpHold = 0;
@@ -1611,6 +2223,287 @@ function airFight(
   return pulse;
 }
 
+/**
+ * A hold. Profiles with a follow-up game pummel once or twice while the hold timer still has room
+ * for a whole pummel against a mashing victim, then throw. The throw is picked by position: a back
+ * throw off a ledge close behind us, a forward throw toward the ledge we face, an up throw for a
+ * kill at high percent in the middle of the stage, a down throw to start a combo at low percent.
+ */
+function holdDecision(
+  state: GameState, prof: CpuProfile, rand: () => number, me: FighterState, mem: CpuMem, g: GroundInfo,
+): number {
+  const kit = kitFor(me);
+  // Hold timer and partner are sim-side fields rather than FighterState ones, but they live on the
+  // very object the sim steps, so reading them is reading the game state.
+  const sim = me as SimFighter;
+  if (mem.pummelGoal < 0) {
+    mem.pummelGoal = prof.comboChance >= PUMMEL_COMBO ? 1 + (rand() < 0.5 ? 1 : 0) : 0;
+    mem.pummels = 0;
+  }
+  // Room for a whole pummel even while the victim mashes the timer down several frames at a time.
+  if (mem.pummels < mem.pummelGoal && sim.grabTimer > kit.pummel.totalFrames * 3 &&
+      (mem.prevHeld & Btn.Attack) === 0) {
+    mem.pummels++;
+    mem.dirHeld = 0;
+    return Btn.Attack;
+  }
+
+  const vi = sim.grabPartner;
+  const victimPercent = vi >= 0 && vi < state.fighters.length ? state.fighters[vi].percent : 0;
+
+  const leftDist = me.x - g.minX;
+  const rightDist = g.maxX - me.x;
+  const ledgeDir = leftDist < rightDist ? -1 : 1;
+  const ledgeDist = Math.min(leftDist, rightDist);
+  const forwardBit = me.facing === 1 ? Btn.Right : Btn.Left;
+  const backBit = me.facing === 1 ? Btn.Left : Btn.Right;
+  let bit: number;
+  if (me.facing !== ledgeDir && ledgeDist <= THROW_LEDGE_NEAR) bit = backBit;
+  else if (me.facing === ledgeDir) bit = forwardBit;
+  else if (victimPercent >= UTHROW_PERCENT) bit = Btn.Up;
+  else if (victimPercent < DTHROW_PERCENT) bit = Btn.Down;
+  else bit = forwardBit;
+  // The hold reads a fresh press, so a direction still held from before is let go for a frame.
+  if ((mem.prevHeld & bit) !== 0) {
+    mem.dirHeld = 0;
+    return 0;
+  }
+  mem.dirHeld = bit;
+  return 0;
+}
+
+/**
+ * Frames until a launched fighter's feet touch a platform top, or -1 when nothing is under it
+ * inside `maxLook`. Stepped the way sim/physics.ts moves it: knockback decay while hitstun lasts
+ * (the sim ticks hitstun down before it moves the fighter), plain gravity after, no drift. The
+ * launch speed and direction are sim-side fields on the object the sim steps, so reading them is
+ * reading the game state, the same way holdDecision reads the grab timer.
+ */
+function framesToLanding(state: GameState, me: FighterState, maxLook: number): number {
+  if (me.onGround) return 0;
+  const stage = STAGE_DEFS[state.stageId];
+  const def = CHARACTER_DEFS[me.charId];
+  if (!stage || !def) return -1;
+  const sim = me as SimFighter;
+  const cap = me.fastFalling ? def.fastFall : def.maxFall;
+  let x = me.x;
+  let y = me.y;
+  let vx = me.vx;
+  let vy = me.vy;
+  let kbSpeed = sim.kbSpeed;
+  let kbFall = sim.kbFall;
+  for (let k = 1; k <= maxLook; k++) {
+    if (me.hitstun - k > 0) {
+      kbSpeed = Math.max(0, kbSpeed - TUNING.knockback.decay);
+      kbFall = Math.min(def.maxFall, kbFall + def.gravity);
+      vx = sim.kbDirX * kbSpeed;
+      vy = sim.kbDirY * kbSpeed + kbFall;
+    } else {
+      vy = Math.min(vy + def.gravity, Math.max(cap, vy));
+    }
+    const prevY = y;
+    x += vx;
+    y += vy;
+    if (vy < 0) continue;
+    for (let i = 0; i < stage.platforms.length; i++) {
+      const p = stage.platforms[i];
+      if (x < p.x || x > p.x + p.w || y < p.y || prevY > p.y + 0.001) continue;
+      if (!p.solid && sim.dropTimer - k > 0) continue;
+      return k;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Which way a tech rolls. Near the edge the roll goes toward the middle, since a tech in place
+ * there is a free ledge trap; otherwise disciplined profiles mix in place with both rolls so the
+ * getup cannot be covered on reflex, and the rest simply stay where they land.
+ */
+function techDirFor(prof: CpuProfile, rand: () => number, me: FighterState, g: GroundInfo): number {
+  const inward = me.x < (g.minX + g.maxX) / 2 ? Btn.Right : Btn.Left;
+  if (me.x < g.minX + EDGE_ROLL || me.x > g.maxX - EDGE_ROLL) {
+    return rand() < 0.5 + 0.5 * prof.mixupRate ? inward : 0;
+  }
+  const r = rand();
+  if (r < 0.3 * prof.mixupRate) return Btn.Left;
+  if (r < 0.6 * prof.mixupRate) return Btn.Right;
+  return 0;
+}
+
+/**
+ * The tech, run every real frame while tumbling, outside the decision cadence: a tech is a timing
+ * and a level 1's 14-frame thinking period is longer than half the window. Once per airtime, when
+ * the landing is TECH_LOOK frames out, the profile rolls for it; an armed tech presses Shield once,
+ * after any lockout from an earlier press has run out so the press actually counts. Returns the
+ * pulse; cpuInput holds mem.techDir into the landing for as long as the plan is live.
+ */
+function planTech(state: GameState, prof: CpuProfile, rand: () => number, me: FighterState, mem: CpuMem): number {
+  if (mem.techPlan === TECH_PRESSED) {
+    mem.techAge++;
+    if (mem.techAge < TECH.window) return 0;
+    // Still in the air with the window closed (a second hit, a bad read): think again.
+    mem.techPlan = TECH_UNROLLED;
+  }
+  if (mem.techPlan === TECH_DECLINED) return 0;
+  const land = framesToLanding(state, me, TECH_LOOK);
+  // Hitlag freezes the fighter without freezing the clock the prediction counts in.
+  if (land < 0 || land + me.hitlag > TECH_LOOK) return 0;
+  if (mem.techPlan === TECH_UNROLLED) {
+    if (rand() >= 0.05 + 0.95 * prof.diQuality) {
+      mem.techPlan = TECH_DECLINED;
+      return 0;
+    }
+    mem.techPlan = TECH_ARMED;
+    mem.techDir = techDirFor(prof, rand, me, getGround(state.stageId));
+  }
+  // consumeInput ticks the lockout before it reads the press, so a lockout of 1 has already expired.
+  if ((me as SimFighter).techLockout > 1) return 0;
+  // The output stage keeps Shield released while launched, so waiting a frame makes the press fresh.
+  if ((mem.prevHeld & Btn.Shield) !== 0) return 0;
+  mem.techPlan = TECH_PRESSED;
+  mem.techAge = 0;
+  return Btn.Shield;
+}
+
+/**
+ * Lying downed. The wait before acting is drawn once per knockdown: a weak profile lies there for
+ * most of KNOCKDOWN.maxFrames, a strong one moves on reaction. Then a get-up attack if the opponent
+ * is inside its reach, a roll toward the middle when the edge is close (or as a mixup), and a plain
+ * stand otherwise. The sim reads the get-up directions as presses, so a direction still held from
+ * DI is let go for a frame first.
+ */
+function getUpDecision(
+  prof: CpuProfile, rand: () => number, me: FighterState, opp: FighterState | null, mem: CpuMem, g: GroundInfo,
+): number {
+  mem.dirHeld = 0;
+  if (mem.downWait < 0) {
+    const most = Math.round(KNOCKDOWN.maxFrames * (1 - prof.diQuality));
+    mem.downWait = reactFrames(prof) + Math.floor(rand() * (most + 1));
+  }
+  if (mem.downWait > 0) return 0;
+
+  let bit = Btn.Up;
+  const gu = myMove(me, 'getupatk');
+  if (gu !== null && opp !== null && opp.invuln === 0 && Math.abs(opp.y - me.y) < 30 &&
+      Math.abs(opp.x - me.x) <= moveSpan(gu) + hurtHalfWidth(opp) &&
+      rand() < 0.4 + 0.6 * prof.punishChance) {
+    bit = Btn.Attack;
+  } else {
+    const inward = me.x < (g.minX + g.maxX) / 2 ? Btn.Right : Btn.Left;
+    const nearEdge = me.x < g.minX + EDGE_ROLL || me.x > g.maxX - EDGE_ROLL;
+    if (nearEdge || rand() < 0.4 * prof.mixupRate) bit = inward;
+  }
+  if ((mem.prevHeld & bit) !== 0) return 0;
+  return bit;
+}
+
+/**
+ * The fighter whose head our feet are on right now, by the sim's own footstool reach
+ * (sim/footstool.ts), or null. Present state only: the command is consumed next frame and simply
+ * does nothing if the head has moved away by then.
+ */
+const STOOL_HURT: Rect = { x: 0, y: 0, w: 0, h: 0 };
+function footstoolTarget(state: GameState, slot: number, me: FighterState): FighterState | null {
+  for (let i = 0; i < state.fighters.length; i++) {
+    const v = state.fighters[i];
+    if (v.slot === slot || sameTeam(state, slot, v.slot) || v.stocks <= 0 || !canBeHit(v as SimFighter)) continue;
+    if (v.action === 'grabbed' || v.action === 'finalSmashVictim' || isLedgeAction(v.action)) continue;
+    const def = CHARACTER_DEFS[v.charId];
+    if (!def) continue;
+    fighterHurtbox(v, def, STOOL_HURT);
+    const above = STOOL_HURT.y - me.y;
+    if (above < 0 || above > FOOTSTOOL.reachY) continue;
+    if (Math.abs(me.x - v.x) > STOOL_HURT.w / 2 + FOOTSTOOL.reachX) continue;
+    return v;
+  }
+  return null;
+}
+
+/**
+ * Footstool, run every real frame: the reach is a 12 px band a falling fighter crosses in a few
+ * frames. Rolled once per head. Worth it against someone airborne near a ledge or already off the
+ * stage, where the push down is a real threat and the jump back costs nothing; almost never on the
+ * ground or in the middle, where it only hands them a reset. Footstooling grounded heads at the
+ * ledge measurably cost the level 9 profile games against level 5 in the matrix. Sent as the footstool command rather than a Jump press, so a
+ * head that slips away turns into nothing instead of a spent double jump. True when sent.
+ */
+function wantsFootstool(state: GameState, slot: number, prof: CpuProfile, rand: () => number, me: FighterState, mem: CpuMem): boolean {
+  if (me.onGround || me.action !== 'air' || me.hitstun > 0 || me.hitlag > 0) { mem.stoolRolled = 0; return false; }
+  const v = footstoolTarget(state, slot, me);
+  if (v === null) { mem.stoolRolled = 0; return false; }
+  if (mem.stoolRolled === 1 || prof.comboChance < FOOTSTOOL_COMBO) return false;
+  mem.stoolRolled = 1;
+  const g = getGround(state.stageId);
+  // Only an airborne head is a real threat: the push down is what costs a recovering opponent the
+  // stock. A grounded one near the ledge just stands back up 30 frames later with us above it.
+  const exposed = !v.onGround &&
+    (v.x < g.minX + FOOTSTOOL_LEDGE_NEAR || v.x > g.maxX - FOOTSTOOL_LEDGE_NEAR || v.y > g.topY);
+  const urge = exposed ? 0.5 + 0.5 * prof.comboChance : FOOTSTOOL_RARE * prof.comboChance;
+  return rand() < urge;
+}
+
+/**
+ * True when the Final Smash's own 'nearestFacing' pick (sim/finalsmash.ts pickTarget, which does not
+ * skip teammates) would land on a teammate right now.
+ */
+function fsCatchIsTeammate(state: GameState, slot: number, me: FighterState): boolean {
+  let bestD = -1;
+  let teammate = false;
+  for (let i = 0; i < state.fighters.length; i++) {
+    const v = state.fighters[i];
+    if (v.slot === slot || v.stocks <= 0 || v.action === 'dead' || v.action === 'respawn' ||
+        v.action === 'finalSmash' || v.action === 'finalSmashVictim') continue;
+    const dx = v.x - me.x;
+    if (dx * me.facing < -8) continue;
+    const dy = v.y - me.y;
+    const d = dx * dx + dy * dy;
+    if (bestD >= 0 && d >= bestD) continue;
+    bestD = d;
+    teammate = sameTeam(state, slot, v.slot);
+  }
+  return teammate;
+}
+
+/**
+ * Final Smash, run every real frame. Under the rule with a full meter: wait the profile's random
+ * patience out, never spend it while off the stage, face the nearest opponent (holding toward them
+ * turns a grounded fighter for a frame; in the air the facing we have is the one we keep), prefer
+ * an opponent who is not invulnerable, then press Special. Returns the pulse, with mem.dirHeld set,
+ * or -1 when this frame is not the Final Smash's.
+ */
+function finalSmashInput(state: GameState, slot: number, prof: CpuProfile, rand: () => number, me: FighterState, mem: CpuMem): number {
+  const def = CHARACTER_DEFS[me.charId];
+  if (state.config.finalSmash !== true || me.fsMeter < FS_METER.max || !def || def.finalSmash === undefined) {
+    mem.fsDelay = -1;
+    mem.fsWait = 0;
+    return -1;
+  }
+  if (mem.fsDelay < 0) mem.fsDelay = Math.floor(rand() * (prof.fsPatience + 1));
+  if (mem.fsDelay > 0) { mem.fsDelay--; return -1; }
+  const opp = nearestOpponent(state, slot, me);
+  if (opp === null) return -1;
+  const g = getGround(state.stageId);
+  if (me.x <= g.minX || me.x >= g.maxX || me.y > g.topY + 4) return -1;
+  if (!canFinalSmash(state, me as SimFighter, def)) return -1;
+  if ((opp.invuln > 0 || opp.action === 'respawn') && mem.fsWait < FS_INVULN_WAIT) { mem.fsWait++; return -1; }
+
+  mem.orbHold = 0; mem.chargeFrames = 0; mem.chargePending = 0; mem.smashPending = 0; mem.tiltFrames = 0;
+  mem.jabPending = 0; mem.shieldTimer = 0; mem.jumpHold = 0; mem.uairPhase = 0; mem.bairPhase = 0;
+  mem.counterWait = 0;
+  mem.dirHeld = 0;
+  // The catch picks whoever is in front, up to 8 px behind the feet (sim/finalsmash.ts), and it does
+  // not know about teams: hold the meter while a teammate is the one it would catch.
+  if (fsCatchIsTeammate(state, slot, me)) return -1;
+  if ((opp.x - me.x) * me.facing < -8) {
+    if (!me.onGround) return -1;
+    mem.dirHeld = opp.x < me.x ? Btn.Left : Btn.Right;
+    return 0;
+  }
+  if ((mem.prevHeld & Btn.Special) !== 0) return 0;
+  return Btn.Special;
+}
+
 // Recovery, ledge climb, opponent-on-ledge targeting, edgeguarding, and dispatch into grounded /
 // airborne fighting. Returns a one-frame button pulse; persistent movement/hold bits are written
 // into mem.dirHeld.
@@ -1631,7 +2524,24 @@ function decide(state: GameState, slot: number, prof: CpuProfile, rand: () => nu
   if (me.action === 'tumble') {
     mem.egPhase = 0;
     survivalDi(prof, rand, me, mem, ground);
+    // An armed tech owns the landing: jumping out of the tumble now would throw it away.
+    if ((mem.techPlan === TECH_ARMED || mem.techPlan === TECH_PRESSED) &&
+        framesToLanding(state, me, TECH.window) >= 0) {
+      return 0;
+    }
     return Btn.Jump;
+  }
+
+  if (me.action === 'downed') {
+    mem.egPhase = 0;
+    return getUpDecision(prof, rand, me, opp, mem, ground);
+  }
+  // Nothing to decide while someone else owns the fighter: footstooled, or either side of a Final
+  // Smash. Anything pressed would only sit in a buffer the sim keeps clearing.
+  if (me.action === 'footstooled' || me.action === 'finalSmash' || me.action === 'finalSmashVictim') {
+    mem.dirHeld = 0;
+    mem.egPhase = 0;
+    return 0;
   }
 
   if (me.action === 'ledgeHang') {
@@ -1643,8 +2553,24 @@ function decide(state: GameState, slot: number, prof: CpuProfile, rand: () => nu
       const foe = nearestOpponent(state, slot, me);
       const close = foe !== null && Math.abs(foe.x - me.x) < 70;
       if (rand() < (close ? 0.8 : 0.4) * prof.punishChance) return Btn.Attack;
+      // Ledge roll is the Dodge button; it comes up past someone standing on the ledge.
+      if (close && mem.dodgeCd === 0 && rand() < 0.3 * prof.dodgeSkill) {
+        mem.dodgeCd = DODGE_COOLDOWN;
+        return Btn.Dodge;
+      }
       return Btn.Up;
     }
+    return 0;
+  }
+
+  // Holding someone: pummel while the hold can afford it, then throw.
+  if (me.action === 'grabHold') {
+    mem.egPhase = 0;
+    return holdDecision(state, prof, rand, me, mem, ground);
+  }
+  // The rest of a grab runs on its own; anything pressed now would only sit in the buffer.
+  if (me.action === 'grab' || me.action === 'pummel' || me.action === 'throw') {
+    mem.dirHeld = 0;
     return 0;
   }
 
@@ -1672,7 +2598,11 @@ function decide(state: GameState, slot: number, prof: CpuProfile, rand: () => nu
     // Below the stage lip is already late: jump now rather than waiting to be sure we are falling.
     const low = me.y > ground.topY - 4;
     if (me.jumpsLeft > 0 && (me.vy > 0.5 || low) && me.action === 'air') return Btn.Jump;
-    if (me.jumpsLeft === 0 && me.vy > 0 && me.action === 'air') return Btn.Special | Btn.Up;
+    // Just past the corner and high over the lip, drifting home lands on the stage by itself; an up
+    // special there only swings at whoever stands below.
+    const edgeOut = me.x < ground.minX ? ground.minX - me.x : me.x > ground.maxX ? me.x - ground.maxX : 0;
+    const driftsHome = edgeOut < 30 && me.y < ground.topY - 100;
+    if (me.jumpsLeft === 0 && me.vy > 0 && me.action === 'air' && !driftsHome) return Btn.Special | Btn.Up;
     return 0;
   }
 
@@ -1714,12 +2644,16 @@ function decide(state: GameState, slot: number, prof: CpuProfile, rand: () => nu
       mem.egPhase = 0;
     } else {
       const corner = opp.x < 0 ? ground.minX : ground.maxX;
-      mem.dirHeld = towardBit;
+      mem.dirHeld = towardBit | Btn.Walk;
       // Walk off toward a low opponent; hop out to meet one still near stage level.
       if (me.onGround && Math.abs(me.x - corner) < 26 && opp.y < ground.topY + 8) return Btn.Jump;
       return 0;
     }
   }
+
+  // A fired counter-shot owns the frames until its move starts: any new press would replace the
+  // buffered one, and out of a shield it waits a frame for the shield to drop.
+  if (mem.counterWait > 0) return 0;
 
   // A committed tilt owns its frames: the hold has to age past the smash window uninterrupted.
   if (mem.tiltFrames > 0) {
@@ -1762,7 +2696,8 @@ function decide(state: GameState, slot: number, prof: CpuProfile, rand: () => nu
     if (mem.forceMode === 2 && !out && me.action !== 'jumpsquat') {
       return armJump(prof, rand, mem, true, towardBit);
     }
-    mem.dirHeld = mem.forceMode === 3 ? approachDir(prof, mem, me, bit) : bit;
+    // Mode 3 is the dash commitment and runs; the plain relocation walks, as it always did.
+    mem.dirHeld = mem.forceMode === 3 ? bit : bit | Btn.Walk;
     return 0;
   }
 
@@ -1772,8 +2707,169 @@ function decide(state: GameState, slot: number, prof: CpuProfile, rand: () => nu
   return airFight(prof, rand, me, opp, mem, ground, dy, adx, towardBit, awayBit, towardNum);
 }
 
+/**
+ * Holds back a direction press that the sim would read as the second tap of a double tap: Left or
+ * Right again inside the roll tap window is a roll, Down again is a spot dodge. The press simply
+ * waits until the window has passed. A press that shares its frame with a button that starts an
+ * action is let through, because that action is taken before locomotion ever looks at the tap;
+ * that covers every deliberate dodge, which is a Dodge press. Mirrors sim/input.ts consumeInput:
+ * the press being built now is consumed on frame state.frame + 1.
+ */
+function guardTaps(state: GameState, me: FighterState, mem: CpuMem, held: number): number {
+  let pressed = held & ~mem.prevHeld;
+  if ((pressed & TAP_CONSUMERS) !== 0) return held;
+  const now = state.frame + 1;
+  const span = TUNING.input.rollTapWindow + TAP_GUARD_SLACK;
+  if ((pressed & Btn.Left) !== 0 && mem.lastLeftPress > mem.lastRightPress &&
+      now - mem.lastLeftPress <= span) {
+    held &= ~Btn.Left;
+    pressed &= ~Btn.Left;
+  }
+  if ((pressed & Btn.Right) !== 0 && (pressed & Btn.Left) === 0 &&
+      mem.lastRightPress > mem.lastLeftPress && now - mem.lastRightPress <= span) {
+    held &= ~Btn.Right;
+  }
+  // On a pass-through platform a second Down drops through before it could spot dodge.
+  if ((pressed & Btn.Down) !== 0 && (pressed & Btn.Up) === 0 &&
+      mem.lastDownPress > mem.lastUpPress && now - mem.lastDownPress <= span &&
+      !onSoftPlatform(state, me)) {
+    held &= ~Btn.Down;
+  }
+  return held;
+}
+
+/** Records this frame's direction presses the way the sim's tap timers will, and counts deliberate rolls. */
+function trackTaps(state: GameState, me: FighterState | null, mem: CpuMem, held: number): void {
+  const pressed = held & ~mem.prevHeld;
+  const now = state.frame + 1;
+  if ((pressed & Btn.Left) !== 0) mem.lastLeftPress = now;
+  else if ((pressed & Btn.Right) !== 0) mem.lastRightPress = now;
+  if ((pressed & Btn.Up) !== 0) mem.lastUpPress = now;
+  else if ((pressed & Btn.Down) !== 0) mem.lastDownPress = now;
+  if (me !== null && me.onGround && (pressed & Btn.Dodge) !== 0 && (held & (Btn.Left | Btn.Right)) !== 0) {
+    mem.intendedRolls++;
+  }
+}
+
+/**
+ * Level 0: a training dummy, not a difficulty. It never attacks, shields, dodges, grabs or taunts,
+ * whatever the rules say. With the cpuZeroMoves rule off it presses nothing at all and simply
+ * stands where it spawned; with the rule on it wanders the stage on walk, run and jump alone,
+ * turning back from the ledges and recovering if it does end up in the air off-stage.
+ *
+ * Every roll comes off the passed-in `rand` and every timer lives in the slot's CpuMem, so a
+ * level 0 replays exactly as deterministically as any other CPU.
+ */
+function dummyInput(state: GameState, slot: number, rand: () => number, out: InputFrame): InputFrame {
+  out.held = 0;
+  out.pressed = 0;
+  out.released = 0;
+  out.direct = 0;
+
+  const mem = memSlots[slot];
+  // Level 0 returns before cpuInput's own match-identity check runs, so it repeats it here: wander
+  // timers left over from the previous match would stop an identical seed replaying identically.
+  if (mem.matchRef !== null &&
+      (state.config !== mem.matchRef || state.frame + MATCH_RESET_SLACK < mem.matchFrame)) {
+    initMem(mem);
+  }
+  mem.matchRef = state.config;
+  mem.matchFrame = state.frame;
+
+  if (state.config.cpuZeroMoves !== true) return out;
+  const me = fighterBySlot(state, slot);
+  if (me === null) return out;
+  const g = getGround(state.stageId);
+
+  if (mem.wanderTimer > 0) mem.wanderTimer--;
+  if (mem.wanderJumpCd > 0) mem.wanderJumpCd--;
+
+  // A level 0 that tumbles in without teching would otherwise lie downed for the full
+  // KNOCKDOWN.maxFrames: dummyInput never pressed anything else while downed. Jump, Shield or Up
+  // stands it up (see stepDowned in sim/tech.ts); Attack would throw a get-up attack and a
+  // direction would roll, so only Jump is ever pressed here, and only once every WANDER_JUMP_CD
+  // frames so a downed level 0 does not mash it every single frame.
+  if (me.action === 'downed') {
+    if (mem.wanderJumpCd === 0) {
+      out.held = Btn.Jump;
+      out.pressed = Btn.Jump;
+      mem.wanderJumpCd = WANDER_JUMP_CD;
+    }
+    return out;
+  }
+
+  // A fresh plan only ever starts on the frame the old one ran out, which is the only frame a
+  // WANDER_JUMP is allowed to press Jump on; the rest of its timer is spent standing.
+  let picked = false;
+  if (mem.wanderTimer === 0) {
+    picked = true;
+    const r = rand();
+    if (r < 0.45) {
+      mem.wanderMode = WANDER_WALK;
+      mem.wanderDir = rand() < 0.5 ? -1 : 1;
+      mem.wanderTimer = 30 + Math.floor(rand() * 60);
+    } else if (r < 0.70) {
+      mem.wanderMode = WANDER_STAND;
+      mem.wanderTimer = 20 + Math.floor(rand() * 40);
+    } else if (r < 0.85) {
+      mem.wanderMode = WANDER_RUN;
+      mem.wanderDir = rand() < 0.5 ? -1 : 1;
+      mem.wanderTimer = 20 + Math.floor(rand() * 25);
+    } else {
+      mem.wanderMode = WANDER_JUMP;
+      mem.wanderTimer = 30;
+    }
+  }
+
+  // Edge safety: heading at a ledge from close enough to walk off it turns the plan around instead.
+  if (me.onGround) {
+    if ((mem.wanderDir < 0 && me.x < g.minX + WANDER_EDGE) ||
+        (mem.wanderDir > 0 && me.x > g.maxX - WANDER_EDGE)) {
+      mem.wanderDir = -mem.wanderDir;
+    }
+  }
+
+  const offStage = !me.onGround &&
+    (me.x < g.minX || me.x > g.maxX || me.y > g.topY + WANDER_FALL);
+
+  let held = 0;
+  let pressed = 0;
+  if (offStage) {
+    // Drift back toward the middle, and spend a jump on the way down. Never Down: a fast fall out
+    // here is the one input that turns a recoverable fall into a self-destruct.
+    const mid = (g.minX + g.maxX) * 0.5;
+    held |= me.x < mid ? Btn.Right : Btn.Left;
+    if (me.jumpsLeft > 0 && me.vy > 0 && mem.wanderJumpCd === 0) {
+      held |= Btn.Jump;
+      pressed |= Btn.Jump;
+      mem.wanderJumpCd = WANDER_JUMP_CD;
+    }
+  } else if (mem.wanderMode === WANDER_WALK) {
+    held |= Btn.Walk | (mem.wanderDir < 0 ? Btn.Left : Btn.Right);
+  } else if (mem.wanderMode === WANDER_RUN) {
+    held |= mem.wanderDir < 0 ? Btn.Left : Btn.Right;
+  } else if (mem.wanderMode === WANDER_JUMP && picked) {
+    held |= Btn.Jump;
+    pressed |= Btn.Jump;
+  }
+
+  out.held = held;
+  out.pressed = pressed;
+  return out;
+}
+
 export function cpuInput(state: GameState, slot: number, level: number, rand: () => number): InputFrame {
   const frame = inputFrames[slot];
+  // Level 0 is a dummy, not a difficulty: it is answered here and never sees a profile.
+  if (level <= 0) return dummyInput(state, slot, rand, frame);
+  // Level 10 and up is Aevalmere, the search-based brain in ./aevalmere.ts. It keeps its own
+  // per-slot memory; the profile table below only ever serves levels 1 to 9.
+  if (level >= 10) {
+    // Lazily, on the first level 10 frame of a match. A no-op once this config is warm, including
+    // when the host already warmed it before frame 0.
+    warmAevalmere(state.config);
+    return aevalmereInput(state, slot, rand, frame);
+  }
   const mem = memSlots[slot];
   const me = fighterBySlot(state, slot);
   const prof = profileFor(level);
@@ -1790,9 +2886,18 @@ export function cpuInput(state: GameState, slot: number, level: number, rand: ()
 
   if (me && me.hitstun === 0 && mem.shieldTimer > 0) mem.shieldTimer--;
   else mem.shieldTimer = 0;
-  if (mem.shieldTimer === 0) mem.dodgeIntent = 0;
+  // A hold's pummel plan belongs to that hold; the next catch rolls a fresh one.
+  if (me === null || (me.action !== 'grabHold' && me.action !== 'pummel')) mem.pummelGoal = -1;
 
   if (mem.dodgeCd > 0) mem.dodgeCd--;
+  // A get-up wait belongs to one knockdown; the next one draws its own.
+  if (me === null || me.action !== 'downed') mem.downWait = -1;
+  else if (mem.downWait > 0) mem.downWait--;
+  if (mem.counterWait > 0) {
+    // Released once the move is under way, or the moment anything else has taken the fighter.
+    if (me === null || me.action === 'attack' || me.hitstun > 0 || !me.onGround) mem.counterWait = 0;
+    else mem.counterWait--;
+  }
   if (mem.jumpHold > 0) mem.jumpHold--;
   if (me === null || me.action === 'dead') {
     mem.chargeFrames = 0; mem.chargePending = 0; mem.orbHold = 0;
@@ -1909,7 +3014,9 @@ export function cpuInput(state: GameState, slot: number, level: number, rand: ()
     mem.oppStarted = null;
   }
 
-  const curVert = mem.dirHeld & (Btn.Up | Btn.Down);
+  // Read off what was actually sent last frame, not what was intended: the output stage can hold
+  // a press back, and a tilt timed off a Down the sim never saw comes out as a smash.
+  const curVert = mem.prevHeld & (Btn.Up | Btn.Down);
   if (curVert !== 0 && curVert === mem.vertBit) mem.vertFrames++;
   else { mem.vertBit = curVert; mem.vertFrames = curVert !== 0 ? 1 : 0; }
 
@@ -1917,13 +3024,61 @@ export function cpuInput(state: GameState, slot: number, level: number, rand: ()
   // throws an aerial, so reading it afterwards would veto that aerial on the spot.
   const gateBefore = mem.aerialCd;
 
+  // Launched: in tumble, or airborne in hitstun that is still running. Nothing but the deliberate
+  // tech is pressed as a tech press while launched. The tech itself is only planned for a tumble:
+  // a plain hitstun landing never becomes a knockdown, so there is nothing to save it from, and the
+  // plan lives exactly as long as the tumble's airtime does.
+  const launched = me !== null && !me.onGround &&
+    (me.action === 'tumble' || (me.action === 'hitstun' && me.hitstun > 0));
+  let techPulse = 0;
+  if (launched && me !== null && me.action === 'tumble') {
+    techPulse = planTech(state, prof, rand, me, mem);
+  } else {
+    mem.techPlan = TECH_UNROLLED;
+    mem.techDir = 0;
+    mem.techAge = 0;
+  }
+
+  // Final Smash and footstool run every real frame, outside the decision cadence, like the tech.
+  let fsPulse = -1;
+  let stool = false;
+  if (me !== null && me.action !== 'dead' && me.stocks > 0 && me.action !== 'grabbed') {
+    fsPulse = finalSmashInput(state, slot, prof, rand, me, mem);
+    if (fsPulse < 0) stool = wantsFootstool(state, slot, prof, rand, me, mem);
+  }
+
   let pulse = 0;
   if (!me || me.action === 'dead' || me.stocks <= 0) {
     mem.dirHeld = 0;
     mem.cooldown = 0;
     mem.smashPending = 0;
+    mem.jabPending = 0;
     mem.egPhase = 0;
-  } else if (mem.smashPending !== 0 && !me.onGround) {
+  } else if (me.action === 'grabbed') {
+    // Mashing runs every frame, outside the decision cadence: each fresh press takes frames off
+    // the hold. A different bit every time, so each one is a press and never a stale hold.
+    mem.dirHeld = 0;
+    mem.smashPending = 0; mem.chargePending = 0; mem.chargeFrames = 0; mem.orbHold = 0;
+    mem.jabPending = 0; mem.jumpHold = 0; mem.shieldTimer = 0; mem.tiltFrames = 0;
+    if (rand() < 0.1 + 0.9 * prof.diQuality) {
+      let idx = Math.min(MASH_BITS.length - 1, Math.floor(rand() * MASH_BITS.length));
+      for (let k = 0; k < MASH_BITS.length && (MASH_BITS[idx] & (mem.mashLast | mem.prevHeld)) !== 0; k++) {
+        idx = (idx + 1) % MASH_BITS.length;
+      }
+      pulse = MASH_BITS[idx];
+      mem.mashLast = pulse;
+    } else {
+      mem.mashLast = 0;
+    }
+  } else if (fsPulse >= 0) {
+    // A full meter is spent before anything else is thought about; finalSmashInput set the facing.
+    pulse = fsPulse;
+  } else if (mem.jabPending !== 0) {
+    // The Attack held back off a run last frame: the run has let go into a skid by now, so this
+    // press reads as the jab or tilt that was meant rather than a dash attack.
+    mem.jabPending = 0;
+    if (me.onGround && me.hitstun === 0) pulse = Btn.Attack;
+  } else if (mem.smashPending !== 0 && (!me.onGround || me.action === 'jumpsquat')) {
     // The fighter left the ground between queueing the smash and firing it: a jumpsquat that
     // took off, a walk-off, a platform that dropped away. Attack from here is an aerial, not a
     // smash, and one fired off this path would bypass the aerial cooldown entirely, because it
@@ -1962,6 +3117,11 @@ export function cpuInput(state: GameState, slot: number, level: number, rand: ()
   // A held Jump through jumpsquat is what makes a jump a full hop; a held Attack on a smash's
   // first frame is what makes it a charged smash. Both are holds, not extra presses.
   if (mem.jumpHold > 0) held |= Btn.Jump;
+  // A charge only exists on the ground. Airborne or in jumpsquat the held Attack is an aerial,
+  // so drop the charge and let the aerial gate below see the press.
+  if (mem.chargeFrames > 0 && me !== null && (!me.onGround || me.action === 'jumpsquat')) {
+    mem.chargeFrames = 0;
+  }
   if (mem.chargeFrames > 0) {
     held |= Btn.Attack;
     mem.chargeFrames--;
@@ -1974,7 +3134,11 @@ export function cpuInput(state: GameState, slot: number, level: number, rand: ()
   // An Attack pressed while grounded is only resolved when the buffer is spent, which may be
   // after a walk-off, a platform drop or a bump into the air. While the aerial gate is up, never
   // let one out from anywhere the fighter could be airborne by then.
-  if (gateBefore > 0 && mem.chargeFrames === 0 && me !== null && me.onGround &&
+  // A pummel is not an attack that can turn into an aerial, so a hold is exempt.
+  const holding = me !== null && (me.action === 'grabHold' || me.action === 'pummel');
+  // Neither is a get-up attack, and a downed fighter's presses never reach locomotion's tap reads.
+  const lying = me !== null && me.action === 'downed';
+  if (gateBefore > 0 && mem.chargeFrames === 0 && me !== null && me.onGround && !holding && !lying &&
       (held & Btn.Attack) !== 0) {
     const edge = getGround(state.stageId);
     if (mem.attackLock === 1 || me.x < edge.minX + 24 || me.x > edge.maxX - 24 ||
@@ -1984,14 +3148,46 @@ export function cpuInput(state: GameState, slot: number, level: number, rand: ()
   }
   if (mem.shieldTimer > 0) {
     held |= Btn.Shield;
-    // A plain block has to stay a plain block: the sim turns a direction held under Shield into a
-    // roll and Down into a spot dodge, so a stale movement bit would silently become a dodge.
-    if (mem.dodgeIntent === 0) held &= ~(Btn.Left | Btn.Right | Btn.Down);
+    // A plain block has to stay a plain block: a direction pressed under Shield can still double
+    // tap into a roll or spot dodge, and one held as the shield drops is a dash out of it.
+    held &= ~(Btn.Left | Btn.Right | Btn.Down);
   }
+  if (launched) {
+    // Shield and Dodge are tech presses, and every one starts TECH.lockout. The only one sent while
+    // launched is the deliberate tech, so no stray block or dodge can lock that tech out.
+    held &= ~(Btn.Shield | Btn.Dodge);
+    // The landing reads the held direction: none techs in place, one tech rolls that way.
+    if (mem.techPlan === TECH_ARMED || mem.techPlan === TECH_PRESSED) {
+      held = (held & ~(Btn.Left | Btn.Right)) | mem.techDir;
+    }
+    held |= techPulse;
+  }
+  if (stool) {
+    // The command owns this frame. A fresh Attack or Special beside it would still sit in the buffer
+    // and come out of the jump as an aerial nobody decided on; holds are left as they are.
+    held &= ~(Btn.Attack | Btn.Special | Btn.Dodge | Btn.Jump) | mem.prevHeld;
+  }
+
+  if (me !== null && me.onGround && me.action !== 'grabbed' && !holding && !lying) {
+    // Attack out of a dash or run is a dash attack whatever else is held. When the decision wanted
+    // a jab or a walked tilt instead, hold the press one frame: letting go of the run (or holding
+    // Walk) turns it into a skid or a walk first, and the press lands on that.
+    const running = me.action === 'dash' || me.action === 'run';
+    const attackNow = (held & ~mem.prevHeld & Btn.Attack) !== 0;
+    const horiz = held & (Btn.Left | Btn.Right);
+    if (running && attackNow && mem.chargeFrames === 0 && (held & (Btn.Up | Btn.Down)) === 0 &&
+        (horiz === 0 || (held & Btn.Walk) !== 0)) {
+      held &= ~Btn.Attack;
+      mem.jabPending = 1;
+    }
+    held = guardTaps(state, me, mem, held);
+  }
+  trackTaps(state, me, mem, held);
 
   frame.pressed = held & ~mem.prevHeld;
   frame.released = mem.prevHeld & ~held;
   frame.held = held;
+  frame.direct = stool ? FOOTSTOOL_CODE : 0;
   mem.prevHeld = held;
   return frame;
 }

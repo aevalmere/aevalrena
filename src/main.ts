@@ -1,6 +1,6 @@
 import { createLoop, type Loop } from './core/loop';
 import { createRng, nextFloat } from './core/rng';
-import { Btn } from './core/types';
+import { Btn, MAX_PLAYERS } from './core/types';
 import type {
   DebugFlags,
   GameState,
@@ -14,12 +14,16 @@ import type {
 } from './core/types';
 import { CHARACTER_LIST } from './characters/registry';
 import { STAGE_LIST } from './stages/registry';
-import { cpuInput } from './ai';
-import { createInputSystem, createLocalSession } from './input';
+import { cpuInput, warmAevalmere } from './ai';
+import { createInputSystem, createLocalSession, padStartPressed } from './input';
 import { createTuner, type Tuner } from './debug/tuner';
 import { createRenderer } from './render';
+import { createCamera, snapCamera, updateCamera } from './render/camera';
+import { liveView } from './render/scale';
+import { STAGE_DEFS } from './stages/registry';
 import { cloneGameState, createGameState, stepGame } from './sim';
 import { createUi } from './ui';
+import { createHud, type HudView } from './ui/hud';
 
 /**
  * App entry point and state machine: title -> mode -> select (all owned by the
@@ -59,6 +63,17 @@ function nextSeed(seed: number): number {
 }
 
 /**
+ * True when a raw keydown code fires a binding slot. The input system exposes no keyboard
+ * held set, so a chord slot ('KeyP&KeyO') matches on its last code, the one that completes
+ * the chord; the earlier codes cannot be checked from here.
+ */
+function slotFiredBy(slot: string, code: string): boolean {
+  if (slot === '' || code === '') return false;
+  const cut = slot.lastIndexOf('&');
+  return cut < 0 ? slot === code : slot.slice(cut + 1) === code;
+}
+
+/**
  * Copy only the fields the renderer interpolates from. The snapshot object is
  * created once per match, so no frame allocates unless the projectile count
  * reaches a new high water mark.
@@ -89,13 +104,104 @@ function snapshotPrev(prev: GameState, state: GameState): void {
   }
 }
 
+/**
+ * A copy of the renderer's camera, fed the same interpolated fighter positions on the same
+ * render frames, so the DOM name tags can map world to screen without reaching into the
+ * renderer. It leaves out screen shake on purpose: the tags should not shake.
+ */
+interface TagCamera {
+  cam: ReturnType<typeof createCamera>;
+  posX: Float32Array;
+  posY: Float32Array;
+  velX: Float32Array;
+  live: Uint8Array;
+  primed: boolean;
+  view: HudView;
+}
+
+function createTagCamera(): TagCamera {
+  return {
+    cam: createCamera(),
+    posX: new Float32Array(MAX_PLAYERS),
+    posY: new Float32Array(MAX_PLAYERS),
+    velX: new Float32Array(MAX_PLAYERS),
+    live: new Uint8Array(MAX_PLAYERS),
+    primed: false,
+    view: { camX: 0, camY: 0, zoom: 1, viewW: liveView.w, viewH: liveView.h, scale: liveView.scale },
+  };
+}
+
+/** Mirrors the renderer's interpolate + camera step (src/render/index.ts) for one frame. */
+function stepTagCamera(tc: TagCamera, state: GameState, prev: GameState, alpha: number): HudView {
+  const a = alpha < 0 ? 0 : alpha > 1 ? 1 : alpha;
+  const count = Math.min(state.fighters.length, MAX_PLAYERS);
+  for (let i = 0; i < count; i++) {
+    const f = state.fighters[i];
+    let x = f.x;
+    let y = f.y;
+    const frozen = f.action === 'dead' || f.action === 'respawn' || f.hitlag > 0;
+    const p = prev.fighters[i];
+    if (!frozen && p !== undefined && p.slot === f.slot) {
+      x = p.x + (f.x - p.x) * a;
+      y = p.y + (f.y - p.y) * a;
+    }
+    tc.posX[i] = x;
+    tc.posY[i] = y;
+    tc.velX[i] = f.vx;
+    tc.live[i] = f.action === 'dead' ? 0 : 1;
+  }
+  for (let i = count; i < MAX_PLAYERS; i++) {
+    tc.live[i] = 0;
+    tc.velX[i] = 0;
+  }
+  const stage = STAGE_DEFS[state.stageId];
+  if (stage !== undefined) {
+    if (!tc.primed) {
+      snapCamera(tc.cam, tc.posX, tc.posY, tc.velX, tc.live, MAX_PLAYERS, stage.cameraBounds);
+      tc.primed = true;
+    } else {
+      updateCamera(tc.cam, tc.posX, tc.posY, tc.velX, tc.live, MAX_PLAYERS, stage.cameraBounds);
+    }
+  }
+  const v = tc.view;
+  v.camX = tc.cam.x;
+  v.camY = tc.cam.y;
+  v.zoom = tc.cam.zoom;
+  v.viewW = liveView.w;
+  v.viewH = liveView.h;
+  v.scale = liveView.scale;
+  return v;
+}
+
 function buildResults(state: GameState): ResultsData {
   const players: ResultsData['players'] = [];
   for (let i = 0; i < state.fighters.length; i++) {
     const f = state.fighters[i];
-    players.push({ slot: f.slot, charId: f.charId, stocks: f.stocks, percent: f.percent });
+    let cpu = false;
+    let cpuLevel = 0;
+    let name: string | undefined;
+    let team: number | undefined;
+    for (let j = 0; j < state.config.players.length; j++) {
+      const p = state.config.players[j];
+      if (p.slot !== f.slot) continue;
+      cpu = p.cpu;
+      cpuLevel = p.cpuLevel;
+      name = p.name;
+      team = p.team;
+      break;
+    }
+    const stats = { ...f.stats, mostUsedMove: { ...f.stats.mostUsedMove } };
+    const row: ResultsData['players'][number] = {
+      slot: f.slot, charId: f.charId, stocks: f.stocks, percent: f.percent, cpu, cpuLevel, stats,
+    };
+    if (name !== undefined) row.name = name;
+    if (team !== undefined) row.team = team;
+    players.push(row);
   }
-  return { winner: state.winner, players };
+  const matchFrames = state.endFrame >= 0 ? state.endFrame : state.frame;
+  const data: ResultsData = { winner: state.winner, seed: state.config.seed, players, matchFrames };
+  if (state.config.teams === true) data.winnerTeam = state.winnerTeam === undefined ? -1 : state.winnerTeam;
+  return data;
 }
 
 function anyHuman(config: MatchConfig): boolean {
@@ -115,9 +221,27 @@ function startPressed(inputs: InputFrame[]): boolean {
 function boot(): void {
   const canvasEl = document.getElementById('game');
   const uiRoot = document.getElementById('ui');
+  const hudEl = document.getElementById('hud');
+  const appEl = document.getElementById('app');
   if (!(canvasEl instanceof HTMLCanvasElement)) throw new Error('missing #game canvas');
   if (uiRoot === null) throw new Error('missing #ui root');
+  if (hudEl === null || appEl === null) throw new Error('missing #hud or #app');
   const canvas: HTMLCanvasElement = canvasEl;
+  const hudHost: HTMLElement = hudEl;
+  const app: HTMLElement = appEl;
+  const hud = createHud(hudHost, { characters: CHARACTER_LIST });
+  const tagCam = createTagCamera();
+
+  /** Fit the renderer, then lay the DOM HUD host exactly over the canvas box. */
+  function resizeView(): void {
+    renderer.resize();
+    const c = canvas.getBoundingClientRect();
+    const a = app.getBoundingClientRect();
+    hudHost.style.left = `${c.left - a.left}px`;
+    hudHost.style.top = `${c.top - a.top}px`;
+    hudHost.style.width = `${c.width}px`;
+    hudHost.style.height = `${c.height}px`;
+  }
 
   const input = createInputSystem();
   const renderer: Renderer = createRenderer(canvas);
@@ -131,6 +255,8 @@ function boot(): void {
   let freezeCpu = false;
 
   function endMatch(): void {
+    hud.stop();
+    hudHost.hidden = true;
     if (match === null) return;
     match.session.stop();
     match = null;
@@ -149,6 +275,7 @@ function boot(): void {
     if (match === null || ui === null) return;
     const data = buildResults(match.state);
     phase = 'results';
+    hudHost.hidden = true;
     ui.show('results', data);
   }
 
@@ -176,7 +303,8 @@ function boot(): void {
       return;
     }
 
-    if (startPressed(inputs)) pauseMatch();
+    // A CPU-only match samples no pad for Start either, so read player 0's pad Start directly.
+    if (startPressed(inputs) || (!m.hasHuman && padStartPressed(input))) pauseMatch();
   }
 
   /** Wipe the last match frame so a menu never sits over a frozen battle. */
@@ -205,6 +333,7 @@ function boot(): void {
     const renderStart = performance.now();
     if (match !== null) {
       renderer.render(match.state, match.prev, alpha, debugFlags, perf);
+      hud.update(match.state, stepTagCamera(tagCam, match.state, match.prev, alpha));
     }
     perf.renderMs = performance.now() - renderStart;
 
@@ -235,6 +364,8 @@ function boot(): void {
     const session = createLocalSession(input, config);
     const cpuRng = createRng((config.seed ^ 0x9e3779b9) >>> 0);
     const rand = (): number => nextFloat(cpuRng);
+    // Pre-build the level 10 CPU's pools so the first match frame does not hitch.
+    if (config.players.some((p) => p.cpu && p.cpuLevel >= 10)) warmAevalmere(config);
 
     for (let i = 0; i < config.players.length; i++) {
       const player = config.players[i];
@@ -251,6 +382,9 @@ function boot(): void {
 
     match = { config, state, prev, session, hasHuman: anyHuman(config), endTimer: 0, ended: false };
     renderer.setStage(config.stageId);
+    tagCam.primed = false;
+    hud.start(state);
+    hudHost.hidden = false;
     ui.hide();
     phase = 'match';
     // Swallow the key press that started the match so it is not read as a jump.
@@ -285,6 +419,8 @@ function boot(): void {
       charId: p.charId,
       cpu: p.cpu,
       cpuLevel: p.cpuLevel,
+      ...(p.name === undefined ? {} : { name: p.name }),
+      ...(p.team === undefined ? {} : { team: p.team }),
     }));
     startMatch({
       stageId: previous.stageId,
@@ -292,6 +428,9 @@ function boot(): void {
       stocks: previous.stocks,
       timeLimitSec: previous.timeLimitSec,
       seed: nextSeed(previous.seed),
+      finalSmash: previous.finalSmash,
+      cpuZeroMoves: previous.cpuZeroMoves,
+      teams: previous.teams,
     });
   }
 
@@ -313,11 +452,13 @@ function boot(): void {
   window.addEventListener('keydown', (e: KeyboardEvent) => {
     // A CPU-only match has no slot that can press Start, so the pause key has
     // to come off the window or the match cannot be left.
+    const startKeys = input.controls.players[0].keys.start;
     if (
       match !== null &&
       !match.hasHuman &&
       phase === 'match' &&
-      e.code === input.controls.players[0].bindings.start
+      e.code !== '' &&
+      (slotFiredBy(startKeys[0], e.code) || slotFiredBy(startKeys[1], e.code))
     ) {
       e.preventDefault();
       pauseMatch();
@@ -345,12 +486,12 @@ function boot(): void {
     }
   });
 
-  window.addEventListener('resize', () => renderer.resize());
+  window.addEventListener('resize', resizeView);
 
   renderer
     .load()
     .then(() => {
-      renderer.resize();
+      resizeView();
       if (ui !== null) ui.show('title');
     })
     .catch((err: unknown) => {

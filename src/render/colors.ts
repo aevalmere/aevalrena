@@ -28,3 +28,22 @@ export function percentColor(percent: number): string {
   if (i >= PERCENT_RAMP.length) i = PERCENT_RAMP.length - 1;
   return PERCENT_RAMP[i];
 }
+
+/**
+ * Colour index (into PLAYER_COLORS) for a slot: its chosen team colour, else the slot's own.
+ * With the Teams rule off the team colour is cosmetic; the sim reads it only under the rule.
+ */
+export function colorIndexOf(players: readonly { slot: number; team?: number }[], slot: number): number {
+  for (let i = 0; i < players.length; i++) {
+    const p = players[i];
+    if (p.slot !== slot) continue;
+    const t = p.team;
+    return t !== undefined && t >= 0 && t < PLAYER_COLORS.length ? t : slot;
+  }
+  return slot;
+}
+
+/** The accent colour a slot plays in: its team colour when one is set. */
+export function slotColor(players: readonly { slot: number; team?: number }[], slot: number): string {
+  return playerColor(colorIndexOf(players, slot));
+}

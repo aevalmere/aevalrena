@@ -1,9 +1,15 @@
 import { Btn } from '../core/types';
 import type { FighterState, GameState, InputFrame, MatchConfig, MoveId } from '../core/types';
+import { FS_METER, SHIELD_MAX } from '../core/constants';
 import { CHARACTER_DEFS } from '../characters/registry';
 import { nextFloat } from '../core/rng';
 import { createGameState, stepGame } from '../sim';
-import { cpuInput } from './index';
+import { forceGrab } from '../sim/grab';
+import { applyHit } from '../sim/hits';
+import { clearBuffer } from '../sim/input';
+import { setAction, simFighters } from '../sim/state';
+import { cpuInput, cpuIntendedRolls, setCpuProjBlockOverrideForTest } from './index';
+import { aevalmereComboSummary, aevalmereStats } from './aevalmere';
 
 declare const process: {
   argv: string[];
@@ -25,8 +31,11 @@ const MATCHES_PER_MATCHUP = SEEDS.length * 2;
 /** Share of a matchup's matches the higher level has to take for the ladder to count as ordered. */
 const WIN_RATE_FLOOR = 0.7;
 
-function cpuConfig(levelA: number, levelB: number, seed: number, stocks: number): MatchConfig {
-  return {
+/** `zeroMoves` is written into the config as given; left out, the rule field is absent entirely. */
+function cpuConfig(
+  levelA: number, levelB: number, seed: number, stocks: number, zeroMoves?: boolean,
+): MatchConfig {
+  const cfg: MatchConfig = {
     stageId: 'tidegate',
     players: [
       { slot: 0, charId: 'aeval', cpu: true, cpuLevel: levelA },
@@ -36,6 +45,8 @@ function cpuConfig(levelA: number, levelB: number, seed: number, stocks: number)
     timeLimitSec: 0,
     seed,
   };
+  if (zeroMoves !== undefined) cfg.cpuZeroMoves = zeroMoves;
+  return cfg;
 }
 
 /** Defensive / back-facing options the owner reported the CPU never used. */
@@ -68,10 +79,9 @@ const KIT_MOVES = [
   'ledgeatk',
 ];
 
-// 'getupatk' is deliberately absent from KIT_MOVES. It has a move def and a sprite, but the sim
-// has no knockdown or getup state to start it from: ActionId carries no such action, and the only
-// startMove of a getup-family move is ledgeatk in src/sim/ledge.ts. No input can reach it, so the
-// CPU cannot be held to using it. Add it back once a knockdown state exists.
+// 'getupatk' is deliberately absent from KIT_MOVES. It only comes out of a knockdown, and a level 9
+// CPU techs nearly every landing that would have been one, so how often it appears in a sweep is a
+// measure of the opponent's hits, not of the CPU's kit. testCpuGetUp holds the CPU to it instead.
 const CHARGEABLE_SMASHES: Record<string, boolean> = { fsmash: true, usmash: true, dsmash: true };
 
 /**
@@ -105,15 +115,21 @@ interface KitCounts {
   dropThrough: number;
   smashUses: number;
   chargedSmashes: number;
+  techs: number;            // 'tech' events, in place or rolling
+  techRolls: number;
+  downed: number;           // entries into 'downed', i.e. landings that were not teched
+  footstools: number;       // footstool events this slot jumped off
 }
 
 function emptyKit(): KitCounts {
   const moves: Record<string, number> = {};
   for (let i = 0; i < KIT_MOVES.length; i++) moves[KIT_MOVES[i]] = 0;
   moves.taunt = 0;
+  moves.taunt2 = 0;
+  moves.taunt3 = 0;
   return {
     moves, tauntNeutral: 0, shortHop: 0, fullHop: 0, fastFall: 0, dropThrough: 0,
-    smashUses: 0, chargedSmashes: 0,
+    smashUses: 0, chargedSmashes: 0, techs: 0, techRolls: 0, downed: 0, footstools: 0,
   };
 }
 
@@ -130,6 +146,10 @@ function addKit(into: KitCounts, from: KitCounts): void {
   into.dropThrough += from.dropThrough;
   into.smashUses += from.smashUses;
   into.chargedSmashes += from.chargedSmashes;
+  into.techs += from.techs;
+  into.techRolls += from.techRolls;
+  into.downed += from.downed;
+  into.footstools += from.footstools;
 }
 
 /** Distinct kit moves (taunt excluded) that were used at least once. */
@@ -144,7 +164,7 @@ function kitVariety(k: KitCounts): number {
  * FighterState contract, but they are on the object the sim steps, and cloneGameState copies
  * them, so reading them is observing the simulation, not reaching into the AI.
  */
-interface SimView { shortHop: boolean; dropTimer: number }
+interface SimView { shortHop: boolean; dropTimer: number; activeThrowId: string | null }
 function simView(f: FighterState): SimView { return f as unknown as SimView; }
 
 interface CpuMatchRun {
@@ -158,6 +178,12 @@ interface CpuMatchRun {
   options: OptionCounts[];
   /** Per slot: every move used, movement mechanics, and smash charging. */
   kit: KitCounts[];
+  /** Per slot: rolls the CPU asked for on purpose, read off the AI's debug counter at the end. */
+  intendedRolls: number[];
+  /** Final Smash starts seen ('finalSmash' events of phase 'start', or entries into the action). */
+  fsStarts: number;
+  /** Highest Final Smash meter either fighter reached. */
+  maxMeter: number;
 }
 
 /** Runs a full CPU-vs-CPU match, driving both slots through cpuInput every frame, and tracks
@@ -182,6 +208,8 @@ function runCpuMatch(levelA: number, levelB: number, maxFrames: number, seed: nu
   const chargeMove: (string | null)[] = [null, null];
   let koCount = 0;
   let selfDestructs = 0;
+  let fsStarts = 0;
+  let maxMeter = 0;
   let frame = 0;
   for (; frame < maxFrames; frame++) {
     inputs[0] = cpuInput(state, 0, levelA, rand);
@@ -194,6 +222,8 @@ function runCpuMatch(levelA: number, levelB: number, maxFrames: number, seed: nu
       if (id !== null && AERIAL_MOVES[id] && id !== prevMoveId[s]) aerialStarts[s].push(state.frame);
       if (id === 'bair' && prevMoveId[s] !== 'bair') options[s].bair++;
       const act = f.action;
+      if (f.fsMeter > maxMeter) maxMeter = f.fsMeter;
+      if (act === 'finalSmash' && prevAction[s] !== 'finalSmash') fsStarts++;
 
       // A move counts as freshly used when the id changes, or when the same id restarts (its
       // action frame counter went backwards), so a jab straight into another jab is two uses.
@@ -207,7 +237,7 @@ function runCpuMatch(levelA: number, levelB: number, maxFrames: number, seed: nu
       if (started && id !== null) {
         const k = kit[s];
         k.moves[id] = (k.moves[id] === undefined ? 0 : k.moves[id]) + 1;
-        if (id === 'taunt') {
+        if (id === 'taunt' || id === 'taunt2' || id === 'taunt3') {
           const other = state.fighters[1 - s];
           // A taunt is only free when nobody is left who could walk over and punish it.
           if (other && other.stocks > 0 && other.action !== 'dead') k.tauntNeutral++;
@@ -241,6 +271,7 @@ function runCpuMatch(levelA: number, levelB: number, maxFrames: number, seed: nu
         if (act === 'spotDodge') options[s].spotDodge++;
         else if (act === 'roll') options[s].roll++;
         else if (act === 'airDodge') options[s].airDodge++;
+        else if (act === 'downed') kit[s].downed++;
       }
       prevMoveId[s] = id;
       prevAction[s] = act;
@@ -255,6 +286,11 @@ function runCpuMatch(levelA: number, levelB: number, maxFrames: number, seed: nu
         koCount++;
         const victim = state.fighters[ev.slot];
         if (victim && victim.lastHitBy === -1) { selfDestructs++; sdBySlot[ev.slot]++; }
+      } else if (ev.type === 'tech') {
+        kit[ev.slot].techs++;
+        if (ev.roll) kit[ev.slot].techRolls++;
+      } else if (ev.type === 'footstool') {
+        kit[ev.attacker].footstools++;
       }
     }
 
@@ -264,7 +300,11 @@ function runCpuMatch(levelA: number, levelB: number, maxFrames: number, seed: nu
   for (let s = 0; s < 2; s++) {
     if (chargeMove[s] !== null && maxCharge[s] >= CHARGE_MIN) kit[s].chargedSmashes++;
   }
-  return { state, frames: frame, koCount, selfDestructs, sdBySlot, aerialStarts, options, kit };
+  // Read before any other match drives cpuInput, which would reset the counter for its own match.
+  const intendedRolls = [cpuIntendedRolls(0), cpuIntendedRolls(1)];
+  return {
+    state, frames: frame, koCount, selfDestructs, sdBySlot, aerialStarts, options, kit, intendedRolls, fsStarts, maxMeter,
+  };
 }
 
 interface MatchupSummary {
@@ -481,10 +521,19 @@ function testNoSelfDestruct(): TestResult {
     if (m.sdA + m.sdB > 0) offenders.push(`L${m.levelA}vL${m.levelB} ${m.sdA}/${m.sdB}`);
   }
   let scenarioSd = 0;
+  const sdLabels: string[] = [];
   const stacked = vertAbove.concat(vertBelow);
-  for (let i = 0; i < stacked.length; i++) scenarioSd += stacked[i].sd;
-  for (let i = 0; i < spamRuns.length; i++) scenarioSd += spamRuns[i].sd;
-  if (scenarioSd > 0) offenders.push(`scripted scenarios ${scenarioSd}`);
+  for (let i = 0; i < stacked.length; i++) {
+    scenarioSd += stacked[i].sd;
+    if (stacked[i].sd > 0 && sdLabels.length < 4) sdLabels.push(`${stacked[i].label} x${stacked[i].sd}`);
+  }
+  for (let i = 0; i < spamRuns.length; i++) {
+    scenarioSd += spamRuns[i].sd;
+    if (spamRuns[i].sd > 0 && sdLabels.length < 4) {
+      sdLabels.push(`spam ${spamRuns[i].label} cpu x${spamRuns[i].cpuSd} spammer x${spamRuns[i].sd - spamRuns[i].cpuSd}`);
+    }
+  }
+  if (scenarioSd > 0) offenders.push(`scripted scenarios ${scenarioSd} (${sdLabels.join(', ')})`);
   total += scenarioSd;
   const runCount = 1 + matrix.length * MATCHES_PER_MATCHUP + stacked.length + spamRuns.length;
   return {
@@ -755,6 +804,7 @@ interface SpamRun {
   worstLowRun: number;      // longest run of frames the CPU's shield sat under the low-water mark
   broke: boolean;           // shieldHp hit 0 or the CPU entered shieldBreak
   sd: number;
+  cpuSd: number;            // the share of sd that was the CPU's own stock
 }
 
 function runSpamMatch(cpuSlot: number, seed: number): SpamRun {
@@ -775,6 +825,7 @@ function runSpamMatch(cpuSlot: number, seed: number): SpamRun {
   let worstLowRun = 0;
   let broke = false;
   let sd = 0;
+  let cpuSd = 0;
   let frames = 0;
   for (; frames < SPAM_CAP; frames++) {
     inputs[cpuSlot] = cpuInput(state, cpuSlot, 9, rand);
@@ -793,7 +844,10 @@ function runSpamMatch(cpuSlot: number, seed: number): SpamRun {
     for (let e = 0; e < state.events.length; e++) {
       const ev = state.events[e];
       if (ev.type === 'shieldBreak' && ev.slot === cpuSlot) broke = true;
-      if (ev.type === 'ko' && state.fighters[ev.slot].lastHitBy === -1) sd++;
+      if (ev.type === 'ko' && state.fighters[ev.slot].lastHitBy === -1) {
+        sd++;
+        if (ev.slot === cpuSlot) cpuSd++;
+      }
     }
     if (state.finished) { frames++; break; }
   }
@@ -809,6 +863,7 @@ function runSpamMatch(cpuSlot: number, seed: number): SpamRun {
     worstLowRun,
     broke,
     sd,
+    cpuSd,
   };
 }
 
@@ -988,7 +1043,8 @@ function kitTable(counts: KitCounts, frames: number): string {
     const n = counts.moves[id];
     parts.push(`${id}=${n}(${per1k(n, frames).toFixed(2)})`);
   }
-  parts.push(`taunt=${counts.moves.taunt}`);
+  parts.push(`taunt=${counts.moves.taunt} taunt2=${counts.moves.taunt2} taunt3=${counts.moves.taunt3}`);
+  parts.push(`getupatk=${counts.moves.getupatk === undefined ? 0 : counts.moves.getupatk}`);
   return parts.join(' ');
 }
 
@@ -996,7 +1052,8 @@ function movementLine(counts: KitCounts, frames: number): string {
   return `shortHop=${counts.shortHop}(${per1k(counts.shortHop, frames).toFixed(2)})` +
     ` fullHop=${counts.fullHop} fastFall=${counts.fastFall}` +
     ` dropThrough=${counts.dropThrough}` +
-    ` smashes=${counts.smashUses} charged=${counts.chargedSmashes}`;
+    ` smashes=${counts.smashUses} charged=${counts.chargedSmashes}` +
+    ` techs=${counts.techs} techRolls=${counts.techRolls} downed=${counts.downed} footstools=${counts.footstools}`;
 }
 
 /** Every move in the kit, taunt excepted, has to appear in level 9's play. */
@@ -1148,6 +1205,1077 @@ function testDeterminism(): TestResult {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Input rules wave: a second tap of the same direction is a roll (Down again is a
+// spot dodge), grabs beat shields, and a grabbed fighter mashes out.
+// ---------------------------------------------------------------------------
+
+/** Seeds for the double-tap check. */
+const TAP_SEEDS = [5, 17];
+/** Unasked-for rolls a slot may still show over a whole match, for landing-frame edge cases. */
+const TAP_SLACK = 2;
+
+/** Every roll the sim starts has to be one the CPU asked for, give or take TAP_SLACK. */
+function testNoAccidentalRoll(): TestResult {
+  const fails: string[] = [];
+  const parts: string[] = [];
+  for (let i = 0; i < TAP_SEEDS.length; i++) {
+    const run = runCpuMatch(5, 5, MATCH_CAP, TAP_SEEDS[i], MATRIX_STOCKS);
+    for (let s = 0; s < 2; s++) {
+      const rolls = run.options[s].roll;
+      const meant = run.intendedRolls[s];
+      parts.push(`seed ${TAP_SEEDS[i]} slot ${s} rolls=${rolls} intended=${meant}`);
+      if (rolls > meant + TAP_SLACK) fails.push(`seed ${TAP_SEEDS[i]} slot ${s} ${rolls} > ${meant}+${TAP_SLACK}`);
+    }
+  }
+  return {
+    name: `u. level 5 CPUs never double tap into a roll they did not ask for (slack ${TAP_SLACK})`,
+    pass: fails.length === 0,
+    detail: parts.join(', ') + (fails.length === 0 ? '' : ` | over: ${fails.join('; ')}`),
+  };
+}
+
+const GRAB_SEEDS = [5, 17, 23];
+/** Frames a level 9 CPU gets to grab a dummy that sits in shield next to it. */
+const GRAB_CAP = 600;
+
+/**
+ * A dummy that holds shield in place 40 px from a level 9 CPU. It never lets go and its shield
+ * is topped up every frame, so no hit can ever get through: the grab is the only answer.
+ */
+function runGrabScenario(seed: number): { frame: number; label: string } {
+  const state = createGameState(cpuConfig(9, 0, seed, 3));
+  const rand = () => nextFloat(state.rng);
+  const idle: InputFrame = { held: 0, pressed: 0, released: 0 };
+  const inputs: InputFrame[] = [idle, idle];
+  for (let i = 0; i < 30; i++) stepGame(state, inputs);
+  const cpu = state.fighters[0];
+  const dummy = state.fighters[1];
+  cpu.x = -20; cpu.vx = 0; cpu.facing = 1;
+  dummy.x = 20; dummy.vx = 0; dummy.facing = -1;
+  let prevHeld = 0;
+  for (let i = 0; i < GRAB_CAP; i++) {
+    if (dummy.action !== 'grabbed') {
+      dummy.shieldHp = SHIELD_MAX;
+      dummy.x = 20;
+      dummy.vx = 0;
+    }
+    const held = Btn.Shield;
+    inputs[0] = cpuInput(state, 0, 9, rand);
+    inputs[1] = { held, pressed: held & ~prevHeld, released: prevHeld & ~held };
+    prevHeld = held;
+    stepGame(state, inputs);
+    for (let e = 0; e < state.events.length; e++) {
+      const ev = state.events[e];
+      if (ev.type === 'grab' && ev.attacker === 0) return { frame: i + 1, label: `seed ${seed}` };
+    }
+  }
+  return { frame: -1, label: `seed ${seed}` };
+}
+
+function testCpuGrabs(): TestResult {
+  const parts: string[] = [];
+  let ok = true;
+  for (let i = 0; i < GRAB_SEEDS.length; i++) {
+    const r = runGrabScenario(GRAB_SEEDS[i]);
+    if (r.frame < 0) ok = false;
+    parts.push(`${r.label} ${r.frame < 0 ? 'no grab' : `grab at ${r.frame}f`}`);
+  }
+  return {
+    name: `v. level 9 CPU grabs a dummy parked in shield within ${GRAB_CAP} frames on every seed`,
+    pass: ok,
+    detail: parts.join(', '),
+  };
+}
+
+const MASH_SEEDS = [5, 17, 23];
+const MASH_CAP = 600;
+
+/** Frames a CPU of `level` takes to mash out of a plain grab from a holder that never throws. */
+function mashOutFrames(level: number, seed: number): number {
+  const state = createGameState(cpuConfig(level, 0, seed, 3));
+  const rand = () => nextFloat(state.rng);
+  const idle: InputFrame = { held: 0, pressed: 0, released: 0 };
+  const inputs: InputFrame[] = [idle, idle];
+  for (let i = 0; i < 30; i++) stepGame(state, inputs);
+  const fighters = simFighters(state);
+  const victim = fighters[0];
+  const holder = fighters[1];
+  holder.x = 0; holder.vx = 0; holder.facing = -1; setAction(holder, 'idle');
+  victim.x = -14; victim.vx = 0; victim.facing = 1; setAction(victim, 'idle');
+  if (!forceGrab(state, holder, victim)) return -1;
+  for (let i = 0; i < MASH_CAP; i++) {
+    inputs[0] = cpuInput(state, 0, level, rand);
+    inputs[1] = idle;
+    stepGame(state, inputs);
+    if (victim.action !== 'grabbed') return i + 1;
+  }
+  return MASH_CAP;
+}
+
+function testMashOut(): TestResult {
+  const parts: string[] = [];
+  let ok = true;
+  for (let i = 0; i < MASH_SEEDS.length; i++) {
+    const hi = mashOutFrames(9, MASH_SEEDS[i]);
+    const lo = mashOutFrames(1, MASH_SEEDS[i]);
+    if (hi < 0 || lo < 0 || hi >= lo) ok = false;
+    parts.push(`seed ${MASH_SEEDS[i]} L9 ${hi}f vs L1 ${lo}f`);
+  }
+  return {
+    name: 'w. a level 9 CPU mashes out of a grab faster than a level 1 CPU',
+    pass: ok,
+    detail: parts.join(', '),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Projectile block wave: the CPU answers an inbound shot with a quicker shot of
+// its own so the two clash in the air. Both fighters are pinned to a fixed gap,
+// so the spam can only be blocked, dodged or shot down, and the harness can
+// count exactly how often it was shot down.
+// ---------------------------------------------------------------------------
+
+const BLOCK_SEEDS = [5, 17, 23];
+/**
+ * Gap between the pinned fighters on each seed, spanning 100-160 px. It starts at SPAM_RANGE
+ * because the scripted spammer only throws from outside that range.
+ */
+const BLOCK_GAPS = [SPAM_RANGE, 135, 160];
+const BLOCK_FRAMES = 1800;
+/** Enough stocks that a KO never ends a scenario early. */
+const BLOCK_STOCKS = 9;
+/** Share of the spammer's thrown shots a level 9 CPU has to shoot down. */
+const BLOCK_SHARE = 0.25;
+/** Clash events a level 1 CPU may still produce by accident across every seed. */
+const BLOCK_LOW_CAP = 2;
+
+/** Projectile defs that only ever spawn as another shot's burst, never thrown by a move. */
+const BURST_IDS: Record<string, boolean> = (() => {
+  const out: Record<string, boolean> = {};
+  const chars = Object.keys(CHARACTER_DEFS).sort();
+  for (let c = 0; c < chars.length; c++) {
+    const moves = CHARACTER_DEFS[chars[c]].moves;
+    const ids = Object.keys(moves);
+    for (let i = 0; i < ids.length; i++) {
+      const list = moves[ids[i] as MoveId].projectiles;
+      if (list === undefined) continue;
+      for (let p = 0; p < list.length; p++) if (list[p].spawnFrame < 0) out[list[p].id] = true;
+    }
+  }
+  return out;
+})();
+
+interface BlockRun {
+  spawned: number;   // shots the spammer threw, bursts excluded
+  clashes: number;   // projectileClash events with the CPU as one owner
+  blocked: number;   // distinct thrown spammer shots that died in a frame with such a clash
+  damage: number;    // percent the CPU took from the spammer, whose only hitboxes are its shots
+}
+
+/**
+ * One pinned spam scenario. A shot counts as blocked when it was alive before a frame and gone
+ * after it, on a frame with a clash involving the CPU; the count per frame is capped by the
+ * clashes, so a shot that simply expired or hit on a quiet frame never counts. The burst an orb
+ * leaves behind clashes a second time, which is why events and blocked shots are kept apart.
+ */
+function runBlockScenario(level: number, index: number): BlockRun {
+  const cpuSlot = index % 2;
+  const spamSlot = 1 - cpuSlot;
+  const state = createGameState(cpuConfig(cpuSlot === 0 ? level : 0, cpuSlot === 0 ? 0 : level, BLOCK_SEEDS[index], BLOCK_STOCKS));
+  const rand = () => nextFloat(state.rng);
+  const idle: InputFrame = { held: 0, pressed: 0, released: 0 };
+  const inputs: InputFrame[] = [idle, idle];
+  for (let i = 0; i < 30; i++) stepGame(state, inputs);
+  const cpu = state.fighters[cpuSlot];
+  const spam = state.fighters[spamSlot];
+  const cpuX = (cpuSlot === 0 ? -1 : 1) * BLOCK_GAPS[index] / 2;
+  const mem: SpamMem = { aim: 0, timer: 0, volley: 0, prevHeld: 0 };
+  const spamFrame: InputFrame = { held: 0, pressed: 0, released: 0 };
+  const watched: number[] = [];
+  const out: BlockRun = { spawned: 0, clashes: 0, blocked: 0, damage: 0 };
+  for (let i = 0; i < BLOCK_FRAMES; i++) {
+    // Pinned horizontally only: the CPU can still shield, dodge, jump and shoot, never close the gap.
+    if (cpu.action !== 'dead' && cpu.action !== 'respawn') { cpu.x = cpuX; cpu.vx = 0; }
+    if (spam.action !== 'dead' && spam.action !== 'respawn') { spam.x = -cpuX; spam.vx = 0; }
+    watched.length = 0;
+    for (let p = 0; p < state.projectiles.length; p++) {
+      const pr = state.projectiles[p];
+      if (pr.alive && pr.owner === spamSlot && BURST_IDS[pr.defId] !== true) watched.push(pr.id);
+    }
+
+    inputs[cpuSlot] = cpuInput(state, cpuSlot, level, rand);
+    inputs[spamSlot] = spammerInput(state, spamSlot, mem, spamFrame);
+    stepGame(state, inputs);
+
+    let clashes = 0;
+    for (let e = 0; e < state.events.length; e++) {
+      const ev = state.events[e];
+      if (ev.type === 'projectileSpawn' && ev.slot === spamSlot && BURST_IDS[ev.defId] !== true) out.spawned++;
+      else if (ev.type === 'projectileClash' && (ev.ownerA === cpuSlot || ev.ownerB === cpuSlot)) clashes++;
+      else if (ev.type === 'hit' && ev.attacker === spamSlot && ev.victim === cpuSlot) out.damage += ev.damage;
+    }
+    if (clashes === 0) continue;
+    out.clashes += clashes;
+    let gone = 0;
+    for (let w = 0; w < watched.length; w++) {
+      let alive = false;
+      for (let p = 0; p < state.projectiles.length; p++) {
+        const pr = state.projectiles[p];
+        if (pr.alive && pr.id === watched[w]) { alive = true; break; }
+      }
+      if (!alive) gone++;
+    }
+    out.blocked += Math.min(gone, clashes);
+  }
+  return out;
+}
+
+function sumBlockRuns(level: number): BlockRun {
+  const total: BlockRun = { spawned: 0, clashes: 0, blocked: 0, damage: 0 };
+  for (let i = 0; i < BLOCK_SEEDS.length; i++) {
+    const r = runBlockScenario(level, i);
+    total.spawned += r.spawned;
+    total.clashes += r.clashes;
+    total.blocked += r.blocked;
+    total.damage += r.damage;
+  }
+  return total;
+}
+
+function testProjectileBlock(): TestResult {
+  const hi = sumBlockRuns(9);
+  const lo = sumBlockRuns(1);
+  let off: BlockRun;
+  setCpuProjBlockOverrideForTest(0);
+  try {
+    off = sumBlockRuns(9);
+  } finally {
+    setCpuProjBlockOverrideForTest(null);
+  }
+  const share = hi.spawned === 0 ? 0 : hi.blocked / hi.spawned;
+  const fails: string[] = [];
+  if (hi.spawned === 0 || share < BLOCK_SHARE) fails.push(`L9 shot down ${(share * 100).toFixed(0)}% < ${(BLOCK_SHARE * 100).toFixed(0)}%`);
+  if (lo.clashes > BLOCK_LOW_CAP) fails.push(`L1 clashes ${lo.clashes} > ${BLOCK_LOW_CAP}`);
+  if (hi.damage >= off.damage) fails.push(`L9 damage ${hi.damage.toFixed(1)} not under ${off.damage.toFixed(1)} with the counter off`);
+  return {
+    name: `x. level 9 CPU shoots down at least ${(BLOCK_SHARE * 100).toFixed(0)}% of pinned spam, level 1 almost never`,
+    pass: fails.length === 0,
+    detail: `L9 shot down ${hi.blocked}/${hi.spawned} (${(share * 100).toFixed(1)}%, ${hi.clashes} clash events),` +
+      ` damage taken ${hi.damage.toFixed(1)} vs ${off.damage.toFixed(1)} with projBlock 0` +
+      ` (${off.clashes} clash events) | L1 ${lo.clashes} clash events over ${lo.spawned} shots` +
+      (fails.length === 0 ? '' : ` | ${fails.join('; ')}`),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Wave 2: techs and the Final Smash. The tech scenario launches the CPU straight
+// into the floor with tumble knockback, so every trial ends in exactly one tumble
+// landing while hitstun still runs: a tech, or a knockdown.
+// ---------------------------------------------------------------------------
+
+const TECH_SEEDS = [5, 17, 23];
+/** Tumble landings per seed. */
+const TECH_TRIALS = 12;
+/** Launch spots across the whole main stage, edges included, so the edge rule for the roll runs. */
+const TECH_XS = [-150, -100, -50, 0, 50, 100, 150, -130, -25, 25, 130, 75];
+/** Height above the stage each trial is launched from, px. */
+const TECH_HEIGHTS = [30, 60, 90, 120];
+/** Local launch angles, all into the floor: straight down and either side of it. */
+const TECH_ANGLES = [290, 270, 250, 300];
+/** Frames a trial is given to land and resolve before it counts as neither. */
+const TECH_RESOLVE_CAP = 120;
+const TECH_HI_RATE = 0.6;
+const TECH_LO_RATE = 0.25;
+/** Share of trials that must resolve at all, so a broken scenario cannot pass on a tiny sample. */
+const TECH_RESOLVE_SHARE = 0.8;
+
+interface TechRun { techs: number; rolls: number; downed: number; trials: number }
+
+/**
+ * One seed of tumble landings for a CPU of `level`. The opponent is an idle dummy parked on the
+ * far side of the stage. Each trial resets the CPU into the air, clears its tech timers, and
+ * applies a real tumble hit pointing into the floor; the trial ends on a 'tech' event or on
+ * entering 'downed'.
+ */
+function runTechScenario(level: number, seed: number): TechRun {
+  const state = createGameState(cpuConfig(level, 0, seed, 3));
+  const rand = () => nextFloat(state.rng);
+  const idle: InputFrame = { held: 0, pressed: 0, released: 0 };
+  const inputs: InputFrame[] = [idle, idle];
+  for (let i = 0; i < 30; i++) stepGame(state, inputs);
+  const fighters = simFighters(state);
+  const cpu = fighters[0];
+  const dummy = fighters[1];
+  const out: TechRun = { techs: 0, rolls: 0, downed: 0, trials: TECH_TRIALS };
+  for (let t = 0; t < TECH_TRIALS; t++) {
+    const x = TECH_XS[t % TECH_XS.length];
+    dummy.x = x < 0 ? 165 : -165;
+    dummy.vx = 0;
+    setAction(cpu, 'air');
+    cpu.x = x;
+    cpu.y = -TECH_HEIGHTS[t % TECH_HEIGHTS.length];
+    cpu.prevY = cpu.y;
+    cpu.vx = 0; cpu.vy = 0; cpu.onGround = false; cpu.fastFalling = false; cpu.jumpsLeft = 2;
+    cpu.hitstun = 0; cpu.hitlag = 0; cpu.invuln = 0; cpu.percent = 70; cpu.ledge = -1;
+    cpu.techWindow = 0; cpu.techLockout = 0;
+    clearBuffer(cpu);
+    const facing = t % 2 === 0 ? 1 : -1;
+    applyHit(state, cpu, 1, facing, 10, TECH_ANGLES[t % TECH_ANGLES.length], 80, 50, 1, 0, cpu.x, cpu.y - 20);
+    let resolved = false;
+    for (let i = 0; i < TECH_RESOLVE_CAP && !resolved; i++) {
+      inputs[0] = cpuInput(state, 0, level, rand);
+      inputs[1] = idle;
+      stepGame(state, inputs);
+      for (let e = 0; e < state.events.length; e++) {
+        const ev = state.events[e];
+        if (ev.type === 'tech' && ev.slot === 0) {
+          out.techs++;
+          if (ev.roll) out.rolls++;
+          resolved = true;
+        }
+      }
+      if (!resolved && cpu.action === 'downed') { out.downed++; resolved = true; }
+    }
+  }
+  return out;
+}
+
+function sumTechRuns(level: number): TechRun {
+  const total: TechRun = { techs: 0, rolls: 0, downed: 0, trials: 0 };
+  for (let i = 0; i < TECH_SEEDS.length; i++) {
+    const r = runTechScenario(level, TECH_SEEDS[i]);
+    total.techs += r.techs;
+    total.rolls += r.rolls;
+    total.downed += r.downed;
+    total.trials += r.trials;
+  }
+  return total;
+}
+
+function techLine(label: string, r: TechRun): string {
+  const landings = r.techs + r.downed;
+  const rate = landings === 0 ? 0 : r.techs / landings;
+  return `${label} teched ${r.techs}/${landings} (${(rate * 100).toFixed(0)}%, ${r.rolls} rolls, ${r.downed} downed, ${r.trials} trials)`;
+}
+
+function testCpuTechs(): TestResult {
+  const hi = sumTechRuns(9);
+  const lo = sumTechRuns(1);
+  const fails: string[] = [];
+  const check = (label: string, r: TechRun, ok: (rate: number) => boolean): void => {
+    const landings = r.techs + r.downed;
+    if (landings < r.trials * TECH_RESOLVE_SHARE) fails.push(`${label} only ${landings}/${r.trials} landings resolved`);
+    else if (!ok(r.techs / landings)) fails.push(`${label} rate out of bounds`);
+  };
+  check('L9', hi, (rate) => rate >= TECH_HI_RATE);
+  check('L1', lo, (rate) => rate <= TECH_LO_RATE);
+  return {
+    name: `y. level 9 techs at least ${(TECH_HI_RATE * 100).toFixed(0)}% of tumble landings, level 1 at most ${(TECH_LO_RATE * 100).toFixed(0)}%`,
+    pass: fails.length === 0,
+    detail: `${techLine('L9', hi)} | ${techLine('L1', lo)}` + (fails.length === 0 ? '' : ` | ${fails.join('; ')}`),
+  };
+}
+
+const FS_SEEDS = [5, 17, 23];
+/** Frames a level 9 CPU with a full meter gets to start its Final Smash. */
+const FS_START_CAP = 120;
+/** Frames a started Final Smash is followed for, past its own 152-frame launch. */
+const FS_FOLLOW = 200;
+/** Frames a CPU with a forced full meter is watched for when the rule is off. */
+const FS_OFF_FRAMES = 600;
+
+interface FsRun { start: number; caught: boolean; launched: boolean; starts: number }
+
+/**
+ * A CPU of `level` 60 px left of an idle dummy, facing it, with its meter forced full every frame
+ * until a Final Smash starts. `rule` is written into the config as given (undefined leaves the
+ * field out). Records the first frame the CPU entered 'finalSmash', whether the dummy was caught,
+ * and whether the launch reached the dummy.
+ */
+function runFsScenario(level: number, seed: number, rule: boolean | undefined, frames: number): FsRun {
+  const cfg = cpuConfig(level, 0, seed, 3);
+  if (rule !== undefined) cfg.finalSmash = rule;
+  const state = createGameState(cfg);
+  const rand = () => nextFloat(state.rng);
+  const idle: InputFrame = { held: 0, pressed: 0, released: 0 };
+  const inputs: InputFrame[] = [idle, idle];
+  for (let i = 0; i < 30; i++) stepGame(state, inputs);
+  const fighters = simFighters(state);
+  const cpu = fighters[0];
+  const dummy = fighters[1];
+  cpu.x = -30; cpu.vx = 0; cpu.facing = 1;
+  dummy.x = 30; dummy.vx = 0; dummy.facing = -1; dummy.invuln = 0;
+  const out: FsRun = { start: -1, caught: false, launched: false, starts: 0 };
+  for (let i = 0; i < frames; i++) {
+    if (out.start < 0) cpu.fsMeter = FS_METER.max;
+    inputs[0] = cpuInput(state, 0, level, rand);
+    inputs[1] = idle;
+    stepGame(state, inputs);
+    if (cpu.action === 'finalSmash' && out.start < 0) out.start = i + 1;
+    if (dummy.action === 'finalSmashVictim') out.caught = true;
+    for (let e = 0; e < state.events.length; e++) {
+      const ev = state.events[e];
+      if (ev.type !== 'finalSmash' || ev.attacker !== 0) continue;
+      if (ev.phase === 'start') out.starts++;
+      else if (ev.phase === 'launch' && ev.victim === 1) out.launched = true;
+    }
+    if (out.start >= 0 && i + 1 - out.start >= FS_FOLLOW) break;
+  }
+  return out;
+}
+
+function testCpuFinalSmash(): TestResult {
+  const parts: string[] = [];
+  let ok = true;
+  for (let i = 0; i < FS_SEEDS.length; i++) {
+    const on = runFsScenario(9, FS_SEEDS[i], true, FS_START_CAP + FS_FOLLOW);
+    const off = runFsScenario(9, FS_SEEDS[i], undefined, FS_OFF_FRAMES);
+    const started = on.start > 0 && on.start <= FS_START_CAP;
+    if (!started || !on.caught || !on.launched) ok = false;
+    if (off.start >= 0 || off.starts > 0) ok = false;
+    parts.push(`seed ${FS_SEEDS[i]} rule on: start ${on.start < 0 ? 'never' : `${on.start}f`} caught=${on.caught}` +
+      ` launched=${on.launched} | rule off: starts ${off.starts}`);
+  }
+  return {
+    name: `z. with the rule on a level 9 CPU starts its Final Smash within ${FS_START_CAP} frames and it connects; off, never`,
+    pass: ok,
+    detail: parts.join('; '),
+  };
+}
+
+/**
+ * The rule off, two ways: the whole matrix (finalSmash left out of the config) never starts one
+ * and never fills a meter, and a forced full meter under an explicit `false` never starts one at
+ * the low, middle or top profile either.
+ */
+function testNoFsWhenRuleOff(): TestResult {
+  if (matrix.length === 0) return { name: 'aa. no Final Smash with the rule off', pass: false, detail: 'matrix missing' };
+  let starts = 0;
+  let meter = 0;
+  for (let i = 0; i < matrix.length; i++) {
+    const runs = matrix[i].runs;
+    for (let r = 0; r < runs.length; r++) {
+      starts += runs[r].fsStarts;
+      if (runs[r].maxMeter > meter) meter = runs[r].maxMeter;
+    }
+  }
+  const levels = [1, 5, 9];
+  const forced: string[] = [];
+  let forcedStarts = 0;
+  for (let i = 0; i < levels.length; i++) {
+    const r = runFsScenario(levels[i], 41, false, FS_OFF_FRAMES);
+    const n = r.start >= 0 ? Math.max(1, r.starts) : r.starts;
+    forcedStarts += n;
+    forced.push(`L${levels[i]} ${n}`);
+  }
+  return {
+    name: 'aa. with the rule off no CPU ever starts a Final Smash, even with a forced full meter',
+    pass: starts === 0 && meter === 0 && forcedStarts === 0,
+    detail: `matrix starts ${starts}, highest meter ${meter} | forced full meter, rule false: ${forced.join(', ')}`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Level 0: a dummy, not a difficulty. Never fights; stands still unless the
+// cpuZeroMoves rule turns it into a wanderer.
+// ---------------------------------------------------------------------------
+
+const ZERO_SEEDS = [1, 2, 3];
+/** Frames a level 0 is watched for under the rule. */
+const ZERO_FRAMES = 3600;
+/** Frames a level 0 is watched for with the rule off, standing still. */
+const ZERO_STILL_FRAMES = 600;
+/** Frames the spawn drop is given before a standing level 0 is held to standing still. */
+const ZERO_SETTLE = 60;
+/** Distance a wandering level 0 has to cover for the rule to count as having done anything. */
+const ZERO_TRAVEL = 40;
+/** Stocks for the level 0 vs level 9 sweep: enough that the match cannot end inside the cap. */
+const ZERO_DEEP_STOCKS = 99;
+const ZERO_STOCKS = 3;
+/**
+ * Every button a level 0 must never press, rule on or off. Down is in here too: it fast falls,
+ * drops through platforms and spot dodges, none of which a dummy is allowed to do.
+ */
+const ZERO_FORBIDDEN = Btn.Attack | Btn.Special | Btn.Grab | Btn.Shield | Btn.Dodge | Btn.Taunt |
+  Btn.CUp | Btn.CDown | Btn.CLeft | Btn.CRight | Btn.Down;
+
+interface ZeroRun {
+  frames: number;       // frames slot 0's input was read on
+  badBits: number;      // every forbidden bit ever seen in held|pressed on slot 0
+  directs: number;      // frames slot 0 asked for a direct move or command
+  startX: number;       // slot 0's x once the spawn had settled
+  maxDist: number;      // furthest slot 0 got from there
+  movedFrames: number;  // frames its x differed from the settled x at all
+  airFrames: number;    // frames it was off the ground after the settle window
+  jumps: number;        // 'jump' events it produced
+  nonIdle: string;      // first action other than 'idle' after the settle window, '' if none
+  stocks: number[];
+  longestDowned: number; // longest run of consecutive frames slot 0's action was 'downed', -1 if never downed
+}
+
+/** Drives a level 0 in slot 0 against `levelB` in slot 1, watching everything slot 0 does. */
+function runZeroMatch(
+  levelB: number, seed: number, frames: number, zeroMoves: boolean | undefined, stocks: number,
+): ZeroRun {
+  const state = createGameState(cpuConfig(0, levelB, seed, stocks, zeroMoves));
+  const rand = () => nextFloat(state.rng);
+  const inputs: InputFrame[] = [
+    { held: 0, pressed: 0, released: 0 },
+    { held: 0, pressed: 0, released: 0 },
+  ];
+  const out: ZeroRun = {
+    frames: 0, badBits: 0, directs: 0, startX: 0, maxDist: 0, movedFrames: 0,
+    airFrames: 0, jumps: 0, nonIdle: '', stocks: [0, 0], longestDowned: -1,
+  };
+  let downedStreak = 0;
+  for (let i = 0; i < frames; i++) {
+    const zero = cpuInput(state, 0, 0, rand);
+    out.badBits |= (zero.held | zero.pressed) & ZERO_FORBIDDEN;
+    if (zero.direct !== undefined && zero.direct !== 0) out.directs++;
+    out.frames++;
+    inputs[0] = zero;
+    inputs[1] = cpuInput(state, 1, levelB, rand);
+    stepGame(state, inputs);
+
+    const f = state.fighters[0];
+    if (f.action === 'downed') {
+      downedStreak++;
+      if (downedStreak > out.longestDowned) out.longestDowned = downedStreak;
+    } else {
+      downedStreak = 0;
+    }
+    if (i === ZERO_SETTLE) out.startX = f.x;
+    if (i >= ZERO_SETTLE) {
+      const d = Math.abs(f.x - out.startX);
+      if (d > out.maxDist) out.maxDist = d;
+      if (d > 0) out.movedFrames++;
+      if (!f.onGround) out.airFrames++;
+      if (f.action !== 'idle' && out.nonIdle === '') out.nonIdle = f.action;
+    }
+    for (let e = 0; e < state.events.length; e++) {
+      const ev = state.events[e];
+      if (ev.type === 'jump' && ev.slot === 0) out.jumps++;
+    }
+    if (state.finished) break;
+  }
+  out.stocks = [state.fighters[0].stocks, state.fighters[1].stocks];
+  return out;
+}
+
+/** A level 0 is a punching bag: it never presses a button that could hurt anyone, including itself. */
+function testZeroNeverFights(): TestResult {
+  const fails: string[] = [];
+  let checked = 0;
+  for (let i = 0; i < ZERO_SEEDS.length; i++) {
+    const r = runZeroMatch(9, ZERO_SEEDS[i], ZERO_FRAMES, true, ZERO_DEEP_STOCKS);
+    checked += r.frames;
+    if (r.badBits !== 0) fails.push(`seed ${ZERO_SEEDS[i]} pressed 0x${r.badBits.toString(16)}`);
+    if (r.directs !== 0) fails.push(`seed ${ZERO_SEEDS[i]} sent ${r.directs} direct codes`);
+  }
+  return {
+    name: 'ab. a level 0 CPU never attacks, shields or dodges, even next to a level 9',
+    pass: fails.length === 0,
+    detail: fails.length === 0
+      ? `${checked} frames checked over ${ZERO_SEEDS.length} seeds, no forbidden button, no direct code`
+      : fails.join('; '),
+  };
+}
+
+/** The rule off is a statue; the rule on is a wanderer that covers ground and stays alive. */
+function testZeroWanders(): TestResult {
+  const fails: string[] = [];
+  const still = runZeroMatch(0, 7, ZERO_STILL_FRAMES, false, ZERO_STOCKS);
+  if (still.movedFrames !== 0) {
+    fails.push(`rule off: moved on ${still.movedFrames}f, up to ${still.maxDist.toFixed(2)}px`);
+  }
+  if (still.nonIdle !== '') fails.push(`rule off: action went to '${still.nonIdle}'`);
+
+  const parts: string[] = [`rule off: x fixed at ${still.startX.toFixed(2)}, action idle throughout`];
+  for (let i = 0; i < ZERO_SEEDS.length; i++) {
+    const r = runZeroMatch(0, ZERO_SEEDS[i], ZERO_FRAMES, true, ZERO_STOCKS);
+    parts.push(`seed ${ZERO_SEEDS[i]} travelled ${r.maxDist.toFixed(1)}px jumps ${r.jumps}` +
+      ` air ${r.airFrames}f stocks ${r.stocks[0]}-${r.stocks[1]}`);
+    if (r.maxDist < ZERO_TRAVEL) fails.push(`seed ${ZERO_SEEDS[i]} only travelled ${r.maxDist.toFixed(1)}px`);
+    if (r.jumps === 0 && r.airFrames === 0) fails.push(`seed ${ZERO_SEEDS[i]} never left the ground`);
+    if (r.stocks[0] !== ZERO_STOCKS || r.stocks[1] !== ZERO_STOCKS) {
+      fails.push(`seed ${ZERO_SEEDS[i]} lost a stock: ${r.stocks[0]}-${r.stocks[1]}`);
+    }
+  }
+  return {
+    name: `ac. a level 0 stands still by default and wanders at least ${ZERO_TRAVEL}px under the rule, never self-destructing`,
+    pass: fails.length === 0,
+    detail: parts.join(' | ') + (fails.length === 0 ? '' : ` || ${fails.join('; ')}`),
+  };
+}
+
+/** Seeds test ad replays: the first two of ZERO_SEEDS, against a level 9 that actually lands hits. */
+const DOWNED_SEEDS = [ZERO_SEEDS[0], ZERO_SEEDS[1]];
+/** Longest a wandering level 0 may lie downed before its own get-up press takes over. */
+const DOWNED_STREAK_CAP = 40;
+
+/**
+ * A level 0 that tumbles into a landing without teching used to lie downed for the full
+ * KNOCKDOWN.maxFrames (120), because dummyInput never pressed anything while downed. With the
+ * wander rule on it now presses Jump at most once every WANDER_JUMP_CD frames while downed, so any
+ * downed streak should end well inside that: the get-up itself then takes a few more frames.
+ */
+function testZeroGetsUp(): TestResult {
+  const fails: string[] = [];
+  const parts: string[] = [];
+  for (let i = 0; i < DOWNED_SEEDS.length; i++) {
+    const seed = DOWNED_SEEDS[i];
+    const r = runZeroMatch(9, seed, ZERO_FRAMES, true, ZERO_DEEP_STOCKS);
+    if (r.badBits !== 0) fails.push(`seed ${seed} pressed 0x${r.badBits.toString(16)}`);
+    if (r.longestDowned < 0) {
+      parts.push(`seed ${seed}: never knocked down in ${ZERO_FRAMES}f`);
+    } else {
+      parts.push(`seed ${seed}: longest downed streak ${r.longestDowned}f`);
+      if (r.longestDowned > DOWNED_STREAK_CAP) {
+        fails.push(`seed ${seed} stayed downed ${r.longestDowned}f (cap ${DOWNED_STREAK_CAP})`);
+      }
+    }
+  }
+  return {
+    name: `ad. a wandering level 0 stands back up after a knockdown`,
+    pass: fails.length === 0,
+    detail: parts.join(', ') + (fails.length === 0 ? '' : ` || ${fails.join('; ')}`),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Level 10: Aevalmere, the search-based brain (src/ai/aevalmere.ts). Played against the
+// legacy ladder on the same seeds and sides as the matrix, and measured for true combos (hits
+// landed while the victim is still in hitstun or hitlag from the last one), self-destructs,
+// determinism, the per-call time budget and the reaction floor.
+// ---------------------------------------------------------------------------
+
+/** Lowest share of Lv10-vs-Lv9 matches Lv10 has to take, and the most stocks it may lose per match. */
+const L10_WIN_FLOOR = 0.9;
+const L10_LOST_CAP = 0.5;
+/** 3+ hit true combos Lv10 has to land per match against Lv9, on average. */
+const L10_COMBO_FLOOR = 1;
+/** Mean milliseconds one level 10 cpuInput call may cost, over a 3000-frame match. */
+const L10_MS_CAP = 1.5;
+const L10_BUDGET_FRAMES = 3000;
+/** Opponent levels in the level 10 sweep, each on every seed and both sides. 10 is the mirror. */
+const L10_SWEEP = [9, 5, 1, 10];
+
+interface L10Run {
+  state: GameState;
+  frames: number;
+  l10Slot: number;
+  sd: number;            // self-destructs of a level 10 slot
+  longestCombo: number;  // longest true combo landed by the level 10 slot
+  combos3: number;       // true combos that reached 3 hits
+  earlyShields: number;  // fresh Shield presses by a grounded level 10 while an opponent's move was 0 or 1 frames old
+  ms: number;            // time spent inside the level 10 cpuInput calls
+  calls: number;
+  decisions: number;
+  alternates: number;
+}
+
+/** One match with level 10 on slot 0 when levelA is 10, else on slot 1 (both play level 10 in the mirror). */
+function runL10Match(levelA: number, levelB: number, seed: number, stocks: number, maxFrames: number): L10Run {
+  const state = createGameState(cpuConfig(levelA, levelB, seed, stocks));
+  const rand = () => nextFloat(state.rng);
+  const levels = [levelA, levelB];
+  const l10Slot = levelA >= 10 ? 0 : 1;
+  const inputs: InputFrame[] = [
+    { held: 0, pressed: 0, released: 0, direct: 0 },
+    { held: 0, pressed: 0, released: 0, direct: 0 },
+  ];
+  let combo = 0;
+  let longest = 0;
+  let combos3 = 0;
+  let early = 0;
+  let ms = 0;
+  let calls = 0;
+  let sd = 0;
+  let frame = 0;
+  for (; frame < maxFrames; frame++) {
+    for (let s = 0; s < 2; s++) {
+      const t0 = performance.now();
+      const out = cpuInput(state, s, levels[s], rand);
+      if (levels[s] >= 10) { ms += performance.now() - t0; calls++; }
+      inputs[s].held = out.held;
+      inputs[s].pressed = out.pressed;
+      inputs[s].released = out.released;
+      inputs[s].direct = out.direct;
+      if (levels[s] >= 10 && (out.pressed & Btn.Shield) !== 0) {
+        const me = state.fighters[s];
+        const opp = state.fighters[1 - s];
+        if (me.onGround && me.hitstun === 0 && opp.action === 'attack' && opp.actionFrame <= 1 && opp.hitlag === 0) early++;
+      }
+    }
+    const victim = state.fighters[1 - l10Slot];
+    const held = victim.hitstun > 0 || victim.hitlag > 0;
+    stepGame(state, inputs);
+    let hitNow = false;
+    for (let i = 0; i < state.events.length; i++) {
+      const ev = state.events[i];
+      if (ev.type === 'hit' && ev.attacker === l10Slot && ev.victim === 1 - l10Slot && ev.kb > 0) {
+        combo = held || hitNow ? combo + 1 : 1;
+        hitNow = true;
+        if (combo > longest) longest = combo;
+        if (combo === 3) combos3++;
+      } else if (ev.type === 'ko') {
+        const f = state.fighters[ev.slot];
+        if (f && f.lastHitBy === -1 && levels[ev.slot] >= 10) sd++;
+      }
+    }
+    if (!hitNow && victim.hitstun === 0 && victim.hitlag === 0) combo = 0;
+    if (state.finished) { frame++; break; }
+  }
+  // The sim's own results record counts a KO without recent KO credit as an SD too; take whichever is higher.
+  let sdStats = 0;
+  for (let i = 0; i < 2; i++) if (levels[i] >= 10) sdStats += state.fighters[i].stats.sds;
+  if (sdStats > sd) sd = sdStats;
+  const st = aevalmereStats(l10Slot);
+  return {
+    state, frames: frame, l10Slot, sd, longestCombo: longest, combos3, earlyShields: early, ms, calls,
+    decisions: st.decisions, alternates: st.alternates,
+  };
+}
+
+interface L10Summary {
+  opp: number;
+  matches: number;
+  wins: number;
+  stocksLost: number;
+  sd: number;
+  longestSum: number;
+  combos3: number;
+  earlyShields: number;
+  decisions: number;
+  alternates: number;
+  frames: number;
+  unfinished: number;
+}
+
+const l10Runs: L10Summary[] = [];
+
+/** Level 10 against `opp` on every seed and both sides, run once and cached. */
+function l10Summary(opp: number): L10Summary {
+  for (let i = 0; i < l10Runs.length; i++) if (l10Runs[i].opp === opp) return l10Runs[i];
+  const out: L10Summary = {
+    opp, matches: 0, wins: 0, stocksLost: 0, sd: 0, longestSum: 0, combos3: 0, earlyShields: 0,
+    decisions: 0, alternates: 0, frames: 0, unfinished: 0,
+  };
+  for (let i = 0; i < SEEDS.length; i++) {
+    for (let side = 0; side < 2; side++) {
+      const run = side === 0
+        ? runL10Match(10, opp, SEEDS[i], MATRIX_STOCKS, MATCH_CAP)
+        : runL10Match(opp, 10, SEEDS[i], MATRIX_STOCKS, MATCH_CAP);
+      out.matches++;
+      if (run.state.winner === run.l10Slot) out.wins++;
+      out.stocksLost += MATRIX_STOCKS - run.state.fighters[run.l10Slot].stocks;
+      out.sd += run.sd;
+      out.longestSum += run.longestCombo;
+      out.combos3 += run.combos3;
+      out.earlyShields += run.earlyShields;
+      out.decisions += run.decisions;
+      out.alternates += run.alternates;
+      out.frames += run.frames;
+      if (!run.state.finished) out.unfinished++;
+    }
+  }
+  l10Runs.push(out);
+  return out;
+}
+
+function l10Line(m: L10Summary): string {
+  return `  L10 vs L${m.opp}: L10 wins ${m.wins}/${m.matches} (${((m.wins / m.matches) * 100).toFixed(0)}%)` +
+    ` stocks lost/match ${(m.stocksLost / m.matches).toFixed(2)} sd ${m.sd}` +
+    ` longest combo avg ${(m.longestSum / m.matches).toFixed(2)} 3+ combos/match ${(m.combos3 / m.matches).toFixed(2)}` +
+    ` early shields ${m.earlyShields} safe alternates ${(m.decisions > 0 ? (m.alternates / m.decisions) * 100 : 0).toFixed(1)}%` +
+    ` avg ${Math.round(m.frames / m.matches)}f unfinished ${m.unfinished}`;
+}
+
+function testL10BeatsL9(): TestResult {
+  const m = l10Summary(9);
+  const rate = m.wins / m.matches;
+  const lost = m.stocksLost / m.matches;
+  return {
+    name: `ae. level 10 beats level 9 in at least ${L10_WIN_FLOOR * 100}% of matches, losing under ${L10_LOST_CAP} stocks per match`,
+    pass: rate >= L10_WIN_FLOOR && lost < L10_LOST_CAP,
+    detail: `won ${m.wins}/${m.matches} (${(rate * 100).toFixed(0)}%), stocks lost per match ${lost.toFixed(2)}`,
+  };
+}
+
+function testL10Combos(): TestResult {
+  const m = l10Summary(9);
+  const per = m.combos3 / m.matches;
+  return {
+    name: `af. level 10 lands a 3+ hit true combo on level 9 at least ${L10_COMBO_FLOOR}x per match on average`,
+    pass: per >= L10_COMBO_FLOOR,
+    detail: `${m.combos3} combos of 3+ hits over ${m.matches} matches (${per.toFixed(2)}/match),` +
+      ` longest per match avg ${(m.longestSum / m.matches).toFixed(2)}`,
+  };
+}
+
+function testL10NoSelfDestruct(): TestResult {
+  let sd = 0;
+  let matches = 0;
+  let unfinished = 0;
+  const parts: string[] = [];
+  for (let i = 0; i < L10_SWEEP.length; i++) {
+    const m = l10Summary(L10_SWEEP[i]);
+    sd += m.sd;
+    matches += m.matches;
+    unfinished += m.unfinished;
+    parts.push(`vs L${m.opp} sd ${m.sd}`);
+  }
+  return {
+    name: 'ag. level 10 never self-destructs, and every level 10 match finishes, across the sweep',
+    pass: sd === 0 && unfinished === 0,
+    detail: `${matches} matches: ${parts.join(', ')}, unfinished ${unfinished}`,
+  };
+}
+
+function testL10Determinism(): TestResult {
+  const a = runL10Match(10, 9, 23, MATRIX_STOCKS, MATCH_CAP);
+  const b = runL10Match(10, 9, 23, MATRIX_STOCKS, MATCH_CAP);
+  const c = runL10Match(10, 10, 41, MATRIX_STOCKS, MATCH_CAP);
+  const d = runL10Match(10, 10, 41, MATRIX_STOCKS, MATCH_CAP);
+  const same1 = JSON.stringify(a.state) === JSON.stringify(b.state);
+  const same2 = JSON.stringify(c.state) === JSON.stringify(d.state);
+  return {
+    name: 'ah. level 10: the same seed twice gives an identical final state',
+    pass: same1 && same2,
+    detail: `L10vL9 seed 23 ${same1 ? 'identical' : 'DIVERGED'} (${a.frames}f),` +
+      ` L10vL10 seed 41 ${same2 ? 'identical' : 'DIVERGED'} (${c.frames}f)`,
+  };
+}
+
+let l10MsPerCall = 0;
+
+function testL10Budget(): TestResult {
+  // Enough stocks that the match is still running when the window closes.
+  const run = runL10Match(10, 9, 17, 9, L10_BUDGET_FRAMES);
+  const per = run.calls > 0 ? run.ms / run.calls : 0;
+  l10MsPerCall = per;
+  return {
+    name: `ai. a level 10 cpuInput call costs under ${L10_MS_CAP} ms on average over a ${L10_BUDGET_FRAMES}-frame match`,
+    pass: per < L10_MS_CAP,
+    detail: `${per.toFixed(3)} ms per call over ${run.calls} calls (${run.frames}f), ${run.decisions} decisions`,
+  };
+}
+
+function testL10ReactionFloor(): TestResult {
+  let early = 0;
+  let matches = 0;
+  for (let i = 0; i < L10_SWEEP.length; i++) {
+    const m = l10Summary(L10_SWEEP[i]);
+    early += m.earlyShields;
+    matches += m.matches;
+  }
+  return {
+    name: 'aj. level 10 never presses shield with 0 or 1 frames of an opponent startup elapsed',
+    pass: early === 0,
+    detail: `${early} early shield presses over ${matches} matches`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Teams rule: a level 10 and a level 9 on team 0 against a level 9 on team 1. The team-0 CPUs must
+// treat each other as allies: they win every match, they never land a hit on each other, and they
+// never start an attack when the nearest fighter is their own teammate while every enemy is more
+// than TEAM_FAR px away and off the teammate's line (an attack thrown at a friend, since friendly
+// fire lands nothing). The line check keeps juggles on an enemy launched high under the raised
+// Tidegate ceiling and ranged moves past a friend from counting as swings at the friend.
+// ---------------------------------------------------------------------------
+
+const TEAM_SEEDS = [5, 17, 23, 41, 97];
+const TEAM_STOCKS = 2;
+const TEAM_FAR = 200;
+
+/** Horizontal px either side of a fighter that count as straight above or below it. */
+const TEAM_LINE_X = 24;
+
+function teamSide(dx: number): number {
+  return Math.abs(dx) <= TEAM_LINE_X ? 0 : Math.sign(dx);
+}
+
+interface TeamRun { winnerTeam: number; finished: boolean; frames: number; mateHits: number; mateAttacks: number }
+
+function runTeamMatch(seed: number): TeamRun {
+  const cfg: MatchConfig = {
+    stageId: 'tidegate',
+    players: [
+      { slot: 0, charId: 'aeval', cpu: true, cpuLevel: 10, team: 0 },
+      { slot: 1, charId: 'aeval', cpu: true, cpuLevel: 9, team: 0 },
+      { slot: 2, charId: 'aeval', cpu: true, cpuLevel: 9, team: 1 },
+    ],
+    stocks: TEAM_STOCKS,
+    timeLimitSec: 0,
+    seed,
+    teams: true,
+  };
+  const state = createGameState(cfg);
+  const rand = () => nextFloat(state.rng);
+  const inputs: InputFrame[] = [];
+  for (let i = 0; i < 3; i++) inputs.push({ held: 0, pressed: 0, released: 0, direct: 0 });
+  const prevAction: string[] = ['', '', ''];
+  const prevMove: (string | null)[] = [null, null, null];
+  let mateHits = 0;
+  let mateAttacks = 0;
+  let frame = 0;
+  for (; frame < MATCH_CAP; frame++) {
+    for (let s = 0; s < 3; s++) {
+      const out = cpuInput(state, s, cfg.players[s].cpuLevel, rand);
+      inputs[s].held = out.held; inputs[s].pressed = out.pressed; inputs[s].released = out.released; inputs[s].direct = out.direct;
+    }
+    stepGame(state, inputs);
+    for (let i = 0; i < state.events.length; i++) {
+      const ev = state.events[i];
+      if (ev.type === 'hit' && ev.attacker !== ev.victim && ev.attacker <= 1 && ev.victim <= 1) mateHits++;
+    }
+    for (let s = 0; s < 2; s++) {
+      const f = state.fighters[s];
+      const started = f.action === 'attack' && (prevAction[s] !== 'attack' || f.moveId !== prevMove[s]);
+      prevAction[s] = f.action;
+      prevMove[s] = f.moveId;
+      if (!started) continue;
+      const mate = state.fighters[1 - s];
+      const foe = state.fighters[2];
+      if (mate.stocks <= 0 || mate.action === 'dead') continue;
+      const dMate = Math.hypot(mate.x - f.x, mate.y - f.y);
+      const foeGone = foe.stocks <= 0 || foe.action === 'dead';
+      const dFoe = foeGone ? Infinity : Math.hypot(foe.x - f.x, foe.y - f.y);
+      // A swing only counts as thrown at the teammate when the enemy is not in the same line:
+      // straight above or below (a juggle on an enemy launched toward the tall Tidegate ceiling)
+      // or on the teammate's side (a projectile or dash that passes the friend on its way).
+      const foeSide = foeGone ? NaN : teamSide(foe.x - f.x);
+      const foeInLine = foeSide === 0 || foeSide === teamSide(mate.x - f.x);
+      if (dMate < dFoe && dFoe > TEAM_FAR && !foeInLine) mateAttacks++;
+    }
+    if (state.finished) { frame++; break; }
+  }
+  const winnerTeam = state.winner < 0 ? -1 : (cfg.players[state.winner].team ?? state.winner);
+  return { winnerTeam, finished: state.finished, frames: frame, mateHits, mateAttacks };
+}
+
+function testTeams(): TestResult {
+  let wins = 0;
+  let mateHits = 0;
+  let mateAttacks = 0;
+  const parts: string[] = [];
+  for (let i = 0; i < TEAM_SEEDS.length; i++) {
+    const r = runTeamMatch(TEAM_SEEDS[i]);
+    if (r.finished && r.winnerTeam === 0) wins++;
+    mateHits += r.mateHits;
+    mateAttacks += r.mateAttacks;
+    parts.push(`seed ${TEAM_SEEDS[i]} winner team ${r.winnerTeam} ${r.frames}f mate attacks ${r.mateAttacks}`);
+  }
+  return {
+    name: 'ak. Teams: L10 + L9 on team 0 beat an L9 on team 1 every match, never hitting or swinging at each other',
+    pass: wins === TEAM_SEEDS.length && mateHits === 0 && mateAttacks === 0,
+    detail: `team 0 won ${wins}/${TEAM_SEEDS.length}, teammate hits ${mateHits}, attacks at a teammate with every enemy past ${TEAM_FAR}px ${mateAttacks} | ${parts.join(', ')}`,
+  };
+}
+
+
+// ---------------------------------------------------------------------------
+// Kill speed: level 10 against a level 0 dummy. A standing dummy (cpuZeroMoves off) has to lose its
+// first stock inside KILL_FIRST_CAP frames and all three inside KILL_ALL_CAP; a wandering one (rule
+// on) its first inside KILL_WANDER_CAP. The timeline (KO frames, damage per second, damage by move)
+// is kept for the printout, since a slow kill is diagnosed from where the damage went.
+// ---------------------------------------------------------------------------
+
+const KILL_SEEDS = [5, 17, 23];
+const KILL_STOCKS = 3;
+const KILL_FIRST_CAP = 1200;
+const KILL_ALL_CAP = 3600;
+const KILL_WANDER_CAP = 1800;
+
+interface KillRun {
+  seed: number;
+  wander: boolean;
+  koFrames: number[];
+  koSides: string[];
+  koPcts: number[];
+  frames: number;
+  damage: number;
+  byMove: Record<string, number>;
+}
+
+/** Level 10 on slot 0 against a level 0 on slot 1, until the dummy is out of stocks or `cap` runs out. */
+function runKillMatch(seed: number, wander: boolean, cap: number): KillRun {
+  const l10Slot = 0;
+  const state = createGameState(cpuConfig(10, 0, seed, KILL_STOCKS, wander));
+  const rand = () => nextFloat(state.rng);
+  const vi = 1 - l10Slot;
+  const inputs: InputFrame[] = [
+    { held: 0, pressed: 0, released: 0, direct: 0 },
+    { held: 0, pressed: 0, released: 0, direct: 0 },
+  ];
+  const out: KillRun = { seed, wander, koFrames: [], koSides: [], koPcts: [], frames: 0, damage: 0, byMove: {} };
+  let lastPct = 0;
+  let frame = 0;
+  for (; frame < cap; frame++) {
+    for (let s = 0; s < 2; s++) {
+      const o = cpuInput(state, s, s === l10Slot ? 10 : 0, rand);
+      inputs[s].held = o.held; inputs[s].pressed = o.pressed; inputs[s].released = o.released; inputs[s].direct = o.direct;
+    }
+    stepGame(state, inputs);
+    for (let i = 0; i < state.events.length; i++) {
+      const ev = state.events[i];
+      if (ev.type === 'hit' && ev.attacker === l10Slot && ev.victim === vi) {
+        // What the level 10 was doing when its hit landed; a hit while it is not in a move is a projectile.
+        const f = state.fighters[l10Slot];
+        const label = f.action === 'throw' && simView(f).activeThrowId !== null ? String(simView(f).activeThrowId)
+          : f.action === 'attack' && f.moveId !== null ? f.moveId : 'projectile';
+        out.byMove[label] = (out.byMove[label] ?? 0) + ev.damage;
+        out.damage += ev.damage;
+      } else if (ev.type === 'ko' && ev.slot === vi) {
+        out.koFrames.push(state.frame);
+        out.koSides.push(ev.side);
+        out.koPcts.push(Math.round(lastPct));
+      }
+    }
+    lastPct = state.fighters[vi].percent;
+    if (state.finished) { frame++; break; }
+  }
+  out.frames = frame;
+  return out;
+}
+
+function killLine(r: KillRun): string {
+  const moves = Object.keys(r.byMove).sort((a, b) => r.byMove[b] - r.byMove[a])
+    .map((k) => `${k} ${r.byMove[k].toFixed(0)}`).join(', ');
+  const kos = r.koFrames.map((f, i) => `${f}f (${(f / 60).toFixed(1)}s, ${r.koSides[i]}, ~${r.koPcts[i]}%)`).join(' ');
+  return `  ${r.wander ? 'wandering' : 'standing'} seed ${r.seed}: KOs ${kos || 'none'} | ${r.frames}f,` +
+    ` ${(r.damage / (r.frames / 60)).toFixed(1)}%/s | by move: ${moves}`;
+}
+
+const killRuns: KillRun[] = [];
+
+function testL10KillSpeed(): TestResult {
+  const fails: string[] = [];
+  const parts: string[] = [];
+  for (let i = 0; i < KILL_SEEDS.length; i++) {
+    const r = runKillMatch(KILL_SEEDS[i], false, KILL_ALL_CAP);
+    killRuns.push(r);
+    const first = r.koFrames.length > 0 ? r.koFrames[0] : -1;
+    parts.push(`standing ${KILL_SEEDS[i]} first ${first}f all ${r.koFrames.length === KILL_STOCKS ? r.koFrames[KILL_STOCKS - 1] : -1}f`);
+    if (first < 0 || first > KILL_FIRST_CAP) fails.push(`standing seed ${KILL_SEEDS[i]} first KO ${first}f`);
+    if (r.koFrames.length < KILL_STOCKS) fails.push(`standing seed ${KILL_SEEDS[i]} only ${r.koFrames.length} KOs in ${KILL_ALL_CAP}f`);
+  }
+  for (let i = 0; i < KILL_SEEDS.length; i++) {
+    const r = runKillMatch(KILL_SEEDS[i], true, KILL_ALL_CAP);
+    killRuns.push(r);
+    const first = r.koFrames.length > 0 ? r.koFrames[0] : -1;
+    parts.push(`wandering ${KILL_SEEDS[i]} first ${first}f`);
+    if (first < 0 || first > KILL_WANDER_CAP) fails.push(`wandering seed ${KILL_SEEDS[i]} first KO ${first}f`);
+  }
+  return {
+    name: `al. level 10 kills a level 0 fast: standing, first KO by ${KILL_FIRST_CAP}f and ${KILL_STOCKS} stocks by ${KILL_ALL_CAP}f; wandering, first KO by ${KILL_WANDER_CAP}f`,
+    pass: fails.length === 0,
+    detail: `${parts.join(', ')}${fails.length > 0 ? ` | FAIL: ${fails.join('; ')}` : ''}`,
+  };
+}
+
 export function runAiSelfTest(): TestResult[] {
   const a = testL1v1();
   const b = testMatrix();
@@ -1171,7 +2299,25 @@ export function runAiSelfTest(): TestResult[] {
   const r = testShortHopScaling();
   const s = testChargedSmashes();
   const t = testKitScaling();
-  return [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t];
+  const u = testNoAccidentalRoll();
+  const v = testCpuGrabs();
+  const w = testMashOut();
+  const x = testProjectileBlock();
+  const y = testCpuTechs();
+  const z = testCpuFinalSmash();
+  const aa = testNoFsWhenRuleOff();
+  const ab = testZeroNeverFights();
+  const ac = testZeroWanders();
+  const ad = testZeroGetsUp();
+  const ae = testL10BeatsL9();
+  const af = testL10Combos();
+  const ag = testL10NoSelfDestruct();
+  const ah = testL10Determinism();
+  const ai = testL10Budget();
+  const aj = testL10ReactionFloor();
+  const ak = testTeams();
+  const al = testL10KillSpeed();
+  return [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v, w, x, y, z, aa, ab, ac, ad, ae, af, ag, ah, ai, aj, ak, al];
 }
 
 if (typeof process !== 'undefined' && process.argv[1] && process.argv[1].endsWith('aitest.ts')) {
@@ -1207,6 +2353,15 @@ if (typeof process !== 'undefined' && process.argv[1] && process.argv[1].endsWit
   process.stdout.write(`  level 9   movement: ${movementLine(hiKit.counts, hiKit.frames)}\n`);
   process.stdout.write(`  level 1-2 moves: ${kitTable(loKit.counts, loKit.frames)}\n`);
   process.stdout.write(`  level 1-2 movement: ${movementLine(loKit.counts, loKit.frames)}\n\n`);
+
+  const combo = aevalmereComboSummary('tidegate');
+  process.stdout.write(`level 10 (Aevalmere), ${SEEDS.length} seeds x both sides, ${MATRIX_STOCKS} stocks:\n`);
+  for (let i = 0; i < l10Runs.length; i++) process.stdout.write(`${l10Line(l10Runs[i])}\n`);
+  process.stdout.write(`  budget: ${l10MsPerCall.toFixed(3)} ms per level 10 cpuInput call\n`);
+  process.stdout.write(`  kill speed against a level 0 (${KILL_STOCKS} stocks):\n`);
+  for (let i = 0; i < killRuns.length; i++) process.stdout.write(`${killLine(killRuns[i])}\n`);
+  process.stdout.write(`  combo table: ${combo.entries} starter entries, ${combo.chains3} open 3+ hit chains,` +
+    ` ${combo.chains4} open 4-hit chains, ${combo.kills} end in a KO; e.g. ${combo.example}\n\n`);
 
   let passed = 0;
   for (let i = 0; i < results.length; i++) {

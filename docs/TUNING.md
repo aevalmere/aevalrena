@@ -90,20 +90,20 @@ move        gap  lift    ko %  full ko %  kb at 100
 ---------------------------------------------------
 jab          40     0    none          -       42.5
 ftilt        40     0     166          -       69.2
-utilt        26     0     151          -      117.7
+utilt        26     0     201          -      117.7
 dtilt        26     0     169          -      111.1
 dashatk      40     0     151          -       85.6
 fsmash       40     0     100         64       94.2
-usmash       26     0     106         69      143.8
+usmash       26     0     140         94      143.8
 dsmash       40     0     114         78       91.1
 nair         26     0     176          -       77.5
 fair         40     0     130          -       80.8
 bair          0     0     121          -       91.3
-uair          0    44     137          -      110.8
+uair          0    44     189          -      110.8
 dair         26     0    none          -      144.6
 nspecial     40     0     210          -       63.0
 sspecial     40     0     140          -       78.5
-uspecial     26     0     162          -      120.0
+uspecial     26     0     134          -      156.6
 dspecial     26     0     130          -      145.7
 ledgeatk     40     0     180          -       66.3
 getupatk     40     0     178          -       67.8

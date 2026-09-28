@@ -1,16 +1,21 @@
 import {
-  hitlagFrames, SAKURAI_STRONG_ANGLE, SAKURAI_WEAK_ANGLE, SHIELD_BREAK_STUN, SHIELD_MAX,
+  FS_METER, hitlagFrames, SAKURAI_STRONG_ANGLE, SAKURAI_WEAK_ANGLE, SHIELD_BREAK_STUN, SHIELD_MAX,
   SHIELD_STUN_PER_DAMAGE, TUNING,
 } from '../core/constants';
 import { circleRectOverlap, degToRad } from '../core/math';
 import { MAX_PLAYERS } from '../core/types';
 import type { Facing, GameState, HitboxDef, Rect } from '../core/types';
-import { defOf, fighterHurtbox, setAction, simFighters, type SimFighter } from './state';
+import { defOf, fighterHurtbox, recordHit, sameTeam, setAction, simFighters, type SimFighter } from './state';
 import { PROJECTILE_DEFS, killProjectile } from './projectiles';
+import { dodgesHit } from './dodge';
+import { forceGrab } from './grab';
 
 const HURT: Rect = { x: 0, y: 0, w: 0, h: 0 };
 const hitThisFrame: boolean[] = [];
 for (let i = 0; i < MAX_PLAYERS; i++) hitThisFrame.push(false);
+/** Victims a grab hitbox caught this pass. Unlike hitThisFrame it is not reset per attacker. */
+const caughtThisFrame: boolean[] = [];
+for (let i = 0; i < MAX_PLAYERS; i++) caughtThisFrame.push(false);
 
 const PERCENT_CAP = 999;
 /** Below this launch angle a grounded victim slides instead of leaving the ground. */
@@ -19,7 +24,32 @@ const SHIELD_PUSHBACK = 2;
 
 export function canBeHit(f: SimFighter): boolean {
   if (f.action === 'dead' || f.action === 'respawn') return false;
+  // Both sides of a Final Smash are out of reach of everyone else until the launch.
+  if (f.action === 'finalSmash' || f.action === 'finalSmashVictim') return false;
   return f.invuln <= 0;
+}
+
+/**
+ * Final Smash meter gain for `damage` dealt by `attacker` (null when none is known) to
+ * `victim`. Only under the finalSmash rule, capped at FS_METER.max, and never for a
+ * fighter who is performing a Final Smash right now. Shield hits must not call this.
+ */
+export function gainFsMeter(state: GameState, attacker: SimFighter | null, victim: SimFighter, damage: number): void {
+  if (state.config.finalSmash !== true) return;
+  if (attacker !== null && attacker !== victim && attacker.action !== 'finalSmash') {
+    attacker.fsMeter = Math.min(FS_METER.max, attacker.fsMeter + damage * FS_METER.perDamageDealt);
+  }
+  if (victim.action !== 'finalSmash') {
+    victim.fsMeter = Math.min(FS_METER.max, victim.fsMeter + damage * FS_METER.perDamageTaken);
+  }
+}
+
+function fighterBySlot(state: GameState, slot: number): SimFighter | null {
+  const fighters = simFighters(state);
+  for (let i = 0; i < fighters.length; i++) {
+    if (fighters[i].slot === slot) return fighters[i];
+  }
+  return null;
 }
 
 /**
@@ -63,6 +93,8 @@ export function applyHit(
   hitX: number,
   hitY: number,
 ): number {
+  // Teams rule: friendly fire is off, so a teammate's hit (a throw, a launch) lands nothing.
+  if (sameTeam(state, attackerSlot, victim.slot)) return 0;
   // damageMul scales everything a hit deals, so hitlag and shield damage follow it too.
   const damage = rawDamage * TUNING.knockback.damageMul;
   const lag = Math.max(1, Math.round(hitlagFrames(damage) * hitlagMul));
@@ -73,6 +105,8 @@ export function applyHit(
     victim.vx += (victim.x < hitX ? -1 : 1) * SHIELD_PUSHBACK;
     state.events.push({ type: 'shieldHit', x: hitX, y: hitY, victim: victim.slot });
     if (victim.shieldHp <= 0) {
+      const breaker = fighterBySlot(state, attackerSlot);
+      if (breaker !== null && breaker !== victim && !state.finished) breaker.stats.shieldBreaks++;
       breakShield(state, victim);
     } else {
       setAction(victim, 'shieldStun');
@@ -82,6 +116,9 @@ export function applyHit(
   }
 
   const def = defOf(victim);
+  recordHit(state, victim, attackerSlot, Math.min(PERCENT_CAP, victim.percent + damage) - victim.percent);
+  // Meter reads the victim's action before the hit replaces it with hitstun.
+  gainFsMeter(state, fighterBySlot(state, attackerSlot), victim, damage);
   victim.percent = Math.min(PERCENT_CAP, victim.percent + damage);
   const kb = knockback(victim.percent, def.weight, damage, bkb, kbg) * TUNING.knockback.kbMul;
   const local = launchAngle(angle, kb);
@@ -215,17 +252,22 @@ function resolveProjectileClashes(state: GameState): void {
       const bd = bdef.damage * b.power;
       const gap = ad > bd ? ad - bd : bd - ad;
       const stronger = ad > bd ? ad : bd;
+      const mx = (a.x + b.x) / 2;
+      const my = (a.y + b.y) / 2;
       if (gap <= stronger * CLASH_TOLERANCE) {
+        state.events.push({ type: 'projectileClash', x: mx, y: my, ownerA: a.owner, ownerB: b.owner, winner: -1 });
         killProjectile(state, a, adef);
         killProjectile(state, b, bdef);
         break;                    // a is gone; nothing else can clash with it
       }
       if (ad > bd) {
         a.power *= gap / ad;      // keeps only the damage left after absorbing b
+        state.events.push({ type: 'projectileClash', x: mx, y: my, ownerA: a.owner, ownerB: b.owner, winner: a.owner });
         killProjectile(state, b, bdef);
         continue;                 // a survives and may meet another shot this frame
       }
       b.power *= gap / bd;
+      state.events.push({ type: 'projectileClash', x: mx, y: my, ownerA: a.owner, ownerB: b.owner, winner: b.owner });
       killProjectile(state, a, adef);
       break;
     }
@@ -235,6 +277,7 @@ function resolveProjectileClashes(state: GameState): void {
 /** Step 6 of the frame: fighter hitboxes then projectiles against every other hurtbox. */
 export function resolveHits(state: GameState): void {
   const fighters = simFighters(state);
+  for (let i = 0; i < fighters.length; i++) caughtThisFrame[i] = false;
 
   for (let a = 0; a < fighters.length; a++) {
     const atk = fighters[a];
@@ -252,13 +295,29 @@ export function resolveHits(state: GameState): void {
       const hx = atk.x + hb.x * atk.facing;
       const hy = atk.y + hb.y;
       let landed = false;
+      let caught = false;
 
       for (let v = 0; v < fighters.length; v++) {
-        if (v === a || hitThisFrame[v]) continue;
+        if (v === a || hitThisFrame[v] || caughtThisFrame[v]) continue;
         const vic = fighters[v];
         if (!canBeHit(vic)) continue;
+        // Teams rule: a teammate's hitbox (grab hitboxes too) passes through.
+        if (sameTeam(state, atk.slot, vic.slot)) continue;
         fighterHurtbox(vic, defOf(vic), HURT);
         if (!circleRectOverlap(hx, hy, hb.r, HURT)) continue;
+
+        // A grab hitbox catches instead of hitting. canBeGrabbed owns every check a
+        // grab cares about (rolls, airborne, force), and shields never stop a grab.
+        if (hb.grab !== undefined) {
+          if (!forceGrab(state, atk, vic, hb.grab)) continue;
+          // A just-caught victim is out of reach of every later attacker in this pass.
+          hitThisFrame[v] = true;
+          caughtThisFrame[v] = true;
+          landed = true;
+          caught = true;
+          break;
+        }
+        if (dodgesHit(vic, hy, hb.low, atk.moveId, atk.onGround)) continue;
 
         const dmg = hitboxDamage(hb, mul);
         const lag = applyHit(
@@ -272,6 +331,8 @@ export function resolveHits(state: GameState): void {
         if (lag > atk.hitlag) atk.hitlag = lag;
       }
       if (landed) atk.hitGroups |= groupBit;
+      // A catch took the attacker out of its move, so nothing else of it is active.
+      if (caught) break;
     }
   }
 
@@ -285,12 +346,13 @@ export function resolveHits(state: GameState): void {
     if (pdef === undefined) continue;
     for (let v = 0; v < fighters.length; v++) {
       const vic = fighters[v];
-      if (vic.slot === pr.owner) continue;
+      if (vic.slot === pr.owner || sameTeam(state, pr.owner, vic.slot)) continue;
       const bit = 1 << v;
-      if ((pr.hitSlots & bit) !== 0) continue;
+      if ((pr.hitSlots & bit) !== 0 || caughtThisFrame[v]) continue;
       if (!canBeHit(vic)) continue;
       fighterHurtbox(vic, defOf(vic), HURT);
       if (!circleRectOverlap(pr.x, pr.y, pdef.r * pr.scale, HURT)) continue;
+      if (dodgesHit(vic, pr.y, pdef.low, null, true)) continue;
 
       // Charge and the return pass scale what this instance deals, shield damage included.
       const pdmg = pdef.damage * pr.power;
@@ -298,6 +360,8 @@ export function resolveHits(state: GameState): void {
         state, vic, pr.owner, pr.facing, pdmg, pdef.angle, pdef.bkb, pdef.kbg, 1,
         pdmg, pr.x, pr.y,
       );
+      const shooter = fighterBySlot(state, pr.owner);
+      if (shooter !== null && !state.finished) shooter.stats.projectilesHit++;
       pr.hitSlots |= bit;
       if (pdef.destroyOnHit) {
         killProjectile(state, pr, pdef);

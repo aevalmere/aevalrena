@@ -2,6 +2,8 @@ import { SHIELD_REGEN } from '../core/constants';
 import type { GameState, InputFrame } from '../core/types';
 import { stepAction } from './actions';
 import { regenShield, resolveHits } from './hits';
+import { syncGrabbed } from './grab';
+import { syncFinalSmash } from './finalsmash';
 import { consumeInput, EMPTY_INPUT } from './input';
 import { stepMatch } from './match';
 import { stepPhysics } from './physics';
@@ -16,6 +18,7 @@ function updateFighter(state: GameState, f: SimFighter): void {
   f.prevY = f.y;
   f.skipGravity = false;
   if (f.invuln > 0) f.invuln--;
+  if (f.highDodge > 0) f.highDodge--;
   if (f.ledgeCooldown > 0) f.ledgeCooldown--;
   if (f.dropTimer > 0) f.dropTimer--;
   if (f.hitstun > 0) f.hitstun--;
@@ -45,6 +48,8 @@ export function stepGame(state: GameState, inputs: InputFrame[]): void {
     updateFighter(state, f);
   }
 
+  syncGrabbed(state);
+  syncFinalSmash(state);
   stepProjectiles(state);
   resolveHits(state);
   stepMatch(state);
