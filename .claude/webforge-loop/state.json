@@ -1,0 +1,105 @@
+{
+  "task": "Close D3, D5, D4 and make a clean checkout buildable (iterations 3+).",
+  "scope": [
+    "src/**",
+    "docs/**",
+    "balance/**",
+    "index.html",
+    "public/**",
+    "package.json",
+    ".gitignore"
+  ],
+  "non_goals": [
+    "art files under art/ and public/ (except nothing)",
+    "new characters or stages",
+    "networking",
+    "animation",
+    "changing move numbers in moves.ts"
+  ],
+  "iteration": 6,
+  "max_iterations": 25,
+  "started_at": "2026-09-28T00:00:00Z",
+  "gates": {
+    "typecheck": {
+      "cmd": "npm run typecheck",
+      "last_exit": 0,
+      "last_run_iteration": 6
+    },
+    "sim": {
+      "cmd": "npm run test:sim",
+      "last_exit": 0,
+      "last_run_iteration": 6,
+      "tests": "77/77"
+    },
+    "ai": {
+      "cmd": "npx --yes tsx src/ai/aitest.ts",
+      "last_exit": 0,
+      "last_run_iteration": 6,
+      "tests": "38/38"
+    },
+    "build": {
+      "cmd": "npm run build",
+      "last_exit": 0,
+      "last_run_iteration": 6
+    },
+    "browser": {
+      "cmd": "npm run dev + browser-automation skill (only for iterations touching src/ui, src/render, src/main.ts, stage data)",
+      "last_exit": 0,
+      "last_run_iteration": 6
+    },
+    "cleanWorktreeBuild": {
+      "cmd": "git worktree add <scratchpad>/clean HEAD; npm ci; npm run build",
+      "last_exit": 0,
+      "last_run_iteration": 6
+    }
+  },
+  "absent_gates": "lint (eslint), unit (vitest), e2e (playwright), a11y (axe), bundle (size-limit) and budgets (lighthouse) do not exist in this repo; not registered.",
+  "progress_history": [
+    {
+      "iteration": 0,
+      "gates_newly_passing": [],
+      "defects_closed": 0,
+      "defects_opened": 5
+    },
+    {
+      "iteration": 1,
+      "gates_newly_passing": [],
+      "defects_closed": 1,
+      "defects_opened": 0
+    },
+    {
+      "iteration": 2,
+      "gates_newly_passing": [],
+      "defects_closed": 1,
+      "defects_opened": 0
+    },
+    {
+      "iteration": 3,
+      "gates_newly_passing": [],
+      "defects_closed": 1,
+      "defects_opened": 0
+    },
+    {
+      "iteration": 4,
+      "gates_newly_passing": [],
+      "defects_closed": 1,
+      "defects_opened": 0
+    },
+    {
+      "iteration": 5,
+      "gates_newly_passing": [],
+      "defects_closed": 1,
+      "defects_opened": 0
+    },
+    {
+      "iteration": 6,
+      "gates_newly_passing": [
+        "cleanWorktreeBuild"
+      ],
+      "defects_closed": 1,
+      "defects_opened": 1
+    }
+  ],
+  "no_progress_streak": 0,
+  "status": "stopped: a (clean pass, iteration 6)"
+}

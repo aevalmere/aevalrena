@@ -1,0 +1,81 @@
+
+> aevalrena@0.0.1 test:sim
+> npx --yes tsx src/sim/selftest.ts
+
+PASS a. both fighters land and stay grounded: landed on frame 0, grounded for 300 frames: true
+PASS b. walk stays on stage, jump clears 90 px: walked 189.7 px to x 69.7, jump height 94.5
+PASS c. jab deals 5 percent and hitstun: percent 5, max hitstun 11, entered hitstun: true
+PASS d. fsmash kills at 999 percent: ko on frame 45, stocks 3 to 2
+PASS e. nspecial projectile travels and expires: spawned at -102.0, traveled 168.0 px of 164.5, died on frame 62
+PASS f. shield eats the jab: percent 0, shield 51.88 of 60, shieldHit: true
+PASS g. two identical scripted runs match: 3558 chars identical
+PASS h. running off the edge and drifting back grabs the ledge: left ground on frame 8, hung on frame 4, ledge index 1
+PASS i. the water orb bursts on impact and at the end of its range: burst on impact: true, burst at end of range: true
+PASS j. a returning projectile turns around, mirrors and hits for half: turned on step 21 at x 80.0, facing 1 to -1, damage out 10.00 back 5.00
+PASS k. holding special charges the orb into a bigger, harder hit: tap: charge 0 power 0.25 scale 0.60 spawned on move frame 15 | full: charge 60 power 1.40 scale 1.50 spawned on move frame 15
+PASS o. the orb charge curve is exponential, not linear: power 0.250 0.385 0.592 0.910 1.400 | gains 0.135 0.207 0.318 0.490
+PASS p. a charged fsmash deals exactly what it did before the orb change: uncharged 15.0000 (want 15), full charge 21.0000 (want 21)
+PASS l. two equal opposing projectiles cancel and both burst: slot 0 selftestClashBurst/false, slot 1 selftestClashBurst/false, bursts 2
+PASS m. a stronger projectile ploughs through a weaker one at reduced power: survivors 1, power 2.000 (want 2), bursts 1
+PASS n. two projectiles from the same owner pass through each other: both alive true at x 48.0 and 32.0, bursts 0
+PASS q. holding a direction runs, holding Walk with it walks: Right: run (want run), Right+Walk: walk (want walk)
+PASS r. a double tap rolls on the second press with highDodge, a single tap never rolls: rolled on tap true, roll frame 8 true invuln 0 highDodge 2, single held tap rolled false, retap after 20 frames rolled false
+PASS s. holding shield and a direction stays in shield: action after 30 frames shield, ever left shield false
+PASS t. shield in the air air dodges, Dodge in the air air dodges: airborne true, shield air dodged true, Dodge gave airDodge
+PASS u. Dodge rolls with a direction and spot dodges without, a double tap down spot dodges: Dodge+Left roll, Dodge spotDodge, double tap down spotDodge
+PASS v. a roll dodges ftilt but not dtilt: ftilt on a standing victim 8, ftilt on a roll 0, dtilt on a roll 6
+PASS w. direct keys and the C-stick pick the right move on the ground and in the air: direct fsmash fsmash, direct fair on ground ftilt, air CRight fair, air CLeft bair still facing right true
+PASS x. a standing grab catches an idle or shielding fighter and whiffs on a roll: idle: event true holder grabHold victim grabbed | shield: event true victim grabbed | highDodge: event false victim idle
+PASS y. the victim stays in hand for the hold, and mashing frees it sooner: hand gap over 20 frames 0.00 px, released after 55 idle and 19 mashing
+PASS z. forward, back, up and down throws launch the right way: fthrow vx 3.42 | bthrow vx -3.75 | uthrow vy -4.95 | dthrow percent 6 (want 6)
+PASS aa. a pummel adds percent without launching: pummelled true, percent 1.5 (want 1.5), victim speed 0, victim grabbed, holder grabHold
+PASS ab. a third party hitting the holder frees the victim within 2 frames: held true, holder hit on frame 3, victim freed on frame 4 as idle
+PASS ac. a force grab catches an airborne victim and mashing cannot free it: normal grab refused true, force caught true, held through 40 mashed frames true
+PASS ad. a grab hitbox with throwNow catches and throws from inside a move: caught true, throw uthrow, victim vy -4.95
+PASS ae. a Shield press 10 frames before a tumble landing techs in place, with a direction it tech rolls: landed on step 35: tech invuln 2 event true | held Right: techRoll event roll true, x after 10 frames 10.0
+PASS af. a tumble landing without a tech lies downed, then gets up; a press 30 frames early does not tech: no press: downed, 120 frames downed then getUp | press 30 early: downed tech false
+PASS ag. mashing Shield in tumble is locked out unless the first press is inside the window: mash from 30 early: downed tech false | mash from 10 early: tech tech true
+PASS ah. downed + Attack or the getupAttack command get-up attacks, downed + Right rolls right: Attack: attack getupatk | command: getupatk | Right: getUpRoll, moved 12.6 px
+PASS ai. Jump over a head footstools without spending a jump; far away it double jumps: victim footstooled for 30 frames, event true, jumps 1 | far: vy -4.85 jumps 0 | command: victim footstooled
+PASS aj. dodge and taunt commands, and Taunt with a direction, pick the right action: rollBack roll vx -3.33 | airDodge+Right airDodge vx 0 | dirAirDodge+Right airDodge vx 3.20 | taunt3 cmd taunt3, Taunt+Down taunt3, Taunt+Right taunt2, Taunt taunt
+PASS ak. ledgeJump leaves the ledge upward; getupAttack outside downed is dropped and blocks nothing: hung true, after ledgeJump air vy -5.25 ledge -1 | stray getupAttack left idle, next Attack jab, same-frame Attack jab
+PASS al. the pummel command pummels and the bthrow command back throws with facing flipped: held grabHold, pummel cmd pummel | bthrow cmd throw bthrow facing -1
+PASS am. the FS meter fills from damage dealt and taken only under the rule, and survives a KO: rule on: attacker 5 (want 5) victim 3 (want 3) | rule off: 0 0 | after KO respawn meter 50
+PASS an. a full meter turns Special into the Final Smash and empties it; with the rule off Special stays a special: rule on: finalSmash meter 0 start event true | rule off: attack nspecial meter 300
+PASS ao. the Final Smash catches the nearest opponent in front and ignores a closer one behind: ahead finalSmashVictim fsAttacker 0, behind idle, attacker fsVictim 2
+PASS ap. a Final Smash with nobody in front whiffs, plays out and ends cleanly: in finalSmash through step 169 (want 169), then idle, launch false, hits 0, victim idle 0%
+PASS aq. the Final Smash victim takes 45 damage (times damageMul) and is launched: percent at launch 45 (want 45), then tumble vy -6.05, events start,tsunami,tornado,launch, attacker after idle
+PASS ar. a third fighter cannot hit the Final Smash attacker or victim: attacker finalSmash 0%, victim finalSmashVictim 35% (want 35), third-party hits 0, control projectile hit true
+PASS as. KO of the Final Smash attacker frees the victim at once: caught true, right after KO air, 5 frames later air canBeHit true, fell 2.25 px
+PASS at. an airborne footstool victim that lands stays stunned for the whole air timer: footstooled true, landed on the first frame true, stunned 20 frames (want 20), then idle
+PASS au. the Final Smash skips a closer respawning fighter and catches the next one in front: respawning respawn fsAttacker -1, ahead finalSmashVictim, attacker fsVictim 2
+PASS av. a victim caught by a grab hitbox cannot be hit by a later attacker on the same frame: with the grab: grabbed 0% | jab alone: hitstun 10%
+PASS aw. Dodge or the airDodge command air dodges out of tumble; Shield stays a tech press: Dodge airDodge lockout 40 | command airDodge | Shield tumble window 20
+PASS ax. a forward roll toward the edge stops at it instead of rolling off: rolled true, left the ground false, furthest x 180.00, then idle
+PASS ay. a roll dodges an aerial near its feet but not the same height from the ground, dtilt or a low flag: aerial near feet dodged true, grounded near feet dodged false, dtilt dodged false, low flag dodged false
+PASS az. an air forward shortcut is a bair with back held and a fair otherwise: facing right, fsmash key: held Left bair, held Right fair, nothing held fair
+PASS ba. Attack out of shield grabs: action grab, moveId null
+PASS bb. Up + Attack out of shield is an up smash: action attack, moveId usmash
+PASS bc. Up + Special out of shield is an up special: action attack, moveId uspecial
+PASS bd. Special out of shield without Up is dropped and the shield holds: action shield, moveId null
+PASS be. Shield in the air air dodges, drifting toward the held direction: held Right: airDodge vx 3.20 | nothing held: airDodge vx 0.00
+PASS bf. Shield in tumble stays a tech press and does not air dodge: action tumble, tech window 20
+PASS bg. Up + Attack in jumpsquat jump-cancels into a grounded up smash: after Jump jumpsquat, then attack usmash, onGround true
+PASS bh. an up special shortcut in jumpsquat cancels the jump into its ground move: after Jump jumpsquat, then attack uspecial, onGround true
+PASS bi. a shortcut one frame after a button attack replaces it: Attack started jab, the fsmash key gave fsmash on actionFrame 0
+PASS bj. a shortcut past the replace window leaves the attack alone: the fsmash key on jab frame 6 (want 6) left jab
+PASS bk. the roll runs for ROLL.total frames, dodges across its window and covers ROLL.distance: rolled for 24 frames (want 24), highDodge on frame 2 0, dodging every frame 3 to 16 true, travelled 80.00 px (want 80)
+PASS bl. Walk held turns a direction flick plus Attack into a tilt: Walk+Right flick+Attack ftilt, Walk+Up+Attack utilt, without Walk fsmash
+PASS bm. a forward shortcut in jumpsquat stays buffered and comes out as a fair: the frame of the shortcut jumpsquat, airborne 2 frames later, then fair on buffered frame 0 (buffer 6)
+PASS bn. an up smash shortcut in jumpsquat still cancels into a grounded up smash: after Jump jumpsquat, then attack usmash, onGround true
+PASS bo. an up smash started without Attack charges while Up is held: started charging true, charge after 30 held frames 30 (still charging true), charging stopped 0 frames after Up was released
+PASS bp. a flick forward smash stops charging when Attack is released even with the direction held: started charging true, charge after 10 held frames 10, charging stopped 0 frames after Attack was released with Right still down
+PASS bq. shield decay keeps running while Special is mashed: shield fell 2.40 over 20 mashed frames (want 2.40), action shield
+PASS br. cloneGameState copies chargeMask and the cpuZeroMoves rule: chargeMask 32 cloned as 32, cpuZeroMoves cloned true
+PASS bs. a grounded up special leaves the floor and rises at least 40 px by action frame 20: started true, action attack frame 20, heel 61.1 px above the floor, onGround false
+PASS bt. airJumped is set only by a mid-air jump, not by a plain fall or the air after an aerial: plain hop flagged false | aerial true, back in air true, flagged after false | double jump: attack set true, cloned true, cleared by aerial true
+PASS results stats: damage, combo, KO credit, SD, clone: combo 2 hits 3/3 dmg 5/5 jab true clone true/true kos 1 falls 1 sds 0 firstKO 118 end 118 peak 999 sd true
+PASS teams: no friendly fire, last team standing wins: rule off percent 5, teammate percent 0, stunned false, finished true, winner 0, winnerTeam 0
+PASS teams: no grab, footstool or Final Smash catch on a teammate: grab on false off true | standing grab on false off true | footstooled on false off true | FS victim 2, foe finalSmashVictim, mate idle 0%
+PASS bu. a zero-input fighter dropped on a main-stage corner stands with its centre over the top, otherwise slides off, never hovers: left -4: idle y 0.0 ground true | left 0: idle y 0.0 ground true | left 1: ledgeHang y 20.0 hover 0 | left 5: ledgeHang y 20.0 hover 0 | left 10: ledgeHang y 20.0 hover 0 | left 12.9: ledgeHang y 20.0 hover 0 | right -4: idle y 0.0 ground true | right 0: idle y 0.0 ground true | right 1: dead y 241.0 hover 0 | right 5: dead y 241.0 hover 0 | right 10: dead y 241.0 hover 0 | right 12.9: dead y 241.0 hover 0
+76/76 pass

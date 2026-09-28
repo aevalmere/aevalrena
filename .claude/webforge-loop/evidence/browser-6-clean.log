@@ -1,0 +1,45 @@
+url        http://localhost:4174/#shot=C:/Users/light_095j4re/Documents/aevalrena/.claude/webforge-loop/evidence/iter-6-clean-preview.png
+http       200
+load       8662ms
+title      "Aevalrena"
+bodyChars  30
+patchright C:\Users\light_095j4re\.vscode\extensions\danielsanmedium.dscodegpt-3.24.75\standalone/
+text       AEVALRENA PRESS ANY KEY V0.1.0
+script     {
+ "steps": [
+  "Enter",
+  "Enter",
+  "Enter",
+  "Equal",
+  "ArrowLeft",
+  "Enter"
+ ],
+ "sel1": [
+  "AEVAL P1 · HUMAN HUMAN ATK J JUMP W",
+  "AEVAL P2 · CPU LV 5 CPU SKILLED",
+  "AEVAL OFF OFF P3",
+  "AEVAL OFF OFF P4"
+ ],
+ "sel2": [
+  "AEVAL P1 · CPU LV 6 CPU EXPERT",
+  "AEVAL P2 · CPU LV 5 CPU SKILLED",
+  "AEVAL OFF OFF P3",
+  "AEVAL OFF OFF P4"
+ ],
+ "hud": {
+  "hudHidden": false,
+  "uiHidden": true,
+  "cards": [
+   "CPU LV 6",
+   "CPU LV 5"
+  ],
+  "ntags": [
+   "CPU LV 6",
+   "CPU LV 5"
+  ]
+ }
+}
+
+console errors/warnings (0):
+
+requests failed (0):

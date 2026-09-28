@@ -1,0 +1,85 @@
+difficulty matrix (5 seeds x both sides, 2 stocks):
+  L9 vs L1: L9 wins 10/10 (100%) stocks 20-0 sd 0/0 avg 4316f finished 10/10
+  L9 vs L5: L9 wins 9/10 (90%) stocks 11-1 sd 0/0 avg 5475f finished 10/10
+  L5 vs L1: L5 wins 10/10 (100%) stocks 18-0 sd 0/0 avg 5603f finished 10/10
+  L9 vs L9: L9 wins 5/10 (50%) stocks 7-7 sd 0/0 avg 5951f finished 10/10
+  L1 vs L1: L1 wins 5/10 (50%) stocks 6-6 sd 0/0 avg 12256f finished 10/10
+  L7 vs L3: L7 wins 10/10 (100%) stocks 17-0 sd 0/0 avg 5101f finished 10/10
+  L2 vs L2: L2 wins 5/10 (50%) stocks 5-5 sd 0/0 avg 13326f finished 10/10
+
+stacked-opponent scenarios (5 seeds x both slots x dy 60/90/120/140 x dx 0/10/-10):
+  opponent above: hit in 120/120, avg 13.0f, slowest 15f, longest no-progress run 14f
+  opponent below: hit in 120/120, avg 15.5f, slowest 19f, longest no-progress run 18f
+
+projectile spammer (level 9 CPU vs scripted spam, 2 stocks):
+  seed 5 cpu=slot0: winner=CPU stocks 2-0 volleys 11 shieldHp low 60.00/60 sub-18 run 0f broken=false 3089f
+  seed 5 cpu=slot1: winner=CPU stocks 2-0 volleys 9 shieldHp low 59.76/60 sub-18 run 0f broken=false 4013f
+  seed 17 cpu=slot0: winner=CPU stocks 2-0 volleys 4 shieldHp low 60.00/60 sub-18 run 0f broken=false 2820f
+  seed 17 cpu=slot1: winner=CPU stocks 2-0 volleys 4 shieldHp low 59.88/60 sub-18 run 0f broken=false 4766f
+  seed 23 cpu=slot0: winner=CPU stocks 2-0 volleys 13 shieldHp low 60.00/60 sub-18 run 0f broken=false 3371f
+  seed 23 cpu=slot1: winner=CPU stocks 2-0 volleys 8 shieldHp low 60.00/60 sub-18 run 0f broken=false 3279f
+
+defensive option usage (whole matrix sweep):
+  level 9:   spotDodge=70 roll=31 airDodge=200 bair=238 over 216938f | spotDodge=0.32 roll=0.14 airDodge=0.92 bair=1.10 per 1k frames
+  level 1-2: spotDodge=0 roll=0 airDodge=0 bair=2 over 610847f | spotDodge=0.00 roll=0.00 airDodge=0.00 bair=0.00 per 1k frames
+
+kit coverage, uses (per 1k frames) over the whole matrix sweep:
+  level 9   moves: jab=1975(9.10) ftilt=334(1.54) utilt=292(1.35) dtilt=600(2.77) dashatk=52(0.24) fsmash=254(1.17) usmash=79(0.36) dsmash=40(0.18) nair=29(0.13) fair=166(0.77) bair=256(1.18) uair=314(1.45) dair=272(1.25) nspecial=15(0.07) sspecial=85(0.39) uspecial=31(0.14) dspecial=68(0.31) ledgeatk=47(0.22) taunt=0 taunt2=0 taunt3=0 getupatk=0
+  level 9   movement: shortHop=202(0.93) fullHop=338 fastFall=561 dropThrough=169 smashes=373 charged=262 techs=16 techRolls=12 downed=1 footstools=37
+  level 1-2 moves: jab=650(1.06) ftilt=1178(1.93) utilt=0(0.00) dtilt=4(0.01) dashatk=12(0.02) fsmash=782(1.28) usmash=0(0.00) dsmash=0(0.00) nair=776(1.27) fair=537(0.88) bair=2(0.00) uair=0(0.00) dair=131(0.21) nspecial=1068(1.75) sspecial=36(0.06) uspecial=193(0.32) dspecial=0(0.00) ledgeatk=0(0.00) taunt=0 taunt2=0 taunt3=0 getupatk=8
+  level 1-2 movement: shortHop=2(0.00) fullHop=1340 fastFall=736 dropThrough=91 smashes=782 charged=49 techs=6 techRolls=1 downed=58 footstools=4
+
+level 10 (Aevalmere), 5 seeds x both sides, 2 stocks:
+  L10 vs L9: L10 wins 10/10 (100%) stocks lost/match 0.00 sd 0 longest combo avg 4.10 3+ combos/match 3.80 early shields 0 safe alternates 2.0% avg 2471f unfinished 0
+  L10 vs L5: L10 wins 10/10 (100%) stocks lost/match 0.00 sd 0 longest combo avg 3.50 3+ combos/match 2.30 early shields 0 safe alternates 2.0% avg 2198f unfinished 0
+  L10 vs L1: L10 wins 10/10 (100%) stocks lost/match 0.00 sd 0 longest combo avg 4.30 3+ combos/match 2.70 early shields 0 safe alternates 1.7% avg 2042f unfinished 0
+  L10 vs L10: L10 wins 4/10 (40%) stocks lost/match 1.60 sd 0 longest combo avg 4.00 3+ combos/match 1.60 early shields 0 safe alternates 1.9% avg 4194f unfinished 0
+  budget: 0.096 ms per level 10 cpuInput call
+  kill speed against a level 0 (3 stocks):
+  standing seed 5: KOs 951f (15.8s, top, ~96%) 2223f (37.0s, bottom, ~123%) 2871f (47.9s, bottom, ~38%) | 2871f, 5.4%/s | by move: uspecial 56, usmash 42, fair 40, bair 22, bthrow 18, sspecial 18, uair 18, nspecial 10, dashatk 9, projectile 9, jab 8, nair 7
+  standing seed 17: KOs 367f (6.1s, bottom, ~45%) 966f (16.1s, bottom, ~29%) 1801f (30.0s, bottom, ~71%) | 1801f, 4.8%/s | by move: sspecial 36, dair 24, bthrow 18, uspecial 16, bair 11, fair 10, nspecial 10, dashatk 9, utilt 7, jab 4
+  standing seed 23: KOs 654f (10.9s, bottom, ~59%) 1331f (22.2s, bottom, ~39%) 2371f (39.5s, bottom, ~83%) | 2371f, 4.6%/s | by move: sspecial 45, bthrow 36, uspecial 24, dair 24, usmash 14, bair 11, fair 10, projectile 9, nair 7
+  wandering seed 5: KOs 518f (8.6s, top, ~70%) 2137f (35.6s, bottom, ~173%) 3192f (53.2s, top, ~109%) | 3192f, 6.6%/s | by move: sspecial 95, usmash 43, bthrow 36, dashatk 36, fair 35, uspecial 24, projectile 18, uair 18, fsmash 15, dair 12, nspecial 10, utilt 7, jab 4
+  wandering seed 17: KOs 762f (12.7s, top, ~120%) 2637f (44.0s, top, ~177%) | 3600f, 6.5%/s | by move: sspecial 99, usmash 57, uspecial 56, dashatk 45, uair 45, fair 40, bair 22, bthrow 9, ftilt 8, nair 7
+  wandering seed 23: KOs 741f (12.3s, top, ~116%) 1675f (27.9s, top, ~105%) | 3600f, 7.5%/s | by move: dair 96, sspecial 77, uair 72, usmash 57, fair 50, uspecial 24, bthrow 18, dashatk 18, fsmash 15, bair 11, nair 7, projectile 5
+  combo table: 69 starter entries, 57 open 3+ hit chains, 48 open 4-hit chains, 37 end in a KO; e.g. utilt at 15% -> uair (chain 4 hits, 30%)
+
+PASS a. level 1 vs level 1 finishes with a KO: finished=true frames=5461 kos=1
+PASS b. every matrix matchup finishes inside the frame cap: 7 matchups x 10 matches, unfinished=0
+PASS c. higher level beats lower level on both sides of every matchup: L9>L1 100% +20, L9>L5 90% +10, L5>L1 100% +18, L7>L3 100% +17
+PASS d. level 2 CPU hits a ledge-hanging opponent: p2 max percent=24.5 cpuDied=false
+PASS e. no two aerials from the same slot start within 45 frames: l1v1: 17 aerial starts, all >= 45 frames apart | matrix: 2505 aerial starts, all spaced
+PASS f. no self-destructs anywhere: every level, every scripted scenario: zero self-destructs across 317 runs
+PASS g. level 9 CPU hits an opponent parked directly above it: 120/120 resolved, avg 13.0f, slowest 15f, cap 180f
+PASS h. airborne level 9 CPU hits an opponent directly below it: 120/120 resolved, avg 15.5f, slowest 19f, cap 180f
+PASS i. CPU never idles 120+ frames without moving or hitting, stacked: 240 scenarios, longest no-progress run 18f (below slot0 dy=140 dx=0 seed=5), cap 120f
+PASS j. level 9 CPU beats the scripted projectile spammer on both sides: won 6/6, stocks 12-0, 49 volleys thrown, unfinished 0
+PASS k. spam never breaks the level 9 shield, nor pins it under 18 for 60f: breaks=0/6, shieldHp low-water 59.76/60, longest sub-18 run 0f
+PASS l. level 9 uses spotDodge, roll, airDodge and bair at least 10x each: L9 spotDodge=70 roll=31 airDodge=200 bair=238
+PASS m. level 1-2 use each option at least 3x less often than level 9: L9 spotDodge=0.32 roll=0.14 airDodge=0.92 bair=1.10 per 1k frames | L1-2 spotDodge=0.00 roll=0.00 airDodge=0.00 bair=0.00 per 1k frames
+PASS n. identical seeds and levels replay byte-identically: 3 replayed pairs identical (6292f, 7399f, 3103f)
+PASS o. level 9 uses every move in the kit at least 3x (taunt excepted): variety 18/18 moves over 216938f
+PASS p. no CPU taunts while a live opponent could punish it: zero neutral taunts at every level
+PASS q. level 9 short hops, fast falls and drops through platforms (10x each): shortHop=202(0.93) fullHop=338 fastFall=561 dropThrough=169 smashes=373 charged=262 techs=16 techRolls=12 downed=1 footstools=37 over 216938f
+PASS r. level 9 short hops at least 3x as often as level 1-2: L9 202 (0.93/1k frames) vs L1-2 2 (0.00/1k frames)
+PASS s. level 9 charges at least 5% of its smashes past 6 frames: 262/373 smashes charged (70.2%), floor 3 and 5%
+PASS t. level 9 kit variety beats level 1-2, raw and at 1.5x per 1k frames: L9 18/18 distinct (0.083/1k frames over 216938f) vs L1-2 12/18 distinct (0.020/1k frames over 610847f)
+PASS u. level 5 CPUs never double tap into a roll they did not ask for (slack 2): seed 5 slot 0 rolls=0 intended=0, seed 5 slot 1 rolls=2 intended=2, seed 17 slot 0 rolls=1 intended=1, seed 17 slot 1 rolls=0 intended=0
+PASS v. level 9 CPU grabs a dummy parked in shield within 600 frames on every seed: seed 5 grab at 16f, seed 17 grab at 16f, seed 23 grab at 167f
+PASS w. a level 9 CPU mashes out of a grab faster than a level 1 CPU: seed 5 L9 12f vs L1 32f, seed 17 L9 12f vs L1 44f, seed 23 L9 12f vs L1 28f
+PASS x. level 9 CPU shoots down at least 25% of pinned spam, level 1 almost never: L9 shot down 37/102 (36.3%, 65 clash events), damage taken 354.5 vs 407.5 with projBlock 0 (8 clash events) | L1 0 clash events over 102 shots
+PASS y. level 9 techs at least 60% of tumble landings, level 1 at most 25%: L9 teched 27/36 (75%, 17 rolls, 9 downed, 36 trials) | L1 teched 3/36 (8%, 3 rolls, 33 downed, 36 trials)
+PASS z. with the rule on a level 9 CPU starts its Final Smash within 120 frames and it connects; off, never: seed 5 rule on: start 1f caught=true launched=true | rule off: starts 0; seed 17 rule on: start 1f caught=true launched=true | rule off: starts 0; seed 23 rule on: start 1f caught=true launched=true | rule off: starts 0
+PASS aa. with the rule off no CPU ever starts a Final Smash, even with a forced full meter: matrix starts 0, highest meter 0 | forced full meter, rule false: L1 0, L5 0, L9 0
+PASS ab. a level 0 CPU never attacks, shields or dodges, even next to a level 9: 10800 frames checked over 3 seeds, no forbidden button, no direct code
+PASS ac. a level 0 stands still by default and wanders at least 40px under the rule, never self-destructing: rule off: x fixed at -120.00, action idle throughout | seed 1 travelled 228.9px jumps 9 air 405f stocks 3-3 | seed 2 travelled 267.0px jumps 21 air 1045f stocks 3-3 | seed 3 travelled 264.4px jumps 10 air 520f stocks 3-3
+PASS ad. a wandering level 0 stands back up after a knockdown: seed 1: longest downed streak 1f, seed 2: longest downed streak 1f
+PASS ae. level 10 beats level 9 in at least 90% of matches, losing under 0.5 stocks per match: won 10/10 (100%), stocks lost per match 0.00
+PASS af. level 10 lands a 3+ hit true combo on level 9 at least 1x per match on average: 38 combos of 3+ hits over 10 matches (3.80/match), longest per match avg 4.10
+PASS ag. level 10 never self-destructs, and every level 10 match finishes, across the sweep: 40 matches: vs L9 sd 0, vs L5 sd 0, vs L1 sd 0, vs L10 sd 0, unfinished 0
+PASS ah. level 10: the same seed twice gives an identical final state: L10vL9 seed 23 identical (3188f), L10vL10 seed 41 identical (6445f)
+PASS ai. a level 10 cpuInput call costs under 1.5 ms on average over a 3000-frame match: 0.096 ms per call over 3000 calls (3000f), 277 decisions
+PASS aj. level 10 never presses shield with 0 or 1 frames of an opponent startup elapsed: 0 early shield presses over 40 matches
+PASS ak. Teams: L10 + L9 on team 0 beat an L9 on team 1 every match, never hitting or swinging at each other: team 0 won 5/5, teammate hits 0, attacks at a teammate with every enemy past 200px 0 | seed 5 winner team 0 1216f mate attacks 0, seed 17 winner team 0 1459f mate attacks 0, seed 23 winner team 0 1324f mate attacks 0, seed 41 winner team 0 1802f mate attacks 0, seed 97 winner team 0 1527f mate attacks 0
+PASS al. level 10 kills a level 0 fast: standing, first KO by 1200f and 3 stocks by 3600f; wandering, first KO by 1800f: standing 5 first 951f all 2871f, standing 17 first 367f all 1801f, standing 23 first 654f all 2371f, wandering 5 first 518f, wandering 17 first 762f, wandering 23 first 741f
+38/38 pass
