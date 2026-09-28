@@ -117,6 +117,9 @@ function findLanding(stage: StageDef, f: SimFighter): number {
   return -1;
 }
 
+/** Least outward speed, px a frame, of a fighter sliding off a corner it cannot stand on. */
+const CORNER_SLIDE = 2;
+
 /** Solid platforms block their sides and underside. */
 function resolveSolids(state: GameState, f: SimFighter, def: CharacterDef, stage: StageDef): void {
   for (let i = 0; i < stage.platforms.length; i++) {
@@ -130,6 +133,17 @@ function resolveSolids(state: GameState, f: SimFighter, def: CharacterDef, stage
     const fromTop = (BOX.y + BOX.h) - p.y;
     const fromBottom = (p.y + p.h) - BOX.y;
     if (fromTop <= fromLeft && fromTop <= fromRight && fromTop <= fromBottom && f.vy >= 0) {
+      // Standing needs the centre over the top, the same point checkSupport reads. A fighter
+      // whose hurtbox only clips the corner with its centre past the edge slides off it,
+      // outward at no less than CORNER_SLIDE px a frame, and keeps falling. Landing it there
+      // instead would drop support next frame and hover it at the top forever.
+      if (f.x < p.x || f.x > p.x + p.w) {
+        const outward = f.x < p.x ? -1 : 1;
+        const overlap = outward > 0 ? fromRight : fromLeft;
+        const extra = CORNER_SLIDE - Math.max(0, f.vx * outward);
+        if (extra > 0) f.x += outward * Math.min(overlap, extra);
+        continue;
+      }
       landOn(state, f, def, p.y, f.vy);
       return;
     }

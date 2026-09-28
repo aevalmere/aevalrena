@@ -2319,6 +2319,53 @@ function testTeamsContact(): SelfTestResult {
   };
 }
 
+/**
+ * A fighter that drops, with no input, onto a main-stage corner stands when its centre is over
+ * the top (on or inside the edge) and slides off when only its hurtbox clips the corner with the
+ * centre past the edge; it never hovers at the top in 'air'. Before the fix a drop 1 to 12 px
+ * past either edge hovered at y = 0 forever.
+ */
+function testCornerLanding(): SelfTestResult {
+  const drop = (edge: 'left' | 'right', dx: number): { x: number; y: number; action: ActionId; onGround: boolean; hover: number } => {
+    const state = fresh(1, 60);
+    const f = simFighters(state)[0];
+    f.x = edge === 'right' ? 180 + dx : -180 - dx;
+    f.y = -40;
+    f.vx = 0;
+    f.vy = 0;
+    f.onGround = false;
+    setAction(f, 'air');
+    let run = 0;
+    let hover = 0;
+    for (let i = 0; i < 120; i++) {
+      step(state, NONE, NONE);
+      run = !f.onGround && Math.abs(f.y) <= 0.5 ? run + 1 : 0;
+      if (run > hover) hover = run;
+    }
+    return { x: f.x, y: f.y, action: f.action, onGround: f.onGround, hover };
+  };
+  const parts: string[] = [];
+  let ok = true;
+  for (const edge of ['left', 'right'] as const) {
+    for (const dx of [-4, 0]) {
+      const r = drop(edge, dx);
+      if (!(r.onGround && r.y === 0 && r.action === 'idle')) ok = false;
+      parts.push(`${edge} ${dx}: ${r.action} y ${r.y.toFixed(1)} ground ${r.onGround}`);
+    }
+    for (const dx of [1, 5, 10, 12.9]) {
+      const r = drop(edge, dx);
+      // Slid off: never more than 2 frames in a row airborne at the top, and not standing out there.
+      if (r.hover > 2 || (r.onGround && r.y === 0)) ok = false;
+      parts.push(`${edge} ${dx}: ${r.action} y ${r.y.toFixed(1)} hover ${r.hover}`);
+    }
+  }
+  return {
+    name: 'bu. a zero-input fighter dropped on a main-stage corner stands with its centre over the top, otherwise slides off, never hovers',
+    pass: ok,
+    detail: parts.join(' | '),
+  };
+}
+
 export function runSimSelfTest(): SelfTestResult[] {
   return [
     testLanding(),
@@ -2396,6 +2443,7 @@ export function runSimSelfTest(): SelfTestResult[] {
     testResultsStats(),
     testTeams(),
     testTeamsContact(),
+    testCornerLanding(),
   ];
 }
 
