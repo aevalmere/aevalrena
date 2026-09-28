@@ -9,10 +9,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test:sim": "npx --yes tsx src/sim/selftest.ts",
-    "calibrate": "npx --yes tsx src/sim/calibrate.ts",
-    "art:build": "python tools/spritegen/build.py all",
-    "art:check": "python tools/spritegen/check.py",
-    "art:preview": "python tools/spritegen/stagecheck.py"
+    "calibrate": "npx --yes tsx src/sim/calibrate.ts"
   },
   "devDependencies": {
     "typescript": "^7.0.2",

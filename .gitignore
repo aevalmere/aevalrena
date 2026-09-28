@@ -3,3 +3,6 @@ dist
 .DS_Store
 *.local
 .vite
+art/aeval/frames/**/*.json
+art/aeval/fx/**/*.json
+art/aeval/sheets/.tmp/
