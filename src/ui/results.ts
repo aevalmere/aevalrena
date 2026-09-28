@@ -171,6 +171,25 @@ export const CSS = `
 }
 .rs-n3 .rs-pose, .rs-n4 .rs-pose { bottom: 6%; width: auto; height: min(var(--pose-h, 150px), 80%); }
 .rs-n3 .rs-splash, .rs-n4 .rs-splash { bottom: -12px; height: 40px; }
+.rs-n3 .rs-stage, .rs-n4 .rs-stage { gap: calc(12px + 0.4rem); }
+/* Two columns: the ring sits beside the quote and takes the stage height, with the splash pool
+   inside its bottom edge instead of hanging below it, so the pose and splash stay above the first
+   stat row at any window height. */
+.rs-n2 .rs-stage { padding: 0.4rem 0; }
+.rs-n2 .rs-ringwrap {
+  align-self: center;
+  width: auto;
+  height: 100%;
+  min-height: 0;
+  max-width: 55%;
+  max-height: 200px;
+}
+.rs-n2 .rs-pose { bottom: 8%; width: auto; height: min(var(--pose-h, 150px), 80%); }
+.rs-n2 .rs-splash { bottom: 0; width: calc(100% + 1.4rem); height: 30%; }
+.rs-n2 .rs-quote { font-size: clamp(0.8rem, 2.2vh, 1rem); line-height: 1.6; }
+@media (max-height: 700px) {
+  .rs-n2 .rs-stats { max-height: 38%; }
+}
 
 .rs-col .ui-backdrop.rs-lose-bd {
   top: auto;
