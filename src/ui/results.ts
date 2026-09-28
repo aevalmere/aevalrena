@@ -133,8 +133,8 @@ export const CSS = `
   position: absolute;
   left: 50%;
   bottom: 12px;
-  width: 129px;
-  height: 150px;
+  width: var(--pose-w, 129px);
+  height: var(--pose-h, 150px);
   transform: translateX(-50%);
   image-rendering: pixelated;
   z-index: 1;
@@ -153,7 +153,24 @@ export const CSS = `
   color: color-mix(in srgb, var(--accent) 85%, #ffffff);
   text-shadow: var(--glow);
 }
-.rs-n3 .rs-quote, .rs-n4 .rs-quote { max-width: 16rem; }
+.rs-n3 .rs-quote, .rs-n4 .rs-quote {
+  flex-shrink: 0;
+  max-width: 100%;
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
+/* Three or four columns: the ring and pose shrink to the height left between the name and the
+   stat list, so neither the pose nor the quote can spill over the tag line or the stats. */
+.rs-n3 .rs-stage, .rs-n4 .rs-stage { justify-content: flex-end; gap: 0.5rem; padding-bottom: 0.5rem; }
+.rs-n3 .rs-ringwrap, .rs-n4 .rs-ringwrap {
+  flex: 1 1 0;
+  min-height: 0;
+  width: auto;
+  max-width: 100%;
+  max-height: 200px;
+}
+.rs-n3 .rs-pose, .rs-n4 .rs-pose { bottom: 6%; width: auto; height: min(var(--pose-h, 150px), 80%); }
+.rs-n3 .rs-splash, .rs-n4 .rs-splash { bottom: -12px; height: 40px; }
 
 .rs-col .ui-backdrop.rs-lose-bd {
   top: auto;
@@ -440,8 +457,8 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
         pose.alt = info.name;
         pose.addEventListener('load', () => {
           if (pose.naturalWidth > 0) {
-            pose.style.width = `${pose.naturalWidth * 3}px`;
-            pose.style.height = `${pose.naturalHeight * 3}px`;
+            pose.style.setProperty('--pose-w', `${pose.naturalWidth * 3}px`);
+            pose.style.setProperty('--pose-h', `${pose.naturalHeight * 3}px`);
           }
         });
         pose.src = iconAsset(info.winPose);
