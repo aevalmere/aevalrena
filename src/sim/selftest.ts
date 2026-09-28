@@ -2237,6 +2237,66 @@ function testTeams(): SelfTestResult {
   };
 }
 
+/**
+ * Teams rule at time out, 2v2 (slots 0 and 1 on team 0, slots 2 and 3 on team 1) with both
+ * sides still in: the side with more stocks in total wins, equal stocks go to the lower summed
+ * percent, and equal stocks with equal percent is a draw (winnerTeam -1, winner -1).
+ */
+function teamsTimeOut(stocks: number[], percent: number[]): { state: GameState; endedAt: number } {
+  const config = matchConfig(1);
+  config.players.push({ slot: 2, charId: 'aeval', cpu: false, cpuLevel: 0 });
+  config.players.push({ slot: 3, charId: 'aeval', cpu: false, cpuLevel: 0 });
+  for (let i = 0; i < 4; i++) config.players[i].team = i < 2 ? 0 : 1;
+  config.teams = true;
+  config.timeLimitSec = 1;
+  const state = createGameState(config);
+  const idle: InputFrame[] = [NONE, NONE, NONE, NONE];
+  for (let i = 0; i < 10; i++) stepGame(state, idle);
+  const fighters = simFighters(state);
+  for (let i = 0; i < 4; i++) {
+    fighters[i].stocks = stocks[i];
+    fighters[i].percent = percent[i];
+  }
+  let endedAt = -1;
+  for (let i = 0; i < 120 && !state.finished; i++) {
+    stepGame(state, idle);
+    if (state.finished) endedAt = state.frame;
+  }
+  return { state, endedAt };
+}
+
+function testTeamsTimeOut(): SelfTestResult {
+  // More stocks beats lower percent: team 0 has 4 stocks at 30%, team 1 has 3 at 0%.
+  const byStocks = teamsTimeOut([3, 1, 2, 1], [10, 20, 0, 0]);
+  // Equal stocks (4 each): team 0 sums 90%, team 1 sums 100%, so team 0 wins.
+  const byPercent0 = teamsTimeOut([2, 2, 3, 1], [50, 40, 30, 70]);
+  // Mirror: team 0 sums 110%, team 1 100%, so team 1 wins with its 3 stock member as winner.
+  const byPercent1 = teamsTimeOut([2, 2, 3, 1], [60, 50, 30, 70]);
+  // Equal stocks and equal summed percent (70 each) at time out: a draw.
+  const draw = teamsTimeOut([2, 2, 2, 2], [30, 40, 50, 20]);
+  const all = [byStocks, byPercent0, byPercent1, draw];
+  let byTime = true;
+  let bothIn = true;
+  for (let i = 0; i < all.length; i++) {
+    const r = all[i];
+    if (!r.state.finished || r.state.timeLeft !== 0) byTime = false;
+    const f = simFighters(r.state);
+    if (!((f[0].stocks > 0 || f[1].stocks > 0) && (f[2].stocks > 0 || f[3].stocks > 0))) bothIn = false;
+  }
+  const show = (r: { state: GameState; endedAt: number }): string =>
+    `team ${String(r.state.winnerTeam)} winner ${r.state.winner} at ${r.endedAt}`;
+  return {
+    name: 'teams: 2v2 time out goes to more stocks, then lower summed percent, else a draw',
+    pass: byTime && bothIn
+      && byStocks.state.winnerTeam === 0 && byStocks.state.winner === 0
+      && byPercent0.state.winnerTeam === 0 && (byPercent0.state.winner === 0 || byPercent0.state.winner === 1)
+      && byPercent1.state.winnerTeam === 1 && byPercent1.state.winner === 2
+      && draw.state.winnerTeam === -1 && draw.state.winner === -1,
+    detail: `byTime ${byTime} bothIn ${bothIn} | stocks: ${show(byStocks)} | percent 90 v 100: ${show(byPercent0)} | ` +
+      `percent 110 v 100: ${show(byPercent1)} | 70 v 70: ${show(draw)}`,
+  };
+}
+
 /** Two humans on one team (slots 0 and 1) under the Teams rule, settled on the stage. */
 function teamPair(teams: boolean): GameState {
   const config = matchConfig(1);
@@ -2444,6 +2504,7 @@ export function runSimSelfTest(): SelfTestResult[] {
     testTeams(),
     testTeamsContact(),
     testCornerLanding(),
+    testTeamsTimeOut(),
   ];
 }
 
