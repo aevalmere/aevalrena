@@ -1,7 +1,9 @@
 # Aevalmere: the level 10 CPU
 
 Code: `src/ai/aevalmere.ts`. Level 10 is routed there by `cpuInput` in `src/ai/index.ts`.
-Tests: `src/ai/aitest.ts`, cases `ae` to `al` (`npx --yes tsx src/ai/aitest.ts`).
+Tests: `src/ai/aitest.ts`, cases `ae` to `as` (`npx --yes tsx src/ai/aitest.ts`). The wave 2 gates
+(`am` to `as`) run on both arenas, `tidegate` and `hearthmoor`. The opponent profile store lives in
+`src/ai/profile.ts`.
 
 Levels 1 to 9 are rule tables: a profile of weights feeding hand-written situations. Aevalmere
 does not use them. It searches. The sim is deterministic and cheap: one `stepGame` of a two-fighter
@@ -89,6 +91,33 @@ grouped by topic below, with the technique each one contributed.
 - Superhuman speed is what makes players call an AI unfair (AlphaStar's APM caps).
   https://arxiv.org/pdf/2503.15514
 
+### Wave 2 sources: learning the player (2026-09-29)
+- N-gram player prediction: keep the last n actions, count what followed each window, predict the
+  likeliest next one; the chapter notes this is what makes fighting-game AIs "very nearly
+  unbeatable" when they read a human. https://www.gameaipro.com/GameAIPro/GameAIPro_Chapter48_Implementing_N-Grams_for_Player_Prediction_Proceedural_Generation_and_Stylized_AI.pdf ,
+  https://www.taylorfrancis.com/chapters/mono/10.1201/b16725-54/implementing-grams-player-prediction-procedural-generation-stylized-ai-steven-rabin
+- Adaptive fighting-game AI learning the player's move tendencies (Stanford CS229 project).
+  https://cs229.stanford.edu/proj2008/RicciardiThill-AdaptiveAIForFightingGames.pdf
+- FightingICE: an action table of the opponent's predicted actions fed into MCTS beat the top three
+  2016 entries; the winners since plan against a predicted reply policy, not a fixed one.
+  https://researchgate.net/publication/320742121_Opponent_modeling_based_on_action_table_for_MCTS-based_fighting_game_AI ,
+  https://www.semanticscholar.org/paper/Monte-Carlo-Tree-Search-Implementation-of-Fighting-Ishii-Ito/ed182da2e64f0a2be27fb38997bae1dba071a53d
+- Tekken 8 Super Ghost: an action model cloned from one player's play, which only does what it saw
+  that player do (the "ghost" idea: the sequence of actions is the model).
+  https://en.bandainamcoent.eu/tekken/news/tekken-8-discover-about-super-ghost-battles ,
+  https://medium.com/@200wordessay/tekken-8s-super-ghost-battle-a-i-fighting-games-aab5f1d67a44 ,
+  https://sites.google.com/site/fightinggameai/ghost-ai
+- Iocaine Powder (winner of the first RoShamBo programming competition): run several predictors at
+  once, keep score of which one has been guessing right, and follow the best.
+  https://github.com/MrValdez/Roshambo/blob/master/rsb-iocaine.c , https://news.ycombinator.com/item?id=20073703
+- Witten-Bell smoothing: interpolate a context's own counts with its back-off by count against the
+  number of distinct outcomes the context has produced. https://www.cl.uni-heidelberg.de/courses/ss15/smt/scribe6.pdf ,
+  https://www.geeksforgeeks.org/nlp/advanced-smoothing-techniques-in-language-models/
+- CVaR: the mean of the worst alpha share of outcomes, the standard risk-averse objective.
+  https://arxiv.org/html/2405.01718v1 , https://dl.acm.org/doi/10.5220/0008175604120423
+- SmashBot's punish gate (above) is still the basis of the kill confirms: a chain only counts when
+  frames needed fit in hitstun left.
+
 ### What was taken from this
 1. Rollout search on a copied state against a small set of opponent reply models, following
    FightingICE and the Thunder bots. Aevalrena's sim makes this cheap.
@@ -102,6 +131,11 @@ grouped by topic below, with the technique each one contributed.
 6. Rank-and-veto selection (dual utility): hard vetoes for whiffs, for edgeguards that never come
    back, and for a Final Smash that does not catch; then a blend of the worst and the expected reply.
 7. Humanizing by a reaction floor and deliberate safe alternatives, not random blunders.
+8. (Wave 2) A situation-conditioned n-gram predictor of the opponent's next action, Witten-Bell
+   interpolated, plus a ghost-style action-pair model and a rhythm model, mixed Iocaine-style by
+   their running hit rates; its top replies become the rollout reply set. Saved per player.
+9. (Wave 2) A CVaR-style tail weight in the objective and a hard veto on any candidate that loses a
+   stock in a reply the model rates above 5%.
 
 ## 2. Design: what Aevalmere does each frame
 
@@ -179,6 +213,104 @@ grouped by topic below, with the technique each one contributed.
     out as direct codes (the same shortcut keys a player can bind), so a smash is never misread as a
     tilt and the smash tap window never comes into play.
 
+### Wave 2 additions (E1 to E5)
+
+**Stage awareness (E1).** `stageInfo` (aevalmere) and `getGround` (levels 1 to 9) re-read the live
+`StageDef` every call into one cached object per stage, so nothing assumes Tidegate. The stage's
+underside (`botY`) is read too: both arenas are thin 24 px slabs, and a fighter knocked under one
+has to drift out past the nearer edge before it climbs (`homeSign`, `underStage`). Before this the
+recovery policy steered home toward the centre from under the stage and lost a stock at 14%.
+
+**Move data (E1).** `busyFrames` adds the orb's `chargeCastFrames` share. Follow-ups in the combo
+table may connect with any circle of a chain (ftilt to 80 px, dash attack and fsmash to 102 px), not
+only the strongest one. The orb is two starters, a tap and a full charge (`orbTap`, `orbFull`), with
+the `charged` values lerped the way the sim lerps them. A full-charge plan (`orbFull`, 60 held
+frames, 104-frame horizon) is offered at 170 to 380 px, or at any range against a recovering or
+ledge-hanging opponent; the crescent's horizon is 72 frames and it is offered to 240 px, and to
+300 px as offstage coverage. Air dodges honour the new one-per-airborne-period rule everywhere
+(plans, recovery, reply models, and the level 1 to 9 `airDodgeSafe`); `busyFrames` reads
+`AIR_DODGE.total`.
+
+**Opponent model (E2).**
+- Classes: 17 attacks by move id plus ledge attack and get-up attack, grab, shield, roll toward,
+  roll away, spot dodge, jump, air dodge, drift in, drift out, nothing, stand/climb/tech (30).
+- Observation: every frame, for every enemy. An action is recorded when it starts (a roll's direction
+  is read a frame or two in). While the enemy starts nothing, its drift is sampled from the direction
+  it holds (the same public field the continue reply replays), never from leftover launch speed:
+  on a change held 6 frames, or every 12 frames, and only after 8 frames free.
+- Context of an observation: the frame before it (where the choice was made). Order 1 = (situation
+  bucket x7, distance x4, our state x3, last action, phase x4); order 2 adds the action before; both
+  hashed into 1024 rows each. The phase is the frames since the opponent's last action started,
+  bucketed 0-10 / 11-25 / 26-60 / 60+: a roller rolls on a beat and a camper throws on one, so the
+  same situation early and late in the rhythm are different choices. Counts decay 0.97 per
+  observation in their row.
+- Prediction: six components, each a distribution: the situation alone (Laplace 0.5); order 1 and
+  order 2 over it (Witten-Bell); the last two actions alone (ghost sequence model); the full chain
+  2 -> 1 -> pair -> situation; and a rhythm model (last action x phase). Each component keeps a
+  0.9-decayed hit rate; the prediction is their mixture weighted by hit rate squared. A timing vote
+  then rescales it: per (last action, phase), how often the opponent acted versus still did nothing
+  (drift, stand, hang), Witten-Bell weighted, sets the share of the distribution on action classes
+  versus movement classes. Top guess accuracy is scored on every observation
+  (`aevalmerePredictorStats`). A second variant, the phase as a separate seventh component instead
+  of inside order 1, was measured and was worse on the roller and the jumper.
+- Reply models: the fixed habit-weighted set keeps at least 25% of the weight; the predictor's top 5
+  classes take up to 75%, scaled by context confidence and by how far its recent accuracy is above
+  25% (a coin-flip record earns nothing). New reply policies: use a named move, grab, spot dodge, jump,
+  air dodge, move in, move out, and three recovery variants. The attacking reply now hops off after
+  us when we are off the stage within reach, and footstools when falling onto our head.
+- Delay-window replay: every rollout starts from the observation REACT (4) frames old with the reply
+  model already acting, replays our own known inputs for those frames, and then restores our true
+  fighter. "It jumped four frames ago and is about to footstool us" is checked like any reply, and no
+  unseen input is read.
+- Exploit tables: trigger (dash in, shield pressure, shot, aerial) x answer (shield, roll, spot
+  dodge, jump, air dodge, attack, nothing) within 30 frames, decay 0.94. An answer above 55% (with 3+
+  history) adds its counter with a +5 bonus: grab vs shield, dash attack/dash grab/fsmash vs roll,
+  up smash/utilt/uair vs jump, dash attack/usmash/dsmash vs air dodge, charged fsmash/dtilt vs spot
+  dodge, retreating bair/ftilt vs attack.
+- Lambda comes down by up to 0.25 against an opponent the model reads well (confidence x accuracy).
+- Profile (`src/ai/profile.ts`): an injectable `ProfileStore { load, save }`; localStorage only when
+  `typeof localStorage !== 'undefined'`, an in-memory store otherwise. Key
+  `aevalrena.aevalmere.profile.v1.<typed name>`, or `slot<n>`; only human (cpu false) enemies are
+  stored. Value: `{"v":1,"o0","o1","o2","sq","rh","tm","cp","ex","hb"}`, fixed-size arrays rounded
+  to 2 decimals (about 190 KB of JSON, mostly zeros); `cp` is each component's hit rate, so a known
+  player's best-reading component is trusted from the first guess. Saved on every KO, when the next
+  match starts, and by `flushAevalmereProfiles()`, which `src/main.ts` calls when the results screen
+  opens; loaded at match start, each context row capped at 60 observations of
+  weight, then decayed by fresh play like any count. The store is bound to the predictor at load, so a
+  save always goes back where it came from.
+
+**Kill routing (E3).**
+- Combo table: a fourth victim spot, off the stage below the ledge, where a launch that leaves the
+  victim deeper than a double jump plus the geyser can climb counts as a KO (the dair spike case).
+- Kill confirms: per stage, per starter and bracket, 1 when the starter or its best chain launches past
+  the blast rect. Grab (any throw), dtilt, utilt and nair get +6 and are examined first when the victim
+  is in a confirming bracket.
+- A rollout in which a starter lands whose table chain kills from the victim's bracket and spot is
+  worth 400 (a raw launch that would KO: 360; a KO seen inside the horizon: 520).
+- Spike routes: `egFairDair`, `egBairDair`, `egDair`, `dairSpike` (airborne), `ledgeDropDair`. A
+  spike plan is taken at once when every reply ends in a KO and we end on the stage or the ledge.
+
+**Loss avoidance (E4).**
+- Objective: lambda x worst + (1 - lambda) x tail-weighted mean, the worst 25% of reply weight counted
+  2x when a stock ahead, 1x even, 0.5x behind.
+- Hard veto: a stock lost (KO, a launch that projects a KO, or off the stage with no way back) in any
+  reply above 5% of the weight vetoes the candidate whenever a candidate without one exists.
+- Recovering: +0.4 per px of the smallest margin to any blast line over the rollout (to 200 px). The
+  air dodge onto the ledge is only offered once the jumps are spent (and the dodge is unused).
+- A stock ahead with no timer: lambda at least 0.7 (less against a passive opponent, so the kill
+  speed test still holds).
+
+**Human-looking (E5).** The 4-frame floor stays. The safe alternate is never one that a reply above
+5% punishes (any damage to us) or that loses a stock.
+
+**Budget.** Candidates are examined in priority order at full horizon; when the 2600-step budget
+runs low the last ones get shorter horizons, then none. Shrinking every horizon evenly to fit the
+larger reply set was tried and measured worse (first KO on a wandering dummy 1361 vs 921 frames
+mean over 8 seeds): kill moves need their whole horizon to show the launch. The fighter copy used by
+every rollout is now a copier generated from the learned field list (monomorphic property access);
+it was 10% of all run time and is now off the profile's top list. Where a content security policy
+forbids `new Function`, the generic loop is used.
+
 ### Combo table
 It is built once per stage and knockback tuning, from Aeval's move data. The key is every starter
 (the strongest hitbox of each of 14 moves, plus the 4 throws), crossed with the victim percent
@@ -206,6 +338,70 @@ hitstun lasts. "Survival DI" therefore means choosing what happens when hitstun 
 All of these are chosen by rollouts against the blast rect and the edgeguarder's reply.
 
 ## 3. Measured
+
+### Wave 2 (2026-09-29, both arenas, after both balance batches)
+From `npx --yes tsx src/ai/aitest.ts` (44 hard cases, all pass; `ao` is informational, see section 4).
+
+Level 10 vs level 9, 5 seeds x both sides, 2 stocks:
+
+| Stage | Wins | Stocks lost | SDs | Avg length |
+|---|---|---|---|---|
+| tidegate | 10/10 | 0 | 0 | 3059f |
+| hearthmoor | 10/10 | 0 | 0 | 2759f |
+
+The older sweep on tidegate: L10 vs L9 / L5 / L1 all 10/10 with 0.00 stocks lost (vs L9: longest
+combo 3.9 on average, 1.9 three-hit true combos per match), L10 mirror 8/10 slot-side, 0 SDs, 0
+early shields, 1.6 to 2.2% safe alternates.
+
+Scripted archetypes (fixed policies in `aitest.ts`, human slots with a typed name, fresh profile
+store each, 3 seeds per stage, 2 stocks). The accuracy column is the predictor's top-guess hit rate
+over its last 30 guesses at 30 s (printed for reference). The `ao` floor uses the cumulative rate
+over the first 30 s, both stages pooled: camper 49%/45%, roller 47%/35%, rushdown 64%/50%, turtle
+69%/62%, ledge 62%/55%, jumper 53%/47% (mean/worst).
+
+| Archetype | Stage | Wins | Stocks lost | First KO frames | Accuracy at 30 s, mean / worst |
+|---|---|---|---|---|---|
+| rushdown masher | tidegate | 3/3 | 0 | 791 / 566 / 881 | 63% / 53% |
+| rushdown masher | hearthmoor | 3/3 | 0 | 624 / 819 / 658 | 69% / 63% |
+| shield-grab turtle | tidegate | 3/3 | 0 | 1019 / 2161 / 1179 | 69% / 60% |
+| shield-grab turtle | hearthmoor | 3/3 | 0 | 1387 / 1351 / 1936 | 78% / 73% |
+| projectile camper | tidegate | 3/3 | 0 | 998 / 1028 / 1722 | **52%** / 50% |
+| projectile camper | hearthmoor | 3/3 | 0 | 1133 / 654 / 1543 | 56% / 50% |
+| roll spammer | tidegate | 3/3 | 0 | 617 / 1325 / 1053 | **54%** / 43% |
+| roll spammer | hearthmoor | 3/3 | 0 | 1199 / 930 / 1380 | 62% / 50% |
+| ledge camper | tidegate | 3/3 | 0 | 1990 / 1534 / 1276 | 73% / 67% |
+| ledge camper | hearthmoor | 3/3 | 0 | 1416 / 2471 / 1239 | 60% / 57% |
+| jump-happy | tidegate | 3/3 | 0 | 528 / 1463 / 791 | **53%** / 43% |
+| jump-happy | hearthmoor | 3/3 | 0 | 1028 / 843 / 784 | 56% / 47% |
+
+Profile transfer (`ap`): predictor accuracy over the first 15 s of the same match, empty store ->
+the profile a previous full match saved. 36 pairs (6 archetypes x 3 seeds x 2 stages): mean gain
++17.2 points (tidegate +17.5, hearthmoor +16.9), worst pair -1.0. Per archetype: rushdown +14,
+turtle +9, camper +23, roller +31, ledge +17, jumper +9. Saving each component predictor's hit rate
+in the profile (`cp`) is what closed the last gap: before it, one ledge pair was 5.1 points worse.
+
+Kill routing (`aq`), over the 72 KOs of the 36 archetype matches: 47% routed. By type: 2+ hit true
+combo 31, edgeguard hit off the stage 3, spike 0, single hit on the stage 38, no hit (self-destruct)
+0. Before edgeguards, spike routes and kill-confirm starters were moved to the front of the candidate
+list with a bonus (edgeguard +6, kill confirm +10, combo-table follow-up +6), the share was 36%.
+Standing dummy: median first KO 596f (9.9 s) over 5 seeds x 2 stages.
+
+Combo table (tidegate / hearthmoor): 125 starter entries, 97 / 95 open 3+ hit chains, 89 / 87 open
+4-hit chains, 57 / 54 end in a KO. Kill confirms from the lowest bracket: dtilt and utilt from 45% mid
+and at the ledge (15% off the stage), uthrow 45%, dthrow 80%, dair 45%, bthrow only off the stage at
+120% on tidegate and at the ledge on hearthmoor, full orb off the stage at 120%.
+
+Budget, with a host warm-up before frame 0, 3000 frames against level 9:
+
+| Stage | Mean | p99 | First call |
+|---|---|---|---|
+| tidegate | 0.062 ms | 1.99 ms | 0.39 ms |
+| hearthmoor | 0.069 ms | 1.82 ms | 0.38 ms |
+
+Determinism: the same seed gives an identical final state against a human slot with an empty store
+and with a fixed profile (tests `ah`, `as`).
+
+### Wave 1 measurements (kept for comparison)
 
 The harness uses 5 seeds x both sides and 2 stocks for each matchup (`npx --yes tsx src/ai/aitest.ts`).
 
@@ -294,6 +490,32 @@ about 100% (bthrow at the ledge) to 140% (usmash), so the floor on a stock is se
 Against level 9: still 10/10, 0 SDs, 0 early shields, 0.09 ms per call.
 
 ## 4. Known limits
+- What the wave 2 gates mean (coordinator decision, 2026-09-29): the substantive gates are 0 stocks
+  lost to the six archetypes (36/36 matches won, 0 stocks, 0 SDs) and the profile transfer (+17
+  points of first-15 s accuracy over 36 pairs). The accuracy check `ao` is informational only: a
+  30-guess window swings 5 to 10 points between runs, so it pools both stages per archetype (6
+  matches) and asks for a mean cumulative first-30 s accuracy of 50% and every match at 40%.
+- `ao` is informational (coordinator decision, 2026-09-29): it prints its numbers with an INFO prefix
+  and never fails the suite. Last run: camper 49% mean (worst 45%) and roller 47% (worst 35%) sit
+  under the 50% / 40% reference; rushdown 64/50, turtle 69/62, ledge 62/55, jumper 53/47 are over
+  it. The camper and the roller act on a beat after long stretches of drifting, and every match
+  starts cold (nothing learned), so 30 s of guesses is too small a sample to gate on. One timing
+  iteration (phase in the context, a rhythm model, a still-nothing-vs-acts-now vote) did not close
+  the gap.
+- The predictor and the profile make the brain safer more than faster: turning the predicted replies
+  off entirely moved the archetype mean first KO from 1172 to 1106 frames (within noise), and 0
+  stocks were lost either way.
+- Decision (accepted 2026-09-29): a fighter spiked while standing can rest in `tumble` on the floor,
+  hitstun spent, until it presses something. That is sim behaviour and stays. The brain treats a
+  grounded tumble with no hitstun or hitlag left as a free, passive opponent (`neutralFree`), so it
+  is read as "doing nothing" and approached; before, the level 10 whiffed up smashes at one for
+  150 s.
+- Harness decisions (accepted): test `x` counts level 1 projectiles actually shot down, not clash
+  events, because under the strength tiers a clash no longer means a shot came down. Test `ak` does
+  not count a projectile thrown toward the enemy, or an up special started off the stage (a
+  recovery), as a swing at a teammate.
+- The profile is about 190 KB of JSON per player and is serialised on every KO (a few ms on that
+  frame) and when the results screen opens (`src/main.ts` calls `flushAevalmereProfiles()`).
 - The reply models are simple policies, not the opponent's real brain. Against an opponent that
   breaks every model at once, the search falls back to its worst-case blend.
 - Rollouts inside `stepGame` still allocate the sim's own event objects. The brain itself allocates

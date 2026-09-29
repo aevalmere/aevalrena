@@ -1,4 +1,4 @@
-import { Btn } from '../core/types';
+import { Btn, DIRECT_CODES } from '../core/types';
 import type { FighterState, GameState, InputFrame, MatchConfig, MoveId } from '../core/types';
 import { FS_METER, SHIELD_MAX } from '../core/constants';
 import { CHARACTER_DEFS } from '../characters/registry';
@@ -8,8 +8,13 @@ import { forceGrab } from '../sim/grab';
 import { applyHit } from '../sim/hits';
 import { clearBuffer } from '../sim/input';
 import { setAction, simFighters } from '../sim/state';
+import { STAGE_DEFS } from '../stages/registry';
 import { cpuInput, cpuIntendedRolls, setCpuProjBlockOverrideForTest } from './index';
-import { aevalmereComboSummary, aevalmereStats } from './aevalmere';
+import {
+  aevalmereComboSummary, aevalmereKillConfirms, aevalmerePredictorStats, aevalmereStats, flushAevalmereProfiles,
+  setAevalmereProfileStore, warmAevalmere,
+} from './aevalmere';
+import { MemoryProfileStore, PROFILE_PREFIX, type ProfileStore } from './profile';
 
 declare const process: {
   argv: string[];
@@ -17,7 +22,8 @@ declare const process: {
   exitCode?: number;
 };
 
-interface TestResult { name: string; pass: boolean; detail: string }
+/** `info`: printed with an INFO prefix and never counted toward the pass or the exit code. */
+interface TestResult { name: string; pass: boolean; detail: string; info?: boolean }
 
 const AERIAL_MOVES: Record<string, boolean> = { nair: true, fair: true, bair: true, uair: true, dair: true };
 const MIN_AERIAL_GAP = 45;
@@ -33,10 +39,10 @@ const WIN_RATE_FLOOR = 0.7;
 
 /** `zeroMoves` is written into the config as given; left out, the rule field is absent entirely. */
 function cpuConfig(
-  levelA: number, levelB: number, seed: number, stocks: number, zeroMoves?: boolean,
+  levelA: number, levelB: number, seed: number, stocks: number, zeroMoves?: boolean, stageId = 'tidegate',
 ): MatchConfig {
   const cfg: MatchConfig = {
-    stageId: 'tidegate',
+    stageId,
     players: [
       { slot: 0, charId: 'aeval', cpu: true, cpuLevel: levelA },
       { slot: 1, charId: 'aeval', cpu: true, cpuLevel: levelB },
@@ -1456,14 +1462,16 @@ function testProjectileBlock(): TestResult {
   const share = hi.spawned === 0 ? 0 : hi.blocked / hi.spawned;
   const fails: string[] = [];
   if (hi.spawned === 0 || share < BLOCK_SHARE) fails.push(`L9 shot down ${(share * 100).toFixed(0)}% < ${(BLOCK_SHARE * 100).toFixed(0)}%`);
-  if (lo.clashes > BLOCK_LOW_CAP) fails.push(`L1 clashes ${lo.clashes} > ${BLOCK_LOW_CAP}`);
+  // Under the strength-tier clash rule a clash no longer means a shot came down: a jab bead (tier 1)
+  // meeting an orb (tier 2 and up) dies alone. "Almost never shoots down" is counted on shots down.
+  if (lo.blocked > BLOCK_LOW_CAP) fails.push(`L1 shot down ${lo.blocked} > ${BLOCK_LOW_CAP}`);
   if (hi.damage >= off.damage) fails.push(`L9 damage ${hi.damage.toFixed(1)} not under ${off.damage.toFixed(1)} with the counter off`);
   return {
     name: `x. level 9 CPU shoots down at least ${(BLOCK_SHARE * 100).toFixed(0)}% of pinned spam, level 1 almost never`,
     pass: fails.length === 0,
     detail: `L9 shot down ${hi.blocked}/${hi.spawned} (${(share * 100).toFixed(1)}%, ${hi.clashes} clash events),` +
       ` damage taken ${hi.damage.toFixed(1)} vs ${off.damage.toFixed(1)} with projBlock 0` +
-      ` (${off.clashes} clash events) | L1 ${lo.clashes} clash events over ${lo.spawned} shots` +
+      ` (${off.clashes} clash events) | L1 shot down ${lo.blocked}, ${lo.clashes} clash events over ${lo.spawned} shots` +
       (fails.length === 0 ? '' : ` | ${fails.join('; ')}`),
   };
 }
@@ -1876,8 +1884,8 @@ interface L10Run {
 }
 
 /** One match with level 10 on slot 0 when levelA is 10, else on slot 1 (both play level 10 in the mirror). */
-function runL10Match(levelA: number, levelB: number, seed: number, stocks: number, maxFrames: number): L10Run {
-  const state = createGameState(cpuConfig(levelA, levelB, seed, stocks));
+function runL10Match(levelA: number, levelB: number, seed: number, stocks: number, maxFrames: number, stageId = 'tidegate'): L10Run {
+  const state = createGameState(cpuConfig(levelA, levelB, seed, stocks, undefined, stageId));
   const rand = () => nextFloat(state.rng);
   const levels = [levelA, levelB];
   const l10Slot = levelA >= 10 ? 0 : 1;
@@ -2147,7 +2155,12 @@ function runTeamMatch(seed: number): TeamRun {
       // straight above or below (a juggle on an enemy launched toward the tall Tidegate ceiling)
       // or on the teammate's side (a projectile or dash that passes the friend on its way).
       const foeSide = foeGone ? NaN : teamSide(foe.x - f.x);
-      const foeInLine = foeSide === 0 || foeSide === teamSide(mate.x - f.x);
+      // A shot thrown the way the enemy is (nspecial, sspecial) is aimed at the enemy even when the
+      // teammate stands right beside the thrower, where its side would read as "in line" with neither.
+      const shot = f.moveId === 'nspecial' || f.moveId === 'sspecial';
+      // An up special started off the stage is a recovery, not a swing at anyone.
+      if (f.moveId === 'uspecial' && harnessOffstage(state, f)) continue;
+      const foeInLine = foeSide === 0 || foeSide === teamSide(mate.x - f.x) || (shot && foeSide === f.facing);
       if (dMate < dFoe && dFoe > TEAM_FAR && !foeInLine) mateAttacks++;
     }
     if (state.finished) { frame++; break; }
@@ -2276,6 +2289,709 @@ function testL10KillSpeed(): TestResult {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Wave 2 (E6): Aevalmere on both arenas. L10 vs L9 strictly (every match, no stock lost), six
+// scripted archetypes standing in for the kinds of human the owner described, profile persistence,
+// kill routing against a standing dummy, the time budget with a host warm-up, and determinism with
+// an empty and a fixed profile store. Every archetype is a fixed policy fed through the same input
+// path a CPU slot uses; its slot is a human one (cpu false, a typed name), so the profile store is
+// exercised exactly as it would be for a person.
+// ---------------------------------------------------------------------------
+
+const STAGES = ['tidegate', 'hearthmoor'] as const;
+
+/** Strict L10 vs L9 on every stage: this many seeds, both sides each. */
+const STRICT_SEEDS = SEEDS;
+
+interface StrictSummary { stage: string; matches: number; wins: number; stocksLost: number; sd: number; unfinished: number; frames: number }
+const strictRuns: StrictSummary[] = [];
+
+function strictSummary(stage: string): StrictSummary {
+  for (let i = 0; i < strictRuns.length; i++) if (strictRuns[i].stage === stage) return strictRuns[i];
+  const out: StrictSummary = { stage, matches: 0, wins: 0, stocksLost: 0, sd: 0, unfinished: 0, frames: 0 };
+  for (let i = 0; i < STRICT_SEEDS.length; i++) {
+    for (let side = 0; side < 2; side++) {
+      const run = side === 0
+        ? runL10Match(10, 9, STRICT_SEEDS[i], MATRIX_STOCKS, MATCH_CAP, stage)
+        : runL10Match(9, 10, STRICT_SEEDS[i], MATRIX_STOCKS, MATCH_CAP, stage);
+      out.matches++;
+      if (run.state.winner === run.l10Slot) out.wins++;
+      out.stocksLost += MATRIX_STOCKS - run.state.fighters[run.l10Slot].stocks;
+      out.sd += run.sd;
+      out.frames += run.frames;
+      if (!run.state.finished) out.unfinished++;
+    }
+  }
+  strictRuns.push(out);
+  return out;
+}
+
+function testL10StrictBothStages(): TestResult {
+  const parts: string[] = [];
+  let pass = true;
+  for (let i = 0; i < STAGES.length; i++) {
+    const m = strictSummary(STAGES[i]);
+    parts.push(`${m.stage} won ${m.wins}/${m.matches} stocks lost ${m.stocksLost} sd ${m.sd} avg ${Math.round(m.frames / m.matches)}f`);
+    if (m.wins !== m.matches || m.stocksLost !== 0 || m.sd !== 0 || m.unfinished !== 0) pass = false;
+  }
+  return {
+    name: 'am. level 10 beats level 9 in every match with 0 stocks lost and 0 SDs, on tidegate and hearthmoor',
+    pass,
+    detail: parts.join(' | '),
+  };
+}
+
+// Scripted archetypes -------------------------------------------------------
+
+type ArchKind = 'rushdown' | 'turtle' | 'camper' | 'roller' | 'ledge' | 'jumper';
+const ARCHETYPES: readonly ArchKind[] = ['rushdown', 'turtle', 'camper', 'roller', 'ledge', 'jumper'];
+const ARCH_NAMES: Record<ArchKind, string> = {
+  rushdown: 'Rushdown', turtle: 'Turtle', camper: 'Camper', roller: 'Roller', ledge: 'LedgeCamp', jumper: 'Jumper',
+};
+const ARCH_SEEDS = [5, 17, 23];
+const ARCH_STOCKS = 2;
+const ARCH_CAP = 9000;
+/** Accuracy checkpoints: the first 30 s (and 15 s for the profile gate). */
+const ARCH_ACC_FRAME = 1800;
+
+const DCODES = DIRECT_CODES as readonly string[];
+function dcode(name: string): number { return DCODES.indexOf(name) + 1; }
+
+interface ArchMem { prevHeld: number; step: number; timer: number; phase: number; hang: number; jumpHold: number; mash: number; relL: number; relR: number }
+
+function newArchMem(): ArchMem {
+  return { prevHeld: 0, step: 0, timer: 0, phase: 0, hang: 0, jumpHold: 0, mash: 0, relL: -99, relR: -99 };
+}
+
+function archFree(f: FighterState): boolean {
+  if (f.hitlag > 0) return false;
+  return f.action === 'idle' || f.action === 'walk' || f.action === 'dash' || f.action === 'run' ||
+    f.action === 'turn' || f.action === 'crouch';
+}
+
+/**
+ * One frame of a scripted archetype. Shared plumbing first (respawn, grabbed, downed, ledge,
+ * recovery), then the archetype's own habit. No randomness: the same state always gives the
+ * same input, which is what makes the predictor's job measurable.
+ */
+function archInput(kind: ArchKind, state: GameState, slot: number, mem: ArchMem, out: InputFrame): InputFrame {
+  let held = 0;
+  let direct = 0;
+  let me: FighterState | null = null;
+  let foe: FighterState | null = null;
+  for (let i = 0; i < state.fighters.length; i++) {
+    const f = state.fighters[i];
+    if (f.slot === slot) me = f; else if (foe === null || f.stocks > 0) foe = f;
+  }
+  if (mem.timer > 0) mem.timer--;
+  if (me !== null && foe !== null && me.stocks > 0 && me.action !== 'dead') {
+    const stage = STAGE_DEFS[state.stageId];
+    let minX = 0; let maxX = 0;
+    for (let i = 0; i < stage.platforms.length; i++) {
+      const p = stage.platforms[i];
+      if (p.solid) { minX = p.x; maxX = p.x + p.w; break; }
+    }
+    const cx = (minX + maxX) / 2;
+    const dx = foe.x - me.x;
+    const adx = Math.abs(dx);
+    const toward = dx < 0 ? Btn.Left : Btn.Right;
+    const away = dx < 0 ? Btn.Right : Btn.Left;
+    const home = me.x < cx ? Btn.Right : Btn.Left;
+    const facingFoe = (me.facing === 1) === (dx > 0);
+    const off = !me.onGround && (me.x < minX - 2 || me.x > maxX + 2 || me.y > 6);
+    if (me.action === 'respawn') {
+      if (me.actionFrame > 30) held = Btn.Down;
+    } else if (me.action === 'grabbed') {
+      mem.mash ^= 1;
+      held = mem.mash === 0 ? (Btn.Left | Btn.Jump) : (Btn.Right | Btn.Attack);
+    } else if (me.action === 'downed') {
+      held = (mem.prevHeld & Btn.Up) === 0 ? Btn.Up : 0;
+    } else if (me.action === 'ledgeHang') {
+      if (kind === 'ledge') {
+        mem.hang++;
+        const wait = 40 + (mem.step % 3) * 12;
+        if (mem.hang >= wait) {
+          const opts = ['ledgeGetUp', 'ledgeAttack', 'ledgeRoll', 'ledgeGetUp', 'ledgeJump'];
+          direct = dcode(opts[mem.step % opts.length]);
+          mem.step++;
+          mem.hang = 0;
+          mem.phase = 1;
+          mem.timer = 50;
+        }
+      } else if (me.actionFrame > 8) {
+        direct = dcode('ledgeGetUp');
+      }
+    } else if (off && !(kind === 'ledge' && mem.phase === 0 && me.y < 40)) {
+      // Recovery: head home, double jump once falling, geyser when out of jumps.
+      held = home;
+      if (me.action === 'air') {
+        if (me.jumpsLeft > 0 && me.vy > 0.5) { if ((mem.prevHeld & Btn.Jump) === 0) held |= Btn.Jump; }
+        else if (me.jumpsLeft === 0 && me.vy > 0) direct = dcode('uspecial');
+      }
+    } else {
+      switch (kind) {
+        case 'rushdown': {
+          // Always in their face, mashing a fixed string of grounded moves.
+          held = toward;
+          if (!me.onGround || !archFree(me) || adx > 40) break;
+          const string = ['jab', 'ftilt', 'dtilt', 'jab', 'usmash'];
+          direct = dcode(string[mem.step % string.length]);
+          mem.step++;
+          break;
+        }
+        case 'turtle': {
+          // Shield anything that comes close; grab out of shield the moment the attacker is stuck.
+          if (!me.onGround) { held = home; break; }
+          const foeBusy = foe.action === 'attack' || foe.action === 'land' || foe.action === 'shieldStun';
+          const foeCommitted = foe.action === 'attack' && foe.actionFrame > 8;
+          if (me.action === 'shield' && adx < 44 && foeCommitted) { held = Btn.Shield | ((mem.prevHeld & Btn.Attack) === 0 ? Btn.Attack : 0); break; }
+          if (adx < 110 && (foeBusy || Math.abs(foe.vx) > 1.2 || foe.action === 'air')) { held = Btn.Shield; mem.timer = 12; break; }
+          if (mem.timer > 0 && me.action === 'shield') { held = Btn.Shield; break; }
+          if (!archFree(me)) break;
+          if (adx > 100) held = toward | Btn.Walk;
+          break;
+        }
+        case 'camper': {
+          // Keep 170 to 260 px away and throw a shot every 40 frames.
+          if (!me.onGround) { held = home; break; }
+          if (!archFree(me)) break;
+          const nearEdge = me.x < minX + 40 || me.x > maxX - 40;
+          // Retreat until well out of reach (200 px) once pressed inside 170: no dithering at the line.
+          if (!nearEdge && (adx < 170 || (mem.phase === 1 && adx < 200))) { held = away; mem.phase = 1; break; }
+          mem.phase = 0;
+          if (adx < 90 && nearEdge) { held = toward | Btn.Jump; break; }
+          if (adx > 260) { held = toward; break; }
+          if (!facingFoe) { held = toward; break; }
+          if (mem.timer === 0) {
+            direct = dcode(mem.step % 2 === 0 ? 'nspecial' : 'sspecial');
+            mem.step++;
+            mem.timer = 40;
+          }
+          break;
+        }
+        case 'roller': {
+          // Rolls whenever anyone comes close, then jabs if the roll left it next to them.
+          if (!me.onGround) { held = home; break; }
+          if (!archFree(me)) break;
+          if (adx < 90 && mem.timer === 0) {
+            // Two rolls in (through them), then one away: a habit told relative to the opponent.
+            const rollIn = mem.step % 3 !== 2;
+            direct = dcode(rollIn === facingFoe ? 'rollForward' : 'rollBack');
+            mem.step++;
+            mem.timer = 34;
+            break;
+          }
+          if (adx < 36) { direct = dcode('jab'); break; }
+          if (adx > 120) held = toward;
+          break;
+        }
+        case 'ledge': {
+          // Lives on the ledge: walks off to hang, takes a ledge option, comes back after a beat.
+          const leftSide = me.x < cx;
+          const edge = leftSide ? minX : maxX;
+          const outBit = leftSide ? Btn.Left : Btn.Right;
+          const inBit = leftSide ? Btn.Right : Btn.Left;
+          if (mem.phase === 1) {
+            if (!me.onGround) { held = home; break; }
+            if (!archFree(me)) break;
+            if (adx < 36) { direct = dcode('jab'); break; }
+            if (mem.timer === 0) mem.phase = 0;
+            break;
+          }
+          if (me.onGround) { if (archFree(me) || me.action === 'land') held = outBit; break; }
+          held = me.vy > 0 && Math.abs(me.x - edge) < 30 ? inBit : outBit;
+          if (me.y > 30 || Math.abs(me.x - edge) > 40) held = inBit;
+          break;
+        }
+        case 'jumper': {
+          // Full hops at the opponent, an aerial near the top, a double jump on the way down.
+          held = toward;
+          if (me.onGround) {
+            if (archFree(me) || me.action === 'land') { held |= Btn.Jump; mem.jumpHold = 5; }
+            break;
+          }
+          if (mem.jumpHold > 0) { held |= Btn.Jump; mem.jumpHold--; }
+          if (me.action === 'air' && me.vy > -1.5 && me.vy < 1 && adx < 80 && mem.timer === 0) {
+            direct = dcode(facingFoe ? 'fair' : 'nair');
+            mem.timer = 30;
+          } else if (me.action === 'air' && me.vy > 2 && me.jumpsLeft > 0 && (mem.prevHeld & Btn.Jump) === 0 && adx > 30) {
+            held |= Btn.Jump;
+          }
+          break;
+        }
+        default: break;
+      }
+    }
+  }
+  // A person with a habit does not roll by accident: a direction released less than a roll-tap
+  // window ago is not pressed again on the ground (the sim would read the second tap as a roll).
+  if (me !== null && me.onGround) {
+    if ((held & Btn.Left) !== 0 && (mem.prevHeld & Btn.Left) === 0 && state.frame - mem.relL <= 14) held &= ~Btn.Left;
+    if ((held & Btn.Right) !== 0 && (mem.prevHeld & Btn.Right) === 0 && state.frame - mem.relR <= 14) held &= ~Btn.Right;
+  }
+  if ((mem.prevHeld & Btn.Left) !== 0 && (held & Btn.Left) === 0) mem.relL = state.frame;
+  if ((mem.prevHeld & Btn.Right) !== 0 && (held & Btn.Right) === 0) mem.relR = state.frame;
+  out.held = held;
+  out.pressed = held & ~mem.prevHeld;
+  out.released = mem.prevHeld & ~held;
+  out.direct = direct;
+  mem.prevHeld = held;
+  return out;
+}
+
+interface ArchRun {
+  kind: ArchKind;
+  stage: string;
+  seed: number;
+  l10Slot: number;
+  stocksLost: number;
+  sd: number;
+  firstKo: number;         // frame of the archetype's first lost stock, -1 none
+  won: boolean;
+  frames: number;
+  accAt30: number;         // top-guess accuracy over the last 30 guesses made by 30 s (the ao gate)
+  accCum30: number;        // over every guess made in the first 30 s, cold start included
+  obs30: number;
+  accAt15: number;         // the same over the first 15 s
+  obs15: number;
+  accTotal: number;        // over the whole match
+  obs: number;
+  kosChain: number;        // archetype KOs whose last hit was the 2nd+ hit of a true combo
+  kosSpike: number;        // ... a downward launch (240 to 300 degrees) landed off the stage
+  kosEdge: number;         // ... any other hit landed while the victim was off the stage
+  kosRaw: number;          // ... a single hit on the stage
+  kosOther: number;        // no hit of ours before the KO (a self-destruct)
+  finalJson: string;
+}
+
+/** Off the stage by the harness's own reading of the live solid platform. */
+function harnessOffstage(state: GameState, f: FighterState): boolean {
+  if (f.onGround || f.action === 'ledgeHang') return false;
+  const stage = STAGE_DEFS[state.stageId];
+  for (let i = 0; i < stage.platforms.length; i++) {
+    const p = stage.platforms[i];
+    if (!p.solid) continue;
+    return f.x < p.x - 2 || f.x > p.x + p.w + 2 || f.y > p.y + 6;
+  }
+  return false;
+}
+
+/**
+ * Level 10 against archetype `kind`. The level 10 sits on slot 0 or 1 (`l10Slot`), the archetype on
+ * the other as a named human. `store` is installed as the profile store for the match and the
+ * profiles are flushed to it at the end. `stopAtKo` ends the match at the archetype's first KO.
+ */
+function runArchMatch(kind: ArchKind, stage: string, seed: number, l10Slot: number, store: ProfileStore, stopAtKo: boolean): ArchRun {
+  const aSlot = 1 - l10Slot;
+  const players: MatchConfig['players'] = [];
+  for (let s = 0; s < 2; s++) {
+    players.push(s === l10Slot
+      ? { slot: s, charId: 'aeval', cpu: true, cpuLevel: 10 }
+      : { slot: s, charId: 'aeval', cpu: false, cpuLevel: 0, name: ARCH_NAMES[kind] });
+  }
+  const cfg: MatchConfig = { stageId: stage, players, stocks: ARCH_STOCKS, timeLimitSec: 0, seed };
+  setAevalmereProfileStore(store);
+  const state = createGameState(cfg);
+  const rand = () => nextFloat(state.rng);
+  const amem = newArchMem();
+  const inputs: InputFrame[] = [
+    { held: 0, pressed: 0, released: 0, direct: 0 },
+    { held: 0, pressed: 0, released: 0, direct: 0 },
+  ];
+  const tmp: InputFrame = { held: 0, pressed: 0, released: 0, direct: 0 };
+  let firstKo = -1;
+  let acc30 = -1; let n30 = 0; let acc15 = -1; let n15 = 0; let roll30 = -1;
+  let combo = 0;
+  let lastType = 4;        // 0 chain, 1 spike, 2 edgeguard, 3 raw, 4 no hit yet
+  const koTypes = [0, 0, 0, 0, 0];
+  let frame = 0;
+  for (; frame < ARCH_CAP; frame++) {
+    const victim = state.fighters[aSlot];
+    const held = victim.hitstun > 0 || victim.hitlag > 0;
+    const wasOff = harnessOffstage(state, victim);
+    const o = cpuInput(state, l10Slot, 10, rand);
+    inputs[l10Slot].held = o.held; inputs[l10Slot].pressed = o.pressed; inputs[l10Slot].released = o.released; inputs[l10Slot].direct = o.direct;
+    const a = archInput(kind, state, aSlot, amem, tmp);
+    inputs[aSlot].held = a.held; inputs[aSlot].pressed = a.pressed; inputs[aSlot].released = a.released; inputs[aSlot].direct = a.direct;
+    stepGame(state, inputs);
+    if (state.frame === ARCH_ACC_FRAME || state.frame === ARCH_ACC_FRAME / 2) {
+      const ps = aevalmerePredictorStats(l10Slot, aSlot);
+      const a = ps.total > 0 ? ps.hits / ps.total : 0;
+      if (state.frame === ARCH_ACC_FRAME) { acc30 = a; n30 = ps.total; roll30 = ps.recent; } else { acc15 = a; n15 = ps.total; }
+    }
+    let ko = false;
+    let hitNow = false;
+    for (let i = 0; i < state.events.length; i++) {
+      const ev = state.events[i];
+      if (ev.type === 'hit' && ev.attacker === l10Slot && ev.victim === aSlot && ev.kb > 0) {
+        combo = held || hitNow ? combo + 1 : 1;
+        hitNow = true;
+        const spike = ev.angle >= 240 && ev.angle <= 300 && wasOff;
+        lastType = combo >= 2 ? 0 : spike ? 1 : wasOff ? 2 : 3;
+      } else if (ev.type === 'ko' && ev.slot === aSlot) {
+        if (firstKo < 0) firstKo = state.frame;
+        ko = true;
+        koTypes[lastType]++;
+        lastType = 4;
+        combo = 0;
+      }
+    }
+    if (!hitNow && victim.hitstun === 0 && victim.hitlag === 0) combo = 0;
+    if (state.finished || (stopAtKo && ko)) { frame++; break; }
+  }
+  // A match that ended before a checkpoint is read at its end.
+  const psEnd = aevalmerePredictorStats(l10Slot, aSlot);
+  const aEnd = psEnd.total > 0 ? psEnd.hits / psEnd.total : 0;
+  if (acc30 < 0) { acc30 = aEnd; n30 = psEnd.total; roll30 = psEnd.recent; }
+  if (acc15 < 0) { acc15 = aEnd; n15 = psEnd.total; }
+  flushAevalmereProfiles();
+  const ps = aevalmerePredictorStats(l10Slot, aSlot);
+  const l10 = state.fighters[l10Slot];
+  return {
+    kind, stage, seed, l10Slot,
+    stocksLost: ARCH_STOCKS - l10.stocks,
+    sd: l10.stats.sds,
+    firstKo, won: state.winner === l10Slot, frames: frame,
+    accAt30: roll30, accCum30: acc30, obs30: n30, accAt15: acc15, obs15: n15, accTotal: ps.total > 0 ? ps.hits / ps.total : 0, obs: ps.total,
+    kosChain: koTypes[0], kosSpike: koTypes[1], kosEdge: koTypes[2], kosRaw: koTypes[3], kosOther: koTypes[4],
+    finalJson: JSON.stringify(state),
+  };
+}
+
+const archRuns: ArchRun[] = [];
+
+function runArchSweep(): void {
+  if (archRuns.length > 0) return;
+  for (let st = 0; st < STAGES.length; st++) {
+    for (let k = 0; k < ARCHETYPES.length; k++) {
+      for (let i = 0; i < ARCH_SEEDS.length; i++) {
+        // Every match on a fresh store: this sweep measures in-match learning only.
+        archRuns.push(runArchMatch(ARCHETYPES[k], STAGES[st], ARCH_SEEDS[i], i % 2, new MemoryProfileStore(), false));
+      }
+    }
+  }
+}
+
+function archLine(kind: ArchKind, stage: string): string {
+  let wins = 0; let lost = 0; let n = 0; let accBest = 0; let accTot = 0; let obs = 0; let worst = 1;
+  const kos: number[] = [];
+  for (let i = 0; i < archRuns.length; i++) {
+    const r = archRuns[i];
+    if (r.kind !== kind || r.stage !== stage) continue;
+    n++;
+    if (r.won) wins++;
+    lost += r.stocksLost;
+    kos.push(r.firstKo);
+    accBest += r.accAt30;
+    if (r.accAt30 < worst) worst = r.accAt30;
+    accTot += r.accTotal;
+    obs += r.obs;
+  }
+  return `  ${stage} ${kind}: wins ${wins}/${n} stocks lost ${lost} first KO ${kos.map((f) => (f < 0 ? '-' : `${f}f`)).join('/')}` +
+    ` accuracy at 30 s mean ${(accBest / Math.max(1, n) * 100).toFixed(0)}% worst ${(worst * 100).toFixed(0)}%` +
+    ` (whole match ${(accTot / Math.max(1, n) * 100).toFixed(0)}%, ${Math.round(obs / Math.max(1, n))} obs)`;
+}
+
+function testArchetypesNoLoss(): TestResult {
+  runArchSweep();
+  let lost = 0; let sd = 0;
+  const bad: string[] = [];
+  for (let i = 0; i < archRuns.length; i++) {
+    const r = archRuns[i];
+    lost += r.stocksLost;
+    sd += r.sd;
+    if (r.stocksLost > 0 || r.sd > 0) bad.push(`${r.stage} ${r.kind} seed ${r.seed} lost ${r.stocksLost}`);
+  }
+  return {
+    name: `an. level 10 loses no stock to any scripted archetype (${ARCHETYPES.join(', ')}), ${ARCH_SEEDS.length} seeds each, both stages`,
+    pass: lost === 0 && sd === 0,
+    detail: `${archRuns.length} matches, stocks lost ${lost}, sd ${sd}${bad.length > 0 ? ` | ${bad.join('; ')}` : ''}`,
+  };
+}
+
+/**
+ * ao is informational (coordinator decision, 2026-09-29): it prints, per archetype with both stages
+ * pooled (6 matches), the mean of the cumulative top-guess accuracy over the first 30 s and the
+ * worst match, against a 50% / 40% reference, and never fails the suite. The camper and the roller
+ * act on a beat after long stretches of drifting, and every match starts with nothing learned, so
+ * 30 s of guesses is too small and too cold a sample to gate on. The substantive gates are an (no
+ * stock lost) and ap (profile transfer).
+ */
+const ARCH_ACC_MEAN = 0.5;
+const ARCH_ACC_WORST = 0.4;
+
+function testArchetypePrediction(): TestResult {
+  runArchSweep();
+  const parts: string[] = [];
+  let pass = true;
+  for (let k = 0; k < ARCHETYPES.length; k++) {
+    let sum = 0; let n = 0; let worst = 1;
+    for (let i = 0; i < archRuns.length; i++) {
+      const r = archRuns[i];
+      if (r.kind !== ARCHETYPES[k]) continue;
+      sum += r.accCum30; n++;
+      if (r.accCum30 < worst) worst = r.accCum30;
+    }
+    const mean = n > 0 ? sum / n : 0;
+    const ok = mean >= ARCH_ACC_MEAN && worst >= ARCH_ACC_WORST;
+    if (!ok) pass = false;
+    parts.push(`${ARCHETYPES[k]} ${(mean * 100).toFixed(0)}%/${(worst * 100).toFixed(0)}%${ok ? '' : ' (below reference)'}`);
+  }
+  return {
+    info: true,
+    name: `ao. predictor top-guess accuracy, cumulative over the first ${ARCH_ACC_FRAME / 60} s, both stages pooled (reference: mean of 6 matches ${Math.round(ARCH_ACC_MEAN * 100)}%, every match ${Math.round(ARCH_ACC_WORST * 100)}%)`,
+    pass,
+    detail: `mean/worst: ${parts.join(', ')}`,
+  };
+}
+
+// Profile persistence -------------------------------------------------------
+// The profile's job is to know the player from the first second. Each pair plays the same match
+// (archetype, stage, seed) twice: once with an empty store, once with the profile a previous full
+// match against that archetype saved. The measure is the predictor's top-guess accuracy over the
+// first 15 s of each.
+
+function median(xs: number[]): number {
+  const v = xs.slice().sort((a, b) => a - b);
+  return v.length === 0 ? -1 : v[Math.floor(v.length / 2)];
+}
+
+const PROFILE_GAIN = 0.08;
+const PROFILE_WORST = -0.05;
+
+interface ProfilePair { kind: ArchKind; stage: string; seed: number; empty: number; loaded: number; keyOk: boolean }
+const profilePairs: ProfilePair[] = [];
+
+function runProfilePairs(): void {
+  if (profilePairs.length > 0) return;
+  for (let st = 0; st < STAGES.length; st++) {
+    for (let k = 0; k < ARCHETYPES.length; k++) {
+      for (let i = 0; i < ARCH_SEEDS.length; i++) {
+        const kind = ARCHETYPES[k]; const stage = STAGES[st]; const seed = ARCH_SEEDS[i];
+        const store = new MemoryProfileStore();
+        // The empty-store match doubles as the one that teaches the profile.
+        const a = runArchMatch(kind, stage, seed, 0, store, false);
+        const keyOk = store.load(PROFILE_PREFIX + ARCH_NAMES[kind]) !== null && store.keys().length === 1;
+        const b = runArchMatch(kind, stage, seed, 0, store, false);
+        profilePairs.push({ kind, stage, seed, empty: a.accAt15, loaded: b.accAt15, keyOk });
+      }
+    }
+  }
+}
+
+function testProfilePersistence(): TestResult {
+  runProfilePairs();
+  let sum = 0; let worst = 1; let keyOk = true; let worstLabel = '';
+  const perStage: number[] = [0, 0];
+  const perStageN: number[] = [0, 0];
+  const parts: string[] = [];
+  for (let k = 0; k < ARCHETYPES.length; k++) {
+    let ks = 0; let kn = 0;
+    for (let i = 0; i < profilePairs.length; i++) {
+      const r = profilePairs[i];
+      if (r.kind !== ARCHETYPES[k]) continue;
+      ks += r.loaded - r.empty; kn++;
+    }
+    parts.push(`${ARCHETYPES[k]} ${ks / Math.max(1, kn) >= 0 ? '+' : ''}${((ks / Math.max(1, kn)) * 100).toFixed(0)}`);
+  }
+  for (let i = 0; i < profilePairs.length; i++) {
+    const r = profilePairs[i];
+    const d = r.loaded - r.empty;
+    sum += d;
+    if (d < worst) { worst = d; worstLabel = `${r.stage} ${r.kind} seed ${r.seed} ${(r.empty * 100).toFixed(0)}->${(r.loaded * 100).toFixed(0)}`; }
+    const si = STAGES.indexOf(r.stage as typeof STAGES[number]);
+    perStage[si] += d; perStageN[si]++;
+    if (!r.keyOk) keyOk = false;
+  }
+  const mean = sum / Math.max(1, profilePairs.length);
+  const m0 = perStage[0] / Math.max(1, perStageN[0]);
+  const m1 = perStage[1] / Math.max(1, perStageN[1]);
+  const pass = mean >= PROFILE_GAIN && m0 >= PROFILE_GAIN && m1 >= PROFILE_GAIN && worst >= PROFILE_WORST && keyOk;
+  return {
+    name: `ap. a saved profile raises the predictor's first-15 s accuracy by >= ${PROFILE_GAIN * 100} points on the mean (overall and on each stage's 18 pairs), never lower by more than ${-PROFILE_WORST * 100} in any pair`,
+    pass,
+    detail: `mean gain ${(mean * 100).toFixed(1)} points over ${profilePairs.length} pairs (tidegate ${(m0 * 100).toFixed(1)}, hearthmoor ${(m1 * 100).toFixed(1)}), worst pair ${(worst * 100).toFixed(1)} (${worstLabel}); per archetype ${parts.join(', ')}; one key per player under ${PROFILE_PREFIX}<name>: ${keyOk ? 'yes' : 'NO'}`,
+  };
+}
+
+// Kill speed and kill routing -----------------------------------------------
+
+const KR_SEEDS = [5, 17, 23, 41, 97];
+const KR_FIRST_MEDIAN = 720;
+
+interface KillRouteRun { stage: string; seed: number; koFrames: number[]; routed: number; kos: number }
+const killRouteRuns: KillRouteRun[] = [];
+
+/**
+ * Level 10 against a standing level 0 on `stage`, 3 stocks. A KO counts as routed when the last hit
+ * the level 10 landed on the dummy before it was KO'd was the 2nd or later hit of a true combo (it
+ * landed while the victim was still in hitstun or hitlag from the one before), or a spike (a
+ * downward launch, 240 to 300 degrees, off the stage).
+ */
+function runKillRoute(stage: string, seed: number): KillRouteRun {
+  const cfg = cpuConfig(10, 0, seed, KILL_STOCKS, false, stage);
+  const state = createGameState(cfg);
+  const rand = () => nextFloat(state.rng);
+  const inputs: InputFrame[] = [
+    { held: 0, pressed: 0, released: 0, direct: 0 },
+    { held: 0, pressed: 0, released: 0, direct: 0 },
+  ];
+  const out: KillRouteRun = { stage, seed, koFrames: [], routed: 0, kos: 0 };
+  let combo = 0;
+  let lastRouted = false;
+  for (let frame = 0; frame < KILL_ALL_CAP; frame++) {
+    for (let s = 0; s < 2; s++) {
+      const o = cpuInput(state, s, s === 0 ? 10 : 0, rand);
+      inputs[s].held = o.held; inputs[s].pressed = o.pressed; inputs[s].released = o.released; inputs[s].direct = o.direct;
+    }
+    const v = state.fighters[1];
+    const held = v.hitstun > 0 || v.hitlag > 0;
+    stepGame(state, inputs);
+    let hitNow = false;
+    for (let i = 0; i < state.events.length; i++) {
+      const ev = state.events[i];
+      if (ev.type === 'hit' && ev.attacker === 0 && ev.victim === 1 && ev.kb > 0) {
+        combo = held || hitNow ? combo + 1 : 1;
+        hitNow = true;
+        const spike = ev.angle >= 240 && ev.angle <= 300 && ev.y > -10;
+        lastRouted = combo >= 2 || spike;
+      } else if (ev.type === 'ko' && ev.slot === 1) {
+        out.koFrames.push(state.frame);
+        out.kos++;
+        if (lastRouted) out.routed++;
+        lastRouted = false;
+        combo = 0;
+      }
+    }
+    if (!hitNow && v.hitstun === 0 && v.hitlag === 0) combo = 0;
+    if (state.finished) break;
+  }
+  return out;
+}
+
+const KR_ROUTED_SHARE = 0.4;
+
+function testKillRouting(): TestResult {
+  // Opponents that recover: every KO of the 36 archetype matches, by how it came.
+  runArchSweep();
+  let chain = 0; let spike = 0; let edge = 0; let raw = 0; let other = 0;
+  for (let i = 0; i < archRuns.length; i++) {
+    const r = archRuns[i];
+    chain += r.kosChain; spike += r.kosSpike; edge += r.kosEdge; raw += r.kosRaw; other += r.kosOther;
+  }
+  const kos = chain + spike + edge + raw + other;
+  const share = kos > 0 ? (chain + spike + edge) / kos : 0;
+  // Kill speed stays a separate assertion, against the standing dummy.
+  const firsts: number[] = [];
+  const parts: string[] = [];
+  for (let st = 0; st < STAGES.length; st++) {
+    for (let i = 0; i < KR_SEEDS.length; i++) {
+      const r = runKillRoute(STAGES[st], KR_SEEDS[i]);
+      killRouteRuns.push(r);
+      firsts.push(r.koFrames.length > 0 ? r.koFrames[0] : KILL_ALL_CAP);
+      parts.push(`${r.stage} ${r.seed} ${r.koFrames.length > 0 ? r.koFrames[0] : -1}f`);
+    }
+  }
+  const med = median(firsts);
+  killBreakdown = `${kos} KOs: chain ${chain}, spike ${spike}, edgeguard ${edge}, single hit on stage ${raw}, no hit ${other}`;
+  return {
+    name: `aq. against the archetypes at least ${KR_ROUTED_SHARE * 100}% of KOs come from a 2+ hit true combo, a spike or an edgeguard hit; against a standing dummy the median first KO is under ${KR_FIRST_MEDIAN / 60} s (both stages)`,
+    pass: share >= KR_ROUTED_SHARE && med < KR_FIRST_MEDIAN,
+    detail: `routed ${(share * 100).toFixed(0)}% (${killBreakdown}) | standing dummy median first KO ${med}f (${(med / 60).toFixed(1)}s): ${parts.join(', ')}`,
+  };
+}
+
+let killBreakdown = '';
+
+// Budget with a host warm-up ------------------------------------------------
+
+const E6_MEAN_MS = 0.3;
+const E6_P99_MS = 4;
+const E6_FIRST_MS = 40;
+
+interface BudgetRun { stage: string; mean: number; p99: number; first: number; calls: number }
+const budgetRuns: BudgetRun[] = [];
+
+function runBudget(stage: string): BudgetRun {
+  const cfg = cpuConfig(10, 9, 17, 9, undefined, stage);
+  const state = createGameState(cfg);
+  const rand = () => nextFloat(state.rng);
+  // The host warms the level 10 before frame 0, as main.ts may; the first real call is timed after it.
+  warmAevalmere(state.config);
+  const inputs: InputFrame[] = [
+    { held: 0, pressed: 0, released: 0, direct: 0 },
+    { held: 0, pressed: 0, released: 0, direct: 0 },
+  ];
+  const times: number[] = [];
+  for (let frame = 0; frame < L10_BUDGET_FRAMES; frame++) {
+    for (let s = 0; s < 2; s++) {
+      const t0 = performance.now();
+      const o = cpuInput(state, s, s === 0 ? 10 : 9, rand);
+      if (s === 0) times.push(performance.now() - t0);
+      inputs[s].held = o.held; inputs[s].pressed = o.pressed; inputs[s].released = o.released; inputs[s].direct = o.direct;
+    }
+    stepGame(state, inputs);
+    if (state.finished) break;
+  }
+  const first = times[0];
+  let sum = 0;
+  for (let i = 0; i < times.length; i++) sum += times[i];
+  const sorted = times.slice().sort((a, b) => a - b);
+  return { stage, mean: sum / times.length, p99: sorted[Math.floor(sorted.length * 0.99)], first, calls: times.length };
+}
+
+function testE6Budget(): TestResult {
+  let pass = true;
+  const parts: string[] = [];
+  for (let st = 0; st < STAGES.length; st++) {
+    const r = runBudget(STAGES[st]);
+    budgetRuns.push(r);
+    parts.push(`${r.stage} mean ${r.mean.toFixed(3)} ms p99 ${r.p99.toFixed(2)} ms first ${r.first.toFixed(2)} ms over ${r.calls} calls`);
+    if (!(r.mean < E6_MEAN_MS && r.p99 < E6_P99_MS && r.first < E6_FIRST_MS)) pass = false;
+  }
+  return {
+    name: `ar. level 10 cpuInput: mean under ${E6_MEAN_MS} ms, p99 under ${E6_P99_MS} ms, first call after a host warm-up under ${E6_FIRST_MS} ms, both stages`,
+    pass,
+    detail: parts.join(' | '),
+  };
+}
+
+// Determinism with the profile store ----------------------------------------
+
+function testDeterminismWithStore(): TestResult {
+  // Empty store, twice.
+  const a = runArchMatch('roller', 'hearthmoor', 23, 0, new MemoryProfileStore(), false);
+  const b = runArchMatch('roller', 'hearthmoor', 23, 0, new MemoryProfileStore(), false);
+  // A fixed profile: learned once, then copied into two fresh stores.
+  const seedStore = new MemoryProfileStore();
+  runArchMatch('turtle', 'tidegate', 41, 1, seedStore, false);
+  const key = PROFILE_PREFIX + ARCH_NAMES.turtle;
+  const text = seedStore.load(key);
+  const s1 = new MemoryProfileStore();
+  const s2 = new MemoryProfileStore();
+  if (text !== null) { s1.save(key, text); s2.save(key, text); }
+  const c = runArchMatch('turtle', 'tidegate', 17, 1, s1, false);
+  const d = runArchMatch('turtle', 'tidegate', 17, 1, s2, false);
+  const same1 = a.finalJson === b.finalJson;
+  const same2 = c.finalJson === d.finalJson && text !== null;
+  return {
+    name: 'as. level 10 against a human slot: the same seed gives an identical final state, with an empty store and with a fixed profile',
+    pass: same1 && same2,
+    detail: `empty store ${same1 ? 'identical' : 'DIVERGED'} (${a.frames}f), fixed profile ${same2 ? 'identical' : 'DIVERGED'} (${c.frames}f, profile ${text === null ? 'missing' : `${text.length} chars`})`,
+  };
+}
+
+/** The wave 2 level 10 gates alone (am to as), for a quick run while tuning. */
+export function runAevalmereWave2Tests(which: string[]): TestResult[] {
+  const all: Record<string, () => TestResult> = {
+    am: testL10StrictBothStages, an: testArchetypesNoLoss, ao: testArchetypePrediction, ap: testProfilePersistence,
+    aq: testKillRouting, ar: testE6Budget, as: testDeterminismWithStore,
+  };
+  const out: TestResult[] = [];
+  for (let i = 0; i < which.length; i++) { const f = all[which[i]]; if (f !== undefined) out.push(f()); }
+  return out;
+}
+
 export function runAiSelfTest(): TestResult[] {
   const a = testL1v1();
   const b = testMatrix();
@@ -2317,7 +3033,15 @@ export function runAiSelfTest(): TestResult[] {
   const aj = testL10ReactionFloor();
   const ak = testTeams();
   const al = testL10KillSpeed();
-  return [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v, w, x, y, z, aa, ab, ac, ad, ae, af, ag, ah, ai, aj, ak, al];
+  const am = testL10StrictBothStages();
+  const an = testArchetypesNoLoss();
+  const ao = testArchetypePrediction();
+  const ap = testProfilePersistence();
+  const aq = testKillRouting();
+  const ar = testE6Budget();
+  const as = testDeterminismWithStore();
+  return [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v, w, x, y, z, aa, ab, ac, ad, ae, af, ag, ah, ai, aj, ak, al,
+    am, an, ao, ap, aq, ar, as];
 }
 
 if (typeof process !== 'undefined' && process.argv[1] && process.argv[1].endsWith('aitest.ts')) {
@@ -2361,14 +3085,51 @@ if (typeof process !== 'undefined' && process.argv[1] && process.argv[1].endsWit
   process.stdout.write(`  kill speed against a level 0 (${KILL_STOCKS} stocks):\n`);
   for (let i = 0; i < killRuns.length; i++) process.stdout.write(`${killLine(killRuns[i])}\n`);
   process.stdout.write(`  combo table: ${combo.entries} starter entries, ${combo.chains3} open 3+ hit chains,` +
-    ` ${combo.chains4} open 4-hit chains, ${combo.kills} end in a KO; e.g. ${combo.example}\n\n`);
+    ` ${combo.chains4} open 4-hit chains, ${combo.kills} end in a KO; e.g. ${combo.example}\n`);
+  for (let i = 0; i < STAGES.length; i++) {
+    const cs = aevalmereComboSummary(STAGES[i]);
+    process.stdout.write(`  ${STAGES[i]} combo table: ${cs.entries} entries, ${cs.chains3} 3+ hit, ${cs.chains4} 4-hit, ${cs.kills} KO chains\n`);
+    process.stdout.write(`  ${STAGES[i]} kill confirms (lowest bracket): ${aevalmereKillConfirms(STAGES[i])}\n`);
+  }
+  process.stdout.write('\nlevel 10 vs level 9, strict, both stages:\n');
+  for (let i = 0; i < strictRuns.length; i++) {
+    const m = strictRuns[i];
+    process.stdout.write(`  ${m.stage}: won ${m.wins}/${m.matches} stocks lost ${m.stocksLost} sd ${m.sd} avg ${Math.round(m.frames / m.matches)}f\n`);
+  }
+  process.stdout.write(`\nlevel 10 vs scripted archetypes (${ARCH_SEEDS.length} seeds, ${ARCH_STOCKS} stocks, fresh profile store each):\n`);
+  for (let st = 0; st < STAGES.length; st++) for (let k = 0; k < ARCHETYPES.length; k++) process.stdout.write(`${archLine(ARCHETYPES[k], STAGES[st])}\n`);
+  process.stdout.write('\nprofile transfer (predictor accuracy over the first 15 s, empty store -> saved profile):\n');
+  for (let k = 0; k < ARCHETYPES.length; k++) {
+    const ps = profilePairs.filter((r) => r.kind === ARCHETYPES[k]);
+    process.stdout.write(`  ${ARCHETYPES[k]}: ${ps.map((r) => `${(r.empty * 100).toFixed(0)}->${(r.loaded * 100).toFixed(0)}`).join(' ')}\n`);
+  }
+  process.stdout.write(`\nkill routing vs the archetypes: ${killBreakdown}\n`);
+  process.stdout.write('kill speed vs a standing dummy:\n');
+  for (let i = 0; i < killRouteRuns.length; i++) {
+    const r = killRouteRuns[i];
+    process.stdout.write(`  ${r.stage} seed ${r.seed}: KOs ${r.koFrames.join('/')}\n`);
+  }
+  process.stdout.write('\nbudget with a host warm-up:\n');
+  for (let i = 0; i < budgetRuns.length; i++) {
+    const r = budgetRuns[i];
+    process.stdout.write(`  ${r.stage}: mean ${r.mean.toFixed(3)} ms, p99 ${r.p99.toFixed(2)} ms, first call ${r.first.toFixed(2)} ms, ${r.calls} calls\n`);
+  }
+  process.stdout.write('\n');
 
   let passed = 0;
+  let hard = 0;
   for (let i = 0; i < results.length; i++) {
     const r = results[i];
+    if (r.info === true) {
+      process.stdout.write(`INFO ${r.name}: ${r.detail}\n`);
+      continue;
+    }
+    hard++;
     if (r.pass) passed++;
     process.stdout.write(`${r.pass ? 'PASS' : 'FAIL'} ${r.name}: ${r.detail}\n`);
   }
-  process.stdout.write(`${passed}/${results.length} pass\n`);
-  if (passed !== results.length) process.exitCode = 1;
+  process.stdout.write(`${passed}/${hard} pass (${results.length - hard} info)\n`);
+  if (passed !== hard) process.exitCode = 1;
 }
+
+

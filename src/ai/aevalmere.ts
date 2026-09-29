@@ -21,14 +21,17 @@
  */
 import type { FighterState, GameState, InputFrame, MatchConfig, MoveDef, MoveId, ProjectileState, Rect } from '../core/types';
 import { Btn, DIRECT_CODES, MAX_PLAYERS } from '../core/types';
-import { TUNING } from '../core/constants';
+import { AIR_DODGE, TUNING } from '../core/constants';
 import { CHARACTER_DEFS } from '../characters/registry';
 import { grabKitOf } from '../characters/common/grabkit';
 import { STAGE_DEFS } from '../stages/registry';
 import { cloneGameState, createGameState, stepGame } from '../sim';
 import { canFinalSmash } from '../sim/finalsmash';
+import { projectileChargePower } from '../sim/hits';
 import { isLedgeAction } from '../sim/ledge';
+import { castDelay } from '../sim/moves';
 import { sameTeam, type SimFighter } from '../sim/state';
+import { defaultProfileStore, profileKeyFor, type ProfileStore } from './profile';
 
 // ---------------------------------------------------------------------------
 // Tuning of the brain itself
@@ -68,7 +71,7 @@ const LAMBDA_READ = 0.3;
 /** Bonus for keeping the plan already running, so equal options never flicker frame to frame. */
 const CONTINUITY = 1.5;
 /** Bonus for a follow-up the precomputed combo table suggests, on top of what the rollout finds. */
-const TABLE_BONUS = 4;
+const TABLE_BONUS = 6;
 /**
  * Staleness: every decision decays each plan's recent-use count, and a commitment already used a lot
  * lately scores this much less per use (projectiles twice as much). A top player mixes up; a script
@@ -186,11 +189,42 @@ function learnKeys(src: GameState): void {
     }
   }
   keysLearned = true;
+  fastTried = false;
+}
+
+/**
+ * A copier specialised to the learned field list: every property read and written by a constant
+ * name, so each access is a monomorphic inline cache instead of a keyed lookup. It is the hottest
+ * function of a rollout (one fighter copy per fighter per rollout), and this makes it several times
+ * cheaper. Built with the Function constructor; where a page's content security policy forbids
+ * that, the generic loop below is used instead and the only cost is speed.
+ */
+let fastFighterCopy: ((s: Rec, d: Rec) => void) | null = null;
+let fastTried = false;
+function buildFastCopy(): void {
+  fastTried = true;
+  const q = (k: string): string => JSON.stringify(k);
+  let body = '';
+  for (let i = 0; i < fPrim.length; i++) body += `d[${q(fPrim[i])}]=s[${q(fPrim[i])}];\n`;
+  for (let i = 0; i < fObj.length; i++) {
+    body += `{const so=s[${q(fObj[i])}],dd=d[${q(fObj[i])}];\n`;
+    const sub = fObjSub[i];
+    for (let j = 0; j < sub.length; j++) body += `dd[${q(sub[j])}]=so[${q(sub[j])}];\n`;
+    body += '}\n';
+  }
+  try {
+    fastFighterCopy = new Function('s', 'd', body) as (s: Rec, d: Rec) => void;
+  } catch (err) {
+    void err;   // eval blocked by a content security policy: keep the generic copy
+    fastFighterCopy = null;
+  }
 }
 
 function copyFighterInto(src: FighterState, dst: FighterState): void {
   const s = src as unknown as Rec;
   const d = dst as unknown as Rec;
+  if (!fastTried) buildFastCopy();
+  if (fastFighterCopy !== null) { fastFighterCopy(s, d); return; }
   for (let i = 0; i < fPrim.length; i++) { const k = fPrim[i]; d[k] = s[k]; }
   for (let i = 0; i < fObj.length; i++) {
     const k = fObj[i];
@@ -258,25 +292,50 @@ export function copyGameStateInto(src: GameState, dst: GameState): void {
 // Stage reading
 // ---------------------------------------------------------------------------
 
-interface StageInfo { minX: number; maxX: number; topY: number; cx: number }
+/** Solid ground: its extent, its top (the walk line) and its underside (botY), from the live StageDef. */
+interface StageInfo { minX: number; maxX: number; topY: number; botY: number; cx: number }
 const stageCache = new Map<string, StageInfo>();
 
+/**
+ * The solid ground of a stage, read from the live StageDef on every call (a few platforms, no
+ * allocation after the first call per stage), so a stage edited or swapped at runtime is seen at
+ * once and nothing here assumes Tidegate.
+ */
 function stageInfo(stageId: string): StageInfo {
-  const hit = stageCache.get(stageId);
-  if (hit) return hit;
+  let info = stageCache.get(stageId);
+  if (info === undefined) {
+    info = { minX: -180, maxX: 180, topY: 0, botY: 24, cx: 0 };
+    stageCache.set(stageId, info);
+  }
   const st = STAGE_DEFS[stageId];
-  let minX = -180; let maxX = 180; let topY = 0; let found = false;
+  let minX = -180; let maxX = 180; let topY = 0; let botY = 24; let found = false;
   if (st) {
     for (let i = 0; i < st.platforms.length; i++) {
       const p = st.platforms[i];
       if (!p.solid) continue;
-      if (!found) { minX = p.x; maxX = p.x + p.w; topY = p.y; found = true; }
-      else { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x + p.w); topY = Math.min(topY, p.y); }
+      if (!found) { minX = p.x; maxX = p.x + p.w; topY = p.y; botY = p.y + p.h; found = true; }
+      else { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x + p.w); topY = Math.min(topY, p.y); botY = Math.max(botY, p.y + p.h); }
     }
   }
-  const info: StageInfo = { minX, maxX, topY, cx: (minX + maxX) / 2 };
-  stageCache.set(stageId, info);
+  info.minX = minX; info.maxX = maxX; info.topY = topY; info.botY = botY; info.cx = (minX + maxX) / 2;
   return info;
+}
+
+/** Horizontal margin past a ledge that counts as clear of the stage's underside. */
+const UNDER_CLEAR = 20;
+
+/** True when (x, y) is below the solid stage's underside and not yet clear of its edges. */
+function underStage(x: number, y: number, si: StageInfo): boolean {
+  return y > si.botY && x > si.minX - UNDER_CLEAR && x < si.maxX + UNDER_CLEAR;
+}
+
+/**
+ * Which way "home" is for a recovery: toward the stage centre, except from under the stage (a thin
+ * slab on both arenas), where the way home is first out past the nearer edge and then up.
+ */
+function homeSign(x: number, y: number, si: StageInfo): number {
+  if (underStage(x, y, si)) return x < si.cx ? -1 : 1;
+  return x < si.cx ? 1 : -1;
 }
 
 /** The blast rect, read live from the stage def so a retuned blast zone is seen at once. */
@@ -318,7 +377,8 @@ function busyFrames(f: FighterState): number {
     case 'attack': {
       if (f.moveId === null) return 0;
       const mv = CHARACTER_DEFS[f.charId].moves[f.moveId];
-      const free = mv.iasa === undefined ? mv.totalFrames : mv.iasa;
+      // A charged cast (the orb) adds its chargeCastFrames share to the move's length.
+      const free = (mv.iasa === undefined ? mv.totalFrames : mv.iasa) + castDelay(sf, mv);
       let left = Math.max(0, free - f.actionFrame);
       if (sf.charging) left += 4;
       if (!f.onGround && mv.landingLag !== undefined) left = Math.max(left, 6);
@@ -331,7 +391,7 @@ function busyFrames(f: FighterState): number {
     case 'jumpsquat': return 3;
     case 'spotDodge': return Math.max(0, 22 - f.actionFrame);
     case 'roll': return Math.max(0, 24 - f.actionFrame);
-    case 'airDodge': return Math.max(0, 30 - f.actionFrame);
+    case 'airDodge': return Math.max(0, AIR_DODGE.total - f.actionFrame);
     case 'airHelpless': return 30;
     case 'grab': return Math.max(0, 30 - f.actionFrame);
     case 'grabbed': return 30;
@@ -363,6 +423,11 @@ function actionableNow(f: FighterState): boolean {
   }
 }
 
+/** One air dodge per airborne period: spent until landing, a ledge grab or a respawn (a refused press is consumed). */
+function canAirDodge(f: FighterState): boolean {
+  return !(f as SimFighter).airDodgeUsed;
+}
+
 function launched(f: FighterState): boolean {
   return (f.action === 'hitstun' || f.action === 'tumble') && f.hitstun > 0;
 }
@@ -390,7 +455,9 @@ function recoverable(f: FighterState, si: StageInfo): number {
   const jumpRise = (def.doubleJumpVel * def.doubleJumpVel) / (2 * def.gravity);
   const rise = f.jumpsLeft * jumpRise + (usUsed ? 0 : 85);
   const below = f.y - (si.topY + 40);
-  const out = f.x < si.minX ? si.minX - f.x : f.x > si.maxX ? f.x - si.maxX : 0;
+  let out = f.x < si.minX ? si.minX - f.x : f.x > si.maxX ? f.x - si.maxX : 0;
+  // From under the stage the way back first runs out past the nearer edge.
+  if (underStage(f.x, f.y, si)) out = Math.min(f.x - si.minX, si.maxX - f.x) + UNDER_CLEAR * 2;
   const air = f.jumpsLeft * 34 + (usUsed ? 0 : 30) + 20 + Math.max(0, (si.topY + 200 - f.y) / 4);
   const reachX = def.airSpeed * air + 24;
   // Moving away fast eats into the horizontal budget.
@@ -534,6 +601,7 @@ const F_MOVE = 8;       // a safe movement option the humanizer may swap in
 const F_PROJ = 16;      // a projectile: judged over a longer horizon
 const F_EG = 32;        // leaves the stage on purpose: only taken when the rollout gets back
 const F_STALE = 64;     // a dodge: not an attack, but it goes stale like one so two careful CPUs cannot dodge forever
+const F_SPIKE = 128;    // a spike route: taken at once when it KOs in every reply and we get back
 
 const PLAN_NAME: string[] = [];
 const PLAN_MIN: number[] = [];
@@ -565,7 +633,12 @@ const P_DASHATK = defPlan('dashatk', 2, F_ATTACK, 34);
 const P_GRAB = defPlan('grab', 2, F_ATTACK, 30);
 const P_DASHGRAB = defPlan('dashGrab', 5, F_ATTACK, 36);
 const P_NSPEC = defPlan('orb', 2, F_ATTACK | F_PROJ, 56);
-const P_SSPEC = defPlan('crescent', 2, F_ATTACK | F_PROJ, 56);
+// Full charge: 60 frames of held Special, then the throw on frame 27 of the 56-frame cast and a
+// 9.5 px/frame bullet. Rooted for about 87 frames, so it is offered at long range or as a ledge
+// timing tool, and the rollout horizon covers the charge, the cast and the flight.
+const P_NSPEC_FULL = defPlan('orbFull', 2, F_ATTACK | F_PROJ, 104);
+// The crescent now flies out 202 px over 57 frames before it turns back: the horizon covers it.
+const P_SSPEC = defPlan('crescent', 2, F_ATTACK | F_PROJ, 72);
 const P_DSPEC = defPlan('whirlpool', 2, F_ATTACK, 40);
 const P_USPEC_G = defPlan('geyser', 2, F_ATTACK | F_TAIL, 40);
 const P_SH_NAIR = defPlan('shNair', 3, F_ATTACK | F_TAIL, 34);
@@ -592,8 +665,12 @@ const P_PLATDROP = defPlan('platformDrop', 2, F_TAIL, 22);
 const P_EG_HOG = defPlan('ledgeHog', 1, F_INTR | F_TAIL | F_EG, 50);
 const P_EG_BAIR = defPlan('egBair', 12, F_ATTACK | F_TAIL | F_EG, 56);
 const P_EG_FAIR = defPlan('egFair', 12, F_ATTACK | F_TAIL | F_EG, 56);
-const P_EG_DAIR = defPlan('egDair', 12, F_ATTACK | F_TAIL | F_EG, 56);
+const P_EG_DAIR = defPlan('egDair', 12, F_ATTACK | F_TAIL | F_EG | F_SPIKE, 80);
 const P_EG_NAIR = defPlan('egNair', 12, F_ATTACK | F_TAIL | F_EG, 56);
+// Spike routes: carry the victim with a fair or bair, then dair it down; the recovery policy
+// takes over once the dair is out. Long horizons, so the KO and our way back both fit.
+const P_EG_FAIR_DAIR = defPlan('egFairDair', 44, F_ATTACK | F_TAIL | F_EG | F_SPIKE, 92);
+const P_EG_BAIR_DAIR = defPlan('egBairDair', 44, F_ATTACK | F_TAIL | F_EG | F_SPIKE, 92);
 // Out of shield
 const P_OOS_GRAB = defPlan('oosGrab', 2, F_ATTACK, 30);
 const P_OOS_USMASH = defPlan('oosUsmash', 2, F_ATTACK, 38);
@@ -630,7 +707,8 @@ const P_A_AD_B = defPlan('airDodgeOut', 2, F_TAIL, 34);
 const P_A_AD_S = defPlan('airDodgeHome', 2, F_TAIL, 34);
 const P_A_USPEC = defPlan('airGeyser', 2, F_ATTACK | F_TAIL, 44);
 const P_A_NSPEC = defPlan('airOrb', 2, F_ATTACK | F_PROJ | F_TAIL, 56);
-const P_A_SSPEC = defPlan('airCrescent', 2, F_ATTACK | F_PROJ | F_TAIL, 56);
+const P_A_SSPEC = defPlan('airCrescent', 2, F_ATTACK | F_PROJ | F_TAIL, 72);
+const P_A_DAIR_SPIKE = defPlan('dairSpike', 18, F_ATTACK | F_TAIL | F_EG | F_SPIKE, 80);
 const P_REC_EARLY = defPlan('recoverEarly', 1, F_INTR, 60);
 const P_REC_MID = defPlan('recover', 1, F_INTR, 60);
 const P_REC_LATE = defPlan('recoverLate', 1, F_INTR, 60);
@@ -643,6 +721,7 @@ const P_L_ROLL = defPlan('ledgeRoll', 2, 0, 40);
 const P_L_JUMP = defPlan('ledgeJump', 2, F_TAIL, 40);
 const P_L_JUMP_FAIR = defPlan('ledgeJumpFair', 6, F_ATTACK | F_TAIL, 44);
 const P_L_DROP_FAIR = defPlan('ledgeDropFair', 8, F_ATTACK | F_TAIL, 48);
+const P_L_DROP_DAIR = defPlan('ledgeDropDair', 18, F_ATTACK | F_TAIL | F_SPIKE, 80);
 // Downed
 const P_D_UP = defPlan('getUp', 2, 0, 40);
 const P_D_ATK = defPlan('getUpAttack', 2, F_ATTACK, 40);
@@ -679,7 +758,7 @@ export function aevalmerePlanName(id: number): string {
 let cPrev = 0;          // held bits of the previous frame on this fighter
 let cDir = 1;           // toward the opponent, fixed when the plan was chosen
 let cHome = 1;          // toward the stage centre, fixed when the plan was chosen
-let cSi: StageInfo = { minX: -180, maxX: 180, topY: 0, cx: 0 };
+let cSi: StageInfo = { minX: -180, maxX: 180, topY: 0, botY: 24, cx: 0 };
 let sHeld = 0;
 let sDirect = 0;
 
@@ -711,15 +790,21 @@ function recoverStep(f: FighterState, variant: number): void {
   const si = cSi;
   const out = f.x < si.minX ? si.minX - f.x : f.x > si.maxX ? f.x - si.maxX : 0;
   if (out === 0 && f.y <= si.topY) return;
-  const home = f.x < si.cx ? R : L;
+  const home = homeSign(f.x, f.y, si) > 0 ? R : L;
   sHeld = (sHeld & ~(L | R)) | home;
   const below = f.y - si.topY;
   if (f.action !== 'air') return;
+  // Under the stage: drift out first. A jump is only spent to stop a deep fall, and the geyser
+  // (which would rise into the underside) waits until we are clear of the edge.
+  if (underStage(f.x, f.y, si)) {
+    if (f.jumpsLeft > 0 && f.vy > 1 && f.y > si.botY + 90) sHeld |= press(J);
+    return;
+  }
   if (f.jumpsLeft > 0 && f.vy > -0.5 && below > REC_JUMP_AT[variant]) {
     sHeld |= press(J);
     return;
   }
-  if (variant === 3 && f.jumpsLeft === 0 && out < 70 && below > -20 && below < 40) {
+  if (variant === 3 && f.jumpsLeft === 0 && canAirDodge(f) && out < 70 && below > -20 && below < 40) {
     sDirect = C_DIRAD;
     sHeld |= U;
     return;
@@ -783,6 +868,7 @@ function planStep(pid: number, t: number, f: FighterState): void {
     case P_GRAB: if (t === 0) sHeld = press(G); break;
     case P_DASHGRAB: if (t < 3) sHeld = safeDir(T, f); else if (t === 3) sHeld = T | press(G); break;
     case P_NSPEC: if (t === 0) sDirect = C_NSPEC; break;
+    case P_NSPEC_FULL: if (t === 0) sDirect = C_NSPEC; if (t < 62) sHeld |= SP; break;
     case P_SSPEC: if (t === 0) { sDirect = C_SSPEC; sHeld = T; } break;
     case P_DSPEC: if (t === 0) sDirect = C_DSPEC; break;
     case P_USPEC_G: if (t === 0) sDirect = C_USPEC; sHeld |= T; break;
@@ -815,6 +901,15 @@ function planStep(pid: number, t: number, f: FighterState): void {
       const inBit = nearL ? R : L;
       if (f.onGround && Math.abs(f.x - edgeX) > 1) sHeld = safeDir(outBit, f);
       else if (!f.onGround) sHeld = inBit;
+      break;
+    }
+    case P_EG_FAIR_DAIR: case P_EG_BAIR_DAIR: {
+      // Hop off, meet them with the fair (or bair) on frame 6, then the dair once it is over.
+      const back = pid === P_EG_BAIR_DAIR;
+      if (f.onGround && t < 2) sHeld = press(J) | T;
+      else sHeld = back ? B : T;
+      if (t === 6) sDirect = back ? C_BAIR : C_FAIR;
+      else if (t >= 37 && t <= 40 && f.action === 'air') sDirect = C_DAIR;
       break;
     }
     case P_EG_BAIR: case P_EG_FAIR: case P_EG_DAIR: case P_EG_NAIR: {
@@ -854,12 +949,13 @@ function planStep(pid: number, t: number, f: FighterState): void {
     case P_A_DJ_UAIR: jumpAerial(t, f, C_UAIR, T); break;
     case P_A_DJ_NAIR: jumpAerial(t, f, C_NAIR, T); break;
     case P_A_DJ_BAIR: jumpAerial(t, f, C_BAIR, B); break;
-    case P_A_AD_F: if (t === 0) sDirect = C_DIRAD; sHeld = T; break;
-    case P_A_AD_B: if (t === 0) sDirect = C_DIRAD; sHeld = B; break;
-    case P_A_AD_S: if (t === 0) sDirect = C_DIRAD; sHeld = H | (t === 0 ? U : 0); break;
+    case P_A_AD_F: if (t === 0 && canAirDodge(f)) sDirect = C_DIRAD; sHeld = T; break;
+    case P_A_AD_B: if (t === 0 && canAirDodge(f)) sDirect = C_DIRAD; sHeld = B; break;
+    case P_A_AD_S: if (t === 0 && canAirDodge(f)) sDirect = C_DIRAD; sHeld = H | (t === 0 ? U : 0); break;
     case P_A_USPEC: if (t === 0) sDirect = C_USPEC; sHeld = offstage(f, cSi) ? H : T; break;
     case P_A_NSPEC: if (t === 0) sDirect = C_NSPEC; break;
     case P_A_SSPEC: if (t === 0) { sDirect = C_SSPEC; sHeld = T; } break;
+    case P_A_DAIR_SPIKE: if (t === 0) sDirect = C_DAIR; if (t < 16) sHeld = T; break;
     case P_REC_EARLY: recoverStep(f, 0); break;
     case P_REC_MID: recoverStep(f, 1); break;
     case P_REC_LATE: recoverStep(f, 2); break;
@@ -879,6 +975,13 @@ function planStep(pid: number, t: number, f: FighterState): void {
       if (t === 6) sDirect = C_FAIR;
       break;
     }
+    case P_L_DROP_DAIR: {
+      // Let go of the ledge and dair straight down onto whoever is recovering under it.
+      const away = f.facing === 1 ? L : R;
+      if (t === 0) sHeld = press(away);
+      else if (t === 3) sDirect = C_DAIR;
+      break;
+    }
     case P_D_UP: if (t === 0) sHeld = press(U); break;
     case P_D_ATK: if (t === 0) sDirect = C_GUATK; break;
     case P_D_ROLL_L: if (t === 0) sHeld = press(L); break;
@@ -894,7 +997,7 @@ function planStep(pid: number, t: number, f: FighterState): void {
     case P_X_STAY: break;
     case P_X_DJ_S: if (t === 0) sHeld = press(G); else if (t === 2) sHeld = press(J) | H; else sHeld = H; break;
     case P_X_DJ_B: if (t === 0) sHeld = press(G); else if (t === 2) sHeld = press(J) | B; else sHeld = B; break;
-    case P_X_AD_S: if (t === 0) { sDirect = C_DIRAD; sHeld = H | U; } else sHeld = H; break;
+    case P_X_AD_S: if (t === 0 && canAirDodge(f)) { sDirect = C_DIRAD; sHeld = H | U; } else sHeld = H; break;
     case P_X_DRIFT_S: if (t === 0) sHeld = press(G); else sHeld = H; break;
     case P_X_FF: if (t === 0) sHeld = press(G); else if (f.vy > 0 && !f.fastFalling) sHeld = press(D); break;
     case P_X_NAIR: if (t === 0) sHeld = press(G); else sHeld = B; if (t === 2) sDirect = C_NAIR; break;
@@ -927,6 +1030,41 @@ const OM_D_TO = 15;     // rolls toward us
 const OM_D_AWAY = 16;   // rolls away
 const OM_R_TO = 17;     // rolls toward us (out of a shield, usually)
 const OM_R_AWAY = 18;   // rolls away
+// Reply models the predictor asks for by name (E2): one per predicted action class.
+const OM_USE = 19;      // uses one particular move (its direct code is the model's arg): closes in, fires in reach
+const OM_GRAB = 20;     // runs in and grabs
+const OM_SPOT = 21;     // spot dodges as we come close
+const OM_JUMP = 22;     // jumps toward us
+const OM_AD = 23;       // air dodges away (hopping first when grounded)
+const OM_IN = 24;       // moves toward us
+const OM_OUT = 25;      // moves away
+const OM_REC_E = 26;    // off the stage: recovers with an early double jump
+const OM_REC_L = 27;    // recovers low, saving the up special for last
+const OM_REC_AD = 28;   // recovers with an air dodge onto the ledge
+
+/**
+ * Per direct move code, for the OM_USE reply: horizontal reach of its farthest hitbox edge (for a
+ * projectile, the distance it is thrown from), whether it is aerial-only, and whether it is a shot.
+ */
+const USE_REACH = new Float64Array(CODES.length + 1);
+const USE_AIR = new Uint8Array(CODES.length + 1);
+const USE_PROJ = new Uint8Array(CODES.length + 1);
+(function fillUseTables(): void {
+  const def = CHARACTER_DEFS.aeval;
+  for (let c = 1; c <= CODES.length; c++) {
+    const mv = def.moves[CODES[c - 1] as MoveId];
+    if (!mv) continue;
+    let reach = 0;
+    for (let i = 0; i < mv.hitboxes.length; i++) {
+      const hb = mv.hitboxes[i];
+      reach = Math.max(reach, Math.abs(hb.x) + hb.r);
+    }
+    const shot = mv.projectiles !== undefined && mv.hitboxes.length === 0;
+    USE_REACH[c] = shot ? 200 : reach;
+    USE_AIR[c] = mv.airOnly === true ? 1 : 0;
+    USE_PROJ[c] = shot ? 1 : 0;
+  }
+})();
 
 let oPrev = 0;
 let oHeld = 0;
@@ -940,15 +1078,52 @@ function oppActionable(o: FighterState): boolean {
   return actionableNow(o) && o.action !== 'ledgeHang' && o.action !== 'downed' && o.action !== 'grabHold';
 }
 
-function oppStep(model: number, t: number, o: FighterState, m: FighterState): void {
+function oppStep(model: number, arg: number, t: number, o: FighterState, m: FighterState): void {
   oHeld = 0;
   oDirect = 0;
   const toMe = m.x < o.x ? L : R;
   const away = m.x < o.x ? R : L;
   const adx = Math.abs(m.x - o.x);
   const dy = m.y - o.y;
-  if (model !== OM_CONT && offstage(o, cSi)) model = OM_REC;
+  if (model !== OM_CONT && model !== OM_REC_E && model !== OM_REC_L && model !== OM_REC_AD && offstage(o, cSi)) model = OM_REC;
   switch (model) {
+    case OM_USE: {
+      if (!oppActionable(o)) return;
+      const faceIn = (o.facing === 1) === (m.x > o.x);
+      if (USE_PROJ[arg] === 1) {
+        if (faceIn && adx < 260) oDirect = arg; else oHeld = toMe;
+        return;
+      }
+      oHeld = toMe;
+      if (USE_AIR[arg] === 1 && o.onGround) {
+        if (adx < USE_REACH[arg] + 50 && t < 30) oHeld |= oPress(J);
+        return;
+      }
+      if (adx <= USE_REACH[arg] + 8 && Math.abs(dy) < 56) oDirect = arg;
+      return;
+    }
+    case OM_GRAB: {
+      if (!oppActionable(o)) return;
+      oHeld = toMe;
+      const kit = grabKitOf(CHARACTER_DEFS[o.charId]);
+      if (o.onGround && adx < kit.stand.x + kit.stand.r + 13 && Math.abs(dy) < 30) oHeld |= oPress(G);
+      return;
+    }
+    case OM_SPOT:
+      if (o.onGround && oppActionable(o) && (t === 0 || adx < 60)) oDirect = C_SPOT;
+      return;
+    case OM_JUMP:
+      if (o.onGround) { if (oppActionable(o) && t < 5) oHeld = J | toMe; else oHeld = toMe; return; }
+      oHeld = toMe;
+      if (t === 0 && o.jumpsLeft > 0 && o.action === 'air') oHeld |= oPress(J);
+      return;
+    case OM_AD:
+      if (o.onGround) { if (t < 2 && oppActionable(o)) oHeld = oPress(J); return; }
+      oHeld = away;
+      if (o.action === 'air' && t < 12 && canAirDodge(o)) oDirect = C_DIRAD;
+      return;
+    case OM_IN: oHeld = toMe; return;
+    case OM_OUT: oHeld = away; return;
     case OM_CONT:
       oHeld = oCont;
       if (offstage(o, cSi)) model = OM_REC; else return;
@@ -960,7 +1135,7 @@ function oppStep(model: number, t: number, o: FighterState, m: FighterState): vo
         if (o.action === 'shield' && adx < kit.stand.x + kit.stand.r + 13 && Math.abs(dy) < 30 && m.invuln === 0) {
           oHeld |= oPress(A);
         }
-      } else if (t === 0 && oppActionable(o)) {
+      } else if (t === 0 && oppActionable(o) && canAirDodge(o)) {
         oDirect = C_DIRAD;
         oHeld = away;
       } else {
@@ -970,6 +1145,8 @@ function oppStep(model: number, t: number, o: FighterState, m: FighterState): vo
     case OM_ATK: {
       if (!oppActionable(o) && o.action !== 'shield') { oHeld = 0; return; }
       if (o.onGround) {
+        // We are off the stage within reach: it hops off after us (an edgeguard, or a footstool).
+        if (offstage(m, cSi) && adx < 110 && dy > -70 && o.action !== 'shield') { oHeld = toMe | oPress(J); return; }
         if (m.action === 'shield' && adx < 38 && Math.abs(dy) < 30) { oHeld = o.action === 'shield' ? SH | oPress(A) : oPress(G); return; }
         if (o.action === 'shield') { oHeld = 0; return; }
         if (dy < -40 && adx < 30) { oDirect = C_UTILT; return; }
@@ -980,6 +1157,8 @@ function oppStep(model: number, t: number, o: FighterState, m: FighterState): vo
         return;
       }
       oHeld = toMe;
+      // Falling onto our head: a footstool (a jump off it), the cheapest edgeguard there is.
+      if (o.vy > 0 && adx < 18 && dy > 36 && dy < 66) { oHeld |= oPress(J); return; }
       if (adx < 40 && Math.abs(dy) < 44) oDirect = dy < -24 ? C_UAIR : dy > 24 ? C_DAIR : C_NAIR;
       return;
     }
@@ -999,7 +1178,7 @@ function oppStep(model: number, t: number, o: FighterState, m: FighterState): vo
       return;
     }
     case OM_ESC:
-      if (o.action === 'tumble' && o.hitstun <= 0) { oDirect = C_DIRAD; oHeld = away; }
+      if (o.action === 'tumble' && o.hitstun <= 0 && canAirDodge(o)) { oDirect = C_DIRAD; oHeld = away; }
       else oHeld = away;
       return;
     case OM_D_UP: if (o.action === 'downed') oHeld = oPress(U); return;
@@ -1015,11 +1194,11 @@ function oppStep(model: number, t: number, o: FighterState, m: FighterState): vo
       return;
     default: break;
   }
-  if (model === OM_REC) {
+  if (model === OM_REC || model === OM_REC_E || model === OM_REC_L || model === OM_REC_AD) {
     // The same recovery policy the brain uses for itself, run on the opponent's fighter.
     const saveHeld = sHeld; const saveDirect = sDirect; const savePrev = cPrev;
     sHeld = 0; sDirect = 0; cPrev = oPrev;
-    recoverStep(o, 1);
+    recoverStep(o, model === OM_REC_E ? 0 : model === OM_REC_L ? 2 : model === OM_REC_AD ? 3 : 1);
     oHeld = sHeld; oDirect = sDirect;
     sHeld = saveHeld; sDirect = saveDirect; cPrev = savePrev;
   }
@@ -1037,6 +1216,503 @@ const HB_NEUTRAL = 4;   // next thing started in neutral or after landing: [atta
 const HB_SHIELD = 5;    // leaving a shield: [attack or grab, drop it, roll toward, roll away, jump]
 const HB_COUNT = 6;
 const HB_WIDTH = 5;
+
+// ---------------------------------------------------------------------------
+// Opponent model (E2): a situation-conditioned n-gram predictor of the opponent's next action,
+// the exploit tables beside it, and the per-player profile they are saved to.
+// ---------------------------------------------------------------------------
+
+/** Action classes. 0..18 are attacks, by MOVE_IDS index; the rest are every other answer. */
+const AC_GRAB = 19;
+const AC_SHIELD = 20;
+const AC_ROLL_TO = 21;
+const AC_ROLL_AWAY = 22;
+const AC_SPOT = 23;
+const AC_JUMP = 24;
+const AC_AD = 25;
+const AC_IN = 26;       // drifts, walks or dashes toward us
+const AC_OUT = 27;      // away from us
+const AC_NONE = 28;     // does nothing (or keeps hanging, keeps lying there)
+const AC_STAND = 29;    // climbs from the ledge, stands up, techs in place
+const NA = 30;
+/** "No previous action yet" in a context key. */
+const AC_START = NA;
+/** Opponent situation buckets. */
+const SIT_GROUND = 0;
+const SIT_AIR = 1;
+const SIT_SHIELD = 2;
+const SIT_LAUNCHED = 3;
+const SIT_LEDGE = 4;
+const SIT_DOWN = 5;
+const SIT_OFF = 6;
+const N_SIT = 7;
+/** Hashed context rows per order. 1024 = the top 10 bits of a 32-bit multiplicative hash. */
+const PRED_ROWS = 1024;
+/** Sequence rows: one per (last action, the one before), no hashing. */
+const SEQ_ROWS = (NA + 1) * (NA + 1);
+/** Rhythm rows: one per (last action, phase). */
+const RHY_ROWS = (NA + 1) * 4;
+
+/** Phase: frames since the opponent's last action started, bucketed 0-10 / 11-25 / 26-60 / 60+. */
+function phaseOf(P: Pred, frame: number): number {
+  const since = frame - P.actFrame;
+  return since <= 10 ? 0 : since <= 25 ? 1 : since <= 60 ? 2 : 3;
+}
+
+function rhythmRow(P: Pred, frame: number): number {
+  return P.act1 * 4 + phaseOf(P, frame);
+}
+/** Recency: every observation in a context row scales that row by this before adding itself. */
+const PRED_DECAY = 0.97;
+/** Laplace pseudo-count on the order-0 (per situation) table the higher orders back off to. */
+const PRED_ALPHA = 0.5;
+/** A loaded profile is blended in as a prior worth at most this many real observations per context row. */
+const PRIOR_OBS = 60;
+/**
+ * Movement samples: while the opponent is free and starts nothing, its drift (in, out, still) is
+ * observed when it changes and has held SAMPLE_HOLD frames, or every SAMPLE_EVERY frames of the
+ * same, and only once it has been free SAMPLE_SETTLE frames (the frame a move ends is not a choice).
+ */
+const SAMPLE_EVERY = 12;
+const SAMPLE_HOLD = 6;
+const SAMPLE_SETTLE = 8;
+/** Share of the reply weight the predictor may take from the fixed habit-weighted models, at full confidence. */
+const PRED_SHARE = 0.75;
+/** Predicted classes turned into reply models per decision. */
+const PRED_TOPK = 5;
+/** Reply weight above which a model counts as "a reply the predictor rates" for the E4/E5 vetoes. */
+const LIKELY_W = 0.05;
+// Exploit tables: how the opponent answers each of our approaches.
+const TR_DASHIN = 0;
+const TR_PRESSURE = 1;
+const TR_PROJ = 2;
+const TR_AERIAL = 3;
+const N_TR = 4;
+const RS_SHIELD = 0;
+const RS_ROLL = 1;
+const RS_SPOT = 2;
+const RS_JUMP = 3;
+const RS_AD = 4;
+const RS_ATTACK = 5;
+const RS_NONE = 6;
+const N_RS = 7;
+/** Frames after one of our approaches in which the opponent's first real action is its answer. */
+const EX_WINDOW = 30;
+const EX_DECAY = 0.94;
+/** An answer that takes more than this share of a trigger's history is exploited... */
+const EXPLOIT_P = 0.55;
+/** ...once the trigger has at least this much (decayed) history. */
+const EXPLOIT_MIN = 3;
+const EXPLOIT_BONUS = 5;
+/** Accuracy ring: the last RING_N predictions, hit or miss. */
+const RING_N = 30;
+
+interface Pred {
+  o0: Float32Array; t0: Float32Array;   // per situation: the order-0 table the others back off to
+  o1: Float32Array; t1: Float32Array;   // (situation, distance, our state, last action)
+  o2: Float32Array; t2: Float32Array;   // the same plus the action before it
+  oS: Float32Array; tS: Float32Array;   // the action pair alone, whatever the situation: the "ghost" sequence model
+  oR: Float32Array; tR: Float32Array;   // the last action and how long ago it started: the opponent's rhythm
+  oT: Float32Array; tT: Float32Array;   // per rhythm row: [still nothing, acts now], the timing vote
+  actFrame: number;                     // frame the last action (not a movement sample) was seen
+  kR: number;                           // rhythm row of the previous frame
+  ex: Float32Array; exT: Float32Array;  // exploit tables: trigger x answer
+  last: number;
+  last2: number;
+  act1: number;           // the last two actions the opponent started (movement samples left out): the sequence model's key
+  act2: number;
+  k0: number; k1: number; k2: number;   // context rows of the previous frame, where the choice was made
+  prevAction: string;
+  prevMove: MoveId | null;
+  myPrevAction: string;
+  myPrevMove: MoveId | null;
+  lastObs: number;
+  freeRun: number;
+  moveCls: number;
+  moveRun: number;
+  lastSample: number;
+  pendRoll: number;
+  trig: number;
+  trigAge: number;
+  hits: number;
+  total: number;
+  ring: Uint8Array;
+  comp: Float32Array;     // decaying hit rate of each component predictor
+  ringPos: number;
+  ringN: number;
+  key: string | null;
+  store: ProfileStore | null;
+}
+
+function newPred(): Pred {
+  return {
+    o0: new Float32Array(N_SIT * NA), t0: new Float32Array(N_SIT),
+    o1: new Float32Array(PRED_ROWS * NA), t1: new Float32Array(PRED_ROWS),
+    o2: new Float32Array(PRED_ROWS * NA), t2: new Float32Array(PRED_ROWS),
+    oS: new Float32Array(SEQ_ROWS * NA), tS: new Float32Array(SEQ_ROWS),
+    oR: new Float32Array(RHY_ROWS * NA), tR: new Float32Array(RHY_ROWS), actFrame: 0, kR: 0,
+    oT: new Float32Array(RHY_ROWS * 2), tT: new Float32Array(RHY_ROWS),
+    ex: new Float32Array(N_TR * N_RS), exT: new Float32Array(N_TR),
+    last: AC_START, last2: AC_START, act1: AC_START, act2: AC_START, k0: 0, k1: 0, k2: 0,
+    prevAction: '', prevMove: null, myPrevAction: '', myPrevMove: null,
+    lastObs: 0, freeRun: 0, moveCls: -1, moveRun: 0, lastSample: -1, pendRoll: 0, trig: -1, trigAge: 0,
+    hits: 0, total: 0, ring: new Uint8Array(RING_N), comp: new Float32Array(N_COMP), ringPos: 0, ringN: 0,
+    key: null, store: null,
+  };
+}
+
+function resetPred(P: Pred): void {
+  P.o0.fill(0); P.t0.fill(0); P.o1.fill(0); P.t1.fill(0); P.o2.fill(0); P.t2.fill(0); P.oS.fill(0); P.tS.fill(0); P.oR.fill(0); P.tR.fill(0); P.oT.fill(0); P.tT.fill(0); P.actFrame = 0; P.kR = 0;
+  P.ex.fill(0); P.exT.fill(0);
+  P.last = AC_START; P.last2 = AC_START; P.act1 = AC_START; P.act2 = AC_START; P.k0 = 0; P.k1 = 0; P.k2 = 0;
+  P.prevAction = ''; P.prevMove = null; P.myPrevAction = ''; P.myPrevMove = null;
+  P.lastObs = 0; P.freeRun = 0; P.moveCls = -1; P.moveRun = 0; P.lastSample = -1; P.pendRoll = 0; P.trig = -1; P.trigAge = 0;
+  P.hits = 0; P.total = 0; P.ring.fill(0); P.comp.fill(0); P.ringPos = 0; P.ringN = 0;
+  P.key = null; P.store = null;
+}
+
+function sitOf(o: FighterState, si: StageInfo): number {
+  if (isLedgeAction(o.action)) return SIT_LEDGE;
+  if (o.action === 'downed' || o.action === 'getUp' || o.action === 'getUpRoll' || o.action === 'tech' || o.action === 'techRoll') return SIT_DOWN;
+  if (launched(o) || o.action === 'tumble') return SIT_LAUNCHED;
+  if (offstage(o, si)) return SIT_OFF;
+  if (o.action === 'shield' || o.action === 'shieldStun') return SIT_SHIELD;
+  return o.onGround ? SIT_GROUND : SIT_AIR;
+}
+
+function distBucket(m: FighterState, o: FighterState): number {
+  const dx = o.x - m.x; const dy = o.y - m.y;
+  const d2 = dx * dx + dy * dy;
+  return d2 < 3600 ? 0 : d2 < 14400 ? 1 : d2 < 48400 ? 2 : 3;
+}
+
+function oursOf(m: FighterState): number {
+  if (m.action === 'shield' || m.action === 'shieldStun') return 2;
+  return busyFrames(m) > 2 ? 1 : 0;
+}
+
+/** Context rows for (situation, distance, our state) and the predictor's last two actions, into pk0..pk2. */
+let pk0 = 0; let pk1 = 0; let pk2 = 0;
+function ctxRows(P: Pred, sit: number, dist: number, ours: number, phase: number): void {
+  // The phase is part of the order-1 context: the same situation early and late in the
+  // opponent's rhythm are different choices (a roller rolls on a beat, a camper throws on one).
+  const key1 = (((sit * 4 + dist) * 3 + ours) * (NA + 1) + P.last) * 4 + phase;
+  const key2 = key1 * (NA + 1) + P.last2;
+  pk0 = sit;
+  pk1 = Math.imul(key1 + 1, 0x9e3779b1) >>> 22;
+  pk2 = Math.imul(key2 + 7, 0x85ebca6b) >>> 22;
+}
+
+/** The predicted next-action distribution for context rows (k0, k1, k2), into predP. Returns a 0..1 confidence. */
+const predP = new Float64Array(NA);
+/**
+ * Component predictors, each a distribution over the next action class:
+ *   0 the situation alone (Laplace), 1 order 1, 2 order 2 (backed off to order 1), 3 the action
+ *   pair alone (the ghost sequence model), 4 the full back-off chain 2 -> 1 -> pair -> situation,
+ *   5 the rhythm model (last action and the phase since it), which knows when a habit fires, not
+ *   just which. Orders 1 and 2 carry the phase (frames since the last action: 0-10 / 11-25 / 26-60
+ *   / 60+) in their context. A timing vote (still nothing vs acts now, per last action and phase)
+ *   then rescales the mixture.
+ * Each keeps a decaying score of how often its top guess was right, and the prediction is their
+ * mixture weighted by that score (the meta-strategy of the Iocaine Powder RoShamBo bot): against a
+ * player whose habits hang on the situation the context models lead, against one who strings the
+ * same sequence everywhere the pair model does.
+ */
+const N_COMP = 6;
+const compP = new Float64Array(N_COMP * NA);
+const COMP_DECAY = 0.9;
+
+function predict(P: Pred, k0: number, k1: number, k2: number, kR: number): number {
+  const kS = P.act1 * (NA + 1) + P.act2;
+  const n0 = P.t0[k0]; const n1 = P.t1[k1]; const n2 = P.t2[k2]; const nS = P.tS[kS]; const nR = P.tR[kR];
+  const b0 = k0 * NA; const b1 = k1 * NA; const b2 = k2 * NA; const bS = kS * NA; const bR = kR * NA;
+  // Witten-Bell interpolation: a context trusts itself by its count against the number of distinct
+  // answers it has seen, so a context that always sees the same answer is believed after one or two.
+  let u1 = 0; let u2 = 0; let uS = 0; let uR = 0;
+  for (let a = 0; a < NA; a++) {
+    if (P.o1[b1 + a] > 0.05) u1++;
+    if (P.o2[b2 + a] > 0.05) u2++;
+    if (P.oS[bS + a] > 0.05) uS++;
+    if (P.oR[bR + a] > 0.05) uR++;
+  }
+  const lR = nR > 0 ? nR / (nR + Math.max(1, uR)) : 0;
+  const l1 = n1 > 0 ? n1 / (n1 + Math.max(1, u1)) : 0;
+  const l2 = n2 > 0 ? n2 / (n2 + Math.max(1, u2)) : 0;
+  const lS = nS > 0 ? nS / (nS + Math.max(1, uS)) : 0;
+  const d0 = n0 + PRED_ALPHA * NA;
+  for (let a = 0; a < NA; a++) {
+    const p0 = (P.o0[b0 + a] + PRED_ALPHA) / d0;
+    const pS = nS > 0 ? lS * (P.oS[bS + a] / nS) + (1 - lS) * p0 : p0;
+    const q1 = n1 > 0 ? l1 * (P.o1[b1 + a] / n1) + (1 - l1) * p0 : p0;
+    const q2 = n2 > 0 ? l2 * (P.o2[b2 + a] / n2) + (1 - l2) * q1 : q1;
+    const c1 = n1 > 0 ? l1 * (P.o1[b1 + a] / n1) + (1 - l1) * pS : pS;
+    compP[a] = p0;
+    compP[NA + a] = q1;
+    compP[2 * NA + a] = q2;
+    compP[3 * NA + a] = pS;
+    compP[4 * NA + a] = n2 > 0 ? l2 * (P.o2[b2 + a] / n2) + (1 - l2) * c1 : c1;
+    compP[5 * NA + a] = nR > 0 ? lR * (P.oR[bR + a] / nR) + (1 - lR) * p0 : p0;
+  }
+  let wsum = 0;
+  for (let c = 0; c < N_COMP; c++) { const w = P.comp[c] + 0.05; wsum += w * w; }
+  for (let a = 0; a < NA; a++) {
+    let v = 0;
+    for (let c = 0; c < N_COMP; c++) { const w = P.comp[c] + 0.05; v += w * w * compP[c * NA + a]; }
+    predP[a] = v / wsum;
+  }
+  // The timing vote: in this phase after this action, does the opponent usually still do nothing
+  // (drift, stand) or act now? Its answer rescales the two halves of the distribution.
+  const nT = P.tT[kR];
+  if (nT >= 1) {
+    let actMass = 0;
+    for (let a = 0; a < NA; a++) if (a !== AC_IN && a !== AC_OUT && a !== AC_NONE) actMass += predP[a];
+    const pAct = (P.oT[kR * 2 + 1] + 0.5) / (nT + 1);
+    const wT = nT / (nT + 2);
+    const target = (1 - wT) * actMass + wT * pAct;
+    const sA = actMass > 1e-9 ? target / actMass : 1;
+    const sM = actMass < 1 - 1e-9 ? (1 - target) / (1 - actMass) : 1;
+    for (let a = 0; a < NA; a++) predP[a] *= (a !== AC_IN && a !== AC_OUT && a !== AC_NONE) ? sA : sM;
+  }
+  return (n1 + n2 + 0.5 * nS) / (n1 + n2 + 0.5 * nS + 6);
+}
+
+/** Scores each component's top guess against what the opponent actually did (after a predict call). */
+function scoreComponents(P: Pred, cls: number): void {
+  for (let c = 0; c < N_COMP; c++) {
+    let b = 0;
+    const o = c * NA;
+    for (let a = 1; a < NA; a++) if (compP[o + a] > compP[o + b]) b = a;
+    P.comp[c] = P.comp[c] * COMP_DECAY + (b === cls ? 1 - COMP_DECAY : 0);
+  }
+}
+
+function argmaxPred(): number {
+  let b = 0;
+  for (let a = 1; a < NA; a++) if (predP[a] > predP[b]) b = a;
+  return b;
+}
+
+function bumpRow(o: Float32Array, t: Float32Array, row: number, cls: number, width: number, decay: number): void {
+  const b = row * width;
+  for (let k = 0; k < width; k++) o[b + k] *= decay;
+  o[b + cls] += 1;
+  t[row] = t[row] * decay + 1;
+}
+
+/** The exploit answer an action class counts as, or -1 when it is not one (drifting, standing). */
+function respOf(cls: number): number {
+  if (cls === AC_SHIELD) return RS_SHIELD;
+  if (cls === AC_ROLL_TO || cls === AC_ROLL_AWAY) return RS_ROLL;
+  if (cls === AC_SPOT) return RS_SPOT;
+  if (cls === AC_JUMP) return RS_JUMP;
+  if (cls === AC_AD) return RS_AD;
+  if (cls <= AC_GRAB) return RS_ATTACK;
+  return -1;
+}
+
+/** One observed action: scored against the prediction first (accuracy), then learned. */
+function record(P: Pred, cls: number, frame: number, sampled: boolean): void {
+  predict(P, P.k0, P.k1, P.k2, P.kR);
+  const hit = argmaxPred() === cls ? 1 : 0;
+  scoreComponents(P, cls);
+  P.total++; P.hits += hit;
+  P.ring[P.ringPos] = hit; P.ringPos = (P.ringPos + 1) % RING_N; if (P.ringN < RING_N) P.ringN++;
+  bumpRow(P.o0, P.t0, P.k0, cls, NA, PRED_DECAY);
+  bumpRow(P.o1, P.t1, P.k1, cls, NA, PRED_DECAY);
+  bumpRow(P.o2, P.t2, P.k2, cls, NA, PRED_DECAY);
+  bumpRow(P.oS, P.tS, P.act1 * (NA + 1) + P.act2, cls, NA, PRED_DECAY);
+  bumpRow(P.oR, P.tR, P.kR, cls, NA, PRED_DECAY);
+  bumpRow(P.oT, P.tT, P.kR, cls === AC_IN || cls === AC_OUT || cls === AC_NONE ? 0 : 1, 2, PRED_DECAY);
+  if (!sampled && P.trig >= 0) {
+    const rs = respOf(cls);
+    if (rs >= 0) { bumpRow(P.ex, P.exT, P.trig, rs, N_RS, EX_DECAY); P.trig = -1; }
+  }
+  P.last2 = P.last; P.last = cls; P.lastObs = frame;
+  if (!sampled) { P.act2 = P.act1; P.act1 = cls; P.actFrame = frame; }
+}
+
+function moveIndexOf(id: MoveId | null): number {
+  if (id === null) return -1;
+  for (let i = 0; i < MOVE_IDS.length; i++) if (MOVE_IDS[i] === id) return i;
+  return -1;
+}
+
+function isAerialId(id: MoveId | null): boolean {
+  return id === 'nair' || id === 'fair' || id === 'bair' || id === 'uair' || id === 'dair';
+}
+
+/**
+ * Watches one opponent for one frame: classifies anything it started (or, every SAMPLE_EVERY
+ * frames of starting nothing, what it is doing), learns it under the context of the frame before,
+ * notes our own approaches for the exploit tables, and stores this frame's context for the next.
+ */
+function predObserve(state: GameState, meI: number, oi: number, P: Pred, si: StageInfo): void {
+  const o = state.fighters[oi];
+  const me = state.fighters[meI];
+  const act = o.action;
+  const prev = P.prevAction;
+  const alive = o.stocks > 0 && act !== 'dead' && act !== 'respawn';
+  if (alive && prev !== '' && prev !== 'dead' && prev !== 'respawn') {
+    const toMe = (me.x - o.x) * o.vx > 0;
+    let cls = -1;
+    let sampled = false;
+    if (P.pendRoll > 0) {
+      if (Math.abs(o.vx) > 0.3 || P.pendRoll === 1) { cls = toMe ? AC_ROLL_TO : AC_ROLL_AWAY; P.pendRoll = 0; } else P.pendRoll--;
+    }
+    if (cls < 0 && act === 'attack' && o.moveId !== null && (prev !== 'attack' || o.moveId !== P.prevMove)) {
+      cls = moveIndexOf(o.moveId);
+    } else if (cls < 0 && prev !== act) {
+      switch (act) {
+        case 'grab': cls = AC_GRAB; break;
+        case 'shield': if (prev !== 'shieldStun') cls = AC_SHIELD; break;
+        case 'roll': case 'techRoll': case 'getUpRoll': P.pendRoll = 4; break;
+        case 'ledgeRoll': cls = AC_ROLL_TO; break;
+        case 'spotDodge': cls = AC_SPOT; break;
+        case 'airDodge': cls = AC_AD; break;
+        case 'ledgeClimb': case 'getUp': case 'tech': cls = AC_STAND; break;
+        case 'air': if (prev === 'ledgeHang') cls = AC_OUT; break;
+        default: break;
+      }
+    }
+    if (cls < 0) {
+      const ev = state.events;
+      for (let e = 0; e < ev.length; e++) {
+        const x = ev[e];
+        if (x.type === 'jump' && x.slot === o.slot) { cls = AC_JUMP; break; }
+      }
+    }
+    const free = neutralFree(o);
+    // Drift is what they hold, not where momentum carries them: a launch's leftover speed is no choice.
+    // (The held bits are the same public fighter state the continue reply already replays.)
+    const hx = o.inputHeld & (L | R);
+    const hDir = hx === R ? 1 : hx === L ? -1 : 0;
+    const mc = hDir === 0 ? AC_NONE : (me.x - o.x) * hDir > 0 ? AC_IN : AC_OUT;
+    if (free) P.freeRun++; else P.freeRun = 0;
+    if (mc === P.moveCls) P.moveRun++; else { P.moveCls = mc; P.moveRun = 1; }
+    if (cls < 0 && P.pendRoll === 0) {
+      const since = state.frame - P.lastObs;
+      if (free && P.freeRun >= SAMPLE_SETTLE) {
+        if ((mc !== P.lastSample && P.moveRun >= SAMPLE_HOLD) || since >= SAMPLE_EVERY) { cls = mc; sampled = true; }
+      } else if ((act === 'ledgeHang' || act === 'downed') && since >= SAMPLE_EVERY) {
+        cls = AC_NONE; sampled = true;
+      } else if (act === 'shield' && since >= SAMPLE_EVERY) {
+        cls = AC_SHIELD; sampled = true;
+      }
+    }
+    if (cls >= 0) {
+      record(P, cls, state.frame, sampled);
+      P.lastSample = sampled ? cls : -1;
+    }
+  }
+  // Our approaches, for the exploit tables: a dash in, pressure on their shield, a shot, an aerial.
+  const dx = o.x - me.x; const dy = o.y - me.y;
+  const d2 = dx * dx + dy * dy;
+  let trig = -1;
+  if (me.action === 'dash' && P.myPrevAction !== 'dash' && d2 < 40000 && (me.facing === 1) === (dx > 0)) trig = TR_DASHIN;
+  else if (me.action === 'attack' && isAerialId(me.moveId) && (P.myPrevAction !== 'attack' || me.moveId !== P.myPrevMove) && d2 < 12100) trig = TR_AERIAL;
+  const ev = state.events;
+  for (let e = 0; e < ev.length; e++) {
+    const x = ev[e];
+    if (x.type === 'shieldHit' && x.victim === o.slot) trig = TR_PRESSURE;
+    else if (x.type === 'projectileSpawn' && x.slot === me.slot && trig < 0) trig = TR_PROJ;
+  }
+  if (P.trig >= 0) {
+    P.trigAge++;
+    if (P.trigAge > EX_WINDOW) { bumpRow(P.ex, P.exT, P.trig, RS_NONE, N_RS, EX_DECAY); P.trig = -1; }
+  }
+  if (trig >= 0 && P.trig < 0 && alive) { P.trig = trig; P.trigAge = 0; }
+  P.prevAction = act; P.prevMove = o.moveId;
+  P.myPrevAction = me.action; P.myPrevMove = me.moveId;
+  ctxRows(P, sitOf(o, si), distBucket(me, o), oursOf(me), phaseOf(P, state.frame));
+  P.k0 = pk0; P.k1 = pk1; P.k2 = pk2;
+  P.kR = rhythmRow(P, state.frame);
+}
+
+/** Bitmask of the exploit answers (1 << RS_*) the opponent gives to some approach more than EXPLOIT_P of the time. */
+function exploitMask(P: Pred): number {
+  let mask = 0;
+  for (let tr = 0; tr < N_TR; tr++) {
+    const n = P.exT[tr];
+    if (n < EXPLOIT_MIN) continue;
+    for (let rs = 0; rs < RS_NONE; rs++) {
+      if ((P.ex[tr * N_RS + rs] + 0.25) / (n + 0.25 * N_RS) > EXPLOIT_P) mask |= 1 << rs;
+    }
+  }
+  return mask;
+}
+
+// Profile (de)serialisation. The profile is the predictor's tables and the habit tables, nothing
+// else: {"v":1,"o0":[...],"o1":[...],"o2":[...],"sq":[...],"rh":[...],"tm":[...],"cp":[...],"ex":[...],"hb":[...]}, fixed-size arrays rounded
+// to two decimals.
+const PROFILE_VERSION = 1;
+
+function roundArr(a: Float32Array | Float64Array): number[] {
+  const out: number[] = new Array<number>(a.length);
+  for (let i = 0; i < a.length; i++) out[i] = Math.round(a[i] * 100) / 100;
+  return out;
+}
+
+function serializeProfile(P: Pred, habits: Float64Array): string {
+  return JSON.stringify({ v: PROFILE_VERSION, o0: roundArr(P.o0), o1: roundArr(P.o1), o2: roundArr(P.o2), sq: roundArr(P.oS), rh: roundArr(P.oR), tm: roundArr(P.oT), cp: roundArr(P.comp), ex: roundArr(P.ex), hb: roundArr(habits) });
+}
+
+function validArr(v: unknown, n: number): v is number[] {
+  if (!Array.isArray(v) || v.length !== n) return false;
+  for (let i = 0; i < n; i++) { const x: unknown = v[i]; if (typeof x !== 'number' || !(x >= 0) || !Number.isFinite(x)) return false; }
+  return true;
+}
+
+/**
+ * Copies `src` into `dst` row by row, each context row scaled so its mass is at most `mass`
+ * observations, and rebuilds the row totals. Per row, because the prior is about what this player
+ * does in each situation: a row the player visited a lot counts as `mass` observations of it, and
+ * fresh play in that row then decays it like any other count.
+ */
+function loadScaled(src: number[], dst: Float32Array | Float64Array, tot: Float32Array | null, width: number, mass: number): void {
+  const rows = src.length / width;
+  for (let r = 0; r < rows; r++) {
+    let t = 0;
+    for (let k = 0; k < width; k++) t += src[r * width + k];
+    const s = t > mass ? mass / t : 1;
+    for (let k = 0; k < width; k++) dst[r * width + k] = src[r * width + k] * s;
+    if (tot !== null) tot[r] = t * s;
+  }
+}
+
+/** Blends a saved profile in as a prior. False (and nothing changed) when the text is not a valid v1 profile. */
+function loadProfile(P: Pred, habits: Float64Array, text: string): boolean {
+  let obj: unknown;
+  try {
+    obj = JSON.parse(text);
+  } catch (err) {
+    void err;   // a corrupt profile is treated as none
+    return false;
+  }
+  if (obj === null || typeof obj !== 'object') return false;
+  const p = obj as Record<string, unknown>;
+  if (p.v !== PROFILE_VERSION) return false;
+  if (!validArr(p.o0, P.o0.length) || !validArr(p.o1, P.o1.length) || !validArr(p.o2, P.o2.length) || !validArr(p.sq, P.oS.length) || !validArr(p.rh, P.oR.length) || !validArr(p.tm, P.oT.length) || !validArr(p.cp, P.comp.length) ||
+      !validArr(p.ex, P.ex.length) || !validArr(p.hb, habits.length)) return false;
+  loadScaled(p.o0, P.o0, P.t0, NA, PRIOR_OBS);
+  loadScaled(p.o1, P.o1, P.t1, NA, PRIOR_OBS);
+  loadScaled(p.o2, P.o2, P.t2, NA, PRIOR_OBS);
+  loadScaled(p.sq, P.oS, P.tS, NA, PRIOR_OBS);
+  loadScaled(p.rh, P.oR, P.tR, NA, PRIOR_OBS);
+  loadScaled(p.tm, P.oT, P.tT, 2, PRIOR_OBS);
+  // Which component predictors have been reading this player best: trusted from the first guess.
+  for (let c = 0; c < P.comp.length; c++) P.comp[c] = Math.min(1, p.cp[c]);
+  loadScaled(p.ex, P.ex, P.exT, N_RS, PRIOR_OBS);
+  // Habits are saved as they stood (their fresh value is 1 per cell), row by row the same way.
+  loadScaled(p.hb, habits, null, HB_WIDTH, PRIOR_OBS);
+  return true;
+}
+
+let profileStore: ProfileStore = defaultProfileStore();
+
+/** Swaps the profile store (tests use a MemoryProfileStore). Takes effect from the next match start. */
+export function setAevalmereProfileStore(store: ProfileStore): void {
+  profileStore = store;
+}
 
 interface Scratch { st: GameState }
 
@@ -1072,6 +1748,8 @@ interface AmMem {
   lastDamageFrame: number;
   lastStageDamage: number;
   used: Float64Array;       // recent-use count per plan, for STALE_COST
+  // Opponent model: one predictor per opponent slot, pooled across matches (E2)
+  preds: (Pred | null)[];
   // Debug counters for the harness
   decisions: number;
   steps: number;
@@ -1090,6 +1768,7 @@ for (let i = 0; i < MAX_PLAYERS; i++) {
     oppIdx: -1, oppPrevAction: '', oppPrevMove: null, oppPrevHitstun: 0, oppEscWatch: 0, oppIdleRun: 0,
     habits: new Float64Array(HB_COUNT * HB_WIDTH), recent: new Int32Array(16), recentPos: 0, repetition: 0,
     lastStarter: -1, lastDamageFrame: 0, lastStageDamage: 0, used: new Float64Array(PLAN_COUNT),
+    preds: [null, null, null, null],
     decisions: 0, steps: 0, alternates: 0, mashPhase: 0, techBusy: 0,
   });
 }
@@ -1104,6 +1783,63 @@ function resetMem(mem: AmMem): void {
   mem.decisions = 0; mem.steps = 0; mem.alternates = 0; mem.mashPhase = 0; mem.techBusy = 0;
 }
 for (let i = 0; i < memSlots.length; i++) resetMem(memSlots[i]);
+
+/**
+ * Predictor accuracy against the opponent in `oppSlot`, as seen by the level 10 in `slot`: every
+ * observed action is scored against the top guess made just before it. `recent` is the hit rate
+ * over the last 30 observations.
+ */
+export function aevalmerePredictorStats(slot: number, oppSlot: number): { total: number; hits: number; recent: number; recentN: number } {
+  const P = memSlots[slot].preds[oppSlot];
+  if (P === null || P === undefined) return { total: 0, hits: 0, recent: 0, recentN: 0 };
+  let h = 0;
+  for (let i = 0; i < P.ringN; i++) h += P.ring[i];
+  return { total: P.total, hits: P.hits, recent: P.ringN > 0 ? h / P.ringN : 0, recentN: P.ringN };
+}
+
+/** Saves every opponent profile the level 10 slots hold for the current match. A host calls this at match end. */
+export function flushAevalmereProfiles(): void {
+  for (let i = 0; i < memSlots.length; i++) saveProfiles(memSlots[i]);
+}
+
+function saveProfiles(mem: AmMem): void {
+  if (warming) return;
+  for (let j = 0; j < mem.preds.length; j++) {
+    const P = mem.preds[j];
+    if (P === null || P.key === null || P.store === null) continue;
+    P.store.save(P.key, serializeProfile(P, mem.habits));
+  }
+}
+
+/**
+ * Match start: every enemy of `meI` gets a fresh predictor (pooled), and a human enemy's saved
+ * profile, if any, is blended in as the prior. The store is bound to the predictor here, so a
+ * later save goes back to the store it was loaded from.
+ */
+function startPredictors(state: GameState, meI: number, mem: AmMem): void {
+  for (let j = 0; j < mem.preds.length; j++) { const P = mem.preds[j]; if (P !== null) { resetPred(P); } }
+  const me = state.fighters[meI];
+  let habitsLoaded = false;
+  for (let i = 0; i < state.fighters.length; i++) {
+    if (i === meI) continue;
+    const f = state.fighters[i];
+    if (sameTeam(state, me.slot, f.slot) || f.slot < 0 || f.slot >= mem.preds.length) continue;
+    let P = mem.preds[f.slot];
+    if (P === null) { P = newPred(); mem.preds[f.slot] = P; }
+    if (warming) continue;
+    const key = profileKeyFor(state.config, f.slot);
+    if (key === null) continue;
+    P.key = key;
+    P.store = profileStore;
+    const text = profileStore.load(key);
+    // The habit tables are per brain, not per opponent: the first human enemy's profile seeds them.
+    if (text !== null) {
+      const ok = loadProfile(P, habitsLoaded ? scratchHabits : mem.habits, text);
+      if (ok) habitsLoaded = true;
+    }
+  }
+}
+const scratchHabits = new Float64Array(HB_COUNT * HB_WIDTH);
 
 /** Debug counters for the harness: decisions made, sim steps spent, safe alternates taken. */
 export function aevalmereStats(slot: number): { decisions: number; steps: number; alternates: number; plan: string } {
@@ -1120,15 +1856,25 @@ const COMBO_MOVES: readonly MoveId[] = [
   'nair', 'fair', 'bair', 'uair', 'dair', 'uspecial',
 ];
 const COMBO_THROWS = ['fthrow', 'bthrow', 'uthrow', 'dthrow'] as const;
-const N_STARTERS = COMBO_MOVES.length + COMBO_THROWS.length;
+/** The orb as two starters: a tap (chip, fires on frame 11) and a full charge (a bullet, fires on frame 27). */
+const COMBO_ORBS = ['orbTap', 'orbFull'] as const;
+const S_THROW0 = COMBO_MOVES.length;
+const S_ORB0 = S_THROW0 + COMBO_THROWS.length;
+const N_STARTERS = S_ORB0 + COMBO_ORBS.length;
 const BRACKETS = [15, 45, 80, 120];
 const N_BRACKET = BRACKETS.length;
-const N_POS = 3;          // 0 mid-stage, 1 near a ledge, 2 airborne above us
+const N_POS = 4;          // 0 mid-stage, 1 near a ledge, 2 airborne above us, 3 off the stage below the ledge
 /** Up to three follow-ups per entry, best chain first, as COMBO_MOVES indexes; -1 empty. */
 const comboNext = new Int8Array(N_STARTERS * N_BRACKET * N_POS * 3).fill(-1);
 const comboLen = new Int8Array(N_STARTERS * N_BRACKET * N_POS);
 const comboDamage = new Float32Array(N_STARTERS * N_BRACKET * N_POS);
 const comboKills = new Uint8Array(N_STARTERS * N_BRACKET * N_POS);
+/**
+ * Kill confirms (E3): 1 where the starter itself, or the best chain it opens, launches the victim
+ * past the blast rect of the stage the table was built for. Read at runtime to raise the
+ * priority of grab, dtilt, utilt and nair when the victim sits in a bracket where they confirm.
+ */
+const killConfirm = new Uint8Array(N_STARTERS * N_BRACKET * N_POS);
 let comboSig = '';
 
 function bracketOf(p: number): number { return p < 30 ? 0 : p < 60 ? 1 : p < 100 ? 2 : 3; }
@@ -1139,6 +1885,25 @@ const hitSpec: HitSpec = { start: 0, x: 0, y: 0, r: 0, damage: 0, angle: 0, bkb:
 /** The strongest hitbox of a move, or of a throw, into hitSpec. False when there is none. */
 function loadHit(idx: number): boolean {
   const def = CHARACTER_DEFS.aeval;
+  if (idx >= S_ORB0) {
+    // The orb hits where it meets the victim: a tap at mid range, a full charge further out.
+    const nsp = def.moves.nspecial;
+    const pd = nsp.projectiles !== undefined ? nsp.projectiles[0] : undefined;
+    if (pd === undefined) return false;
+    const full = idx === S_ORB0 + 1;
+    const ch = full && pd.charged !== undefined ? pd.charged : {};
+    const cast = full && nsp.chargeCastFrames !== undefined ? nsp.chargeCastFrames : 0;
+    const power = projectileChargePower(full ? TUNING.input.chargeMax : 0, true);
+    const vx = ch.vx !== undefined ? ch.vx : pd.vx;
+    const at = full ? 140 : 90;
+    hitSpec.start = pd.spawnFrame + cast + Math.round((at - pd.x) / Math.max(1, vx));
+    hitSpec.x = at; hitSpec.y = pd.y; hitSpec.r = 0;
+    hitSpec.damage = (ch.damage !== undefined ? ch.damage : pd.damage) * power;
+    hitSpec.angle = pd.angle;
+    hitSpec.bkb = ch.bkb !== undefined ? ch.bkb : pd.bkb;
+    hitSpec.kbg = ch.kbg !== undefined ? ch.kbg : pd.kbg;
+    return true;
+  }
   if (idx >= COMBO_MOVES.length) {
     const th = grabKitOf(def).throws[COMBO_THROWS[idx - COMBO_MOVES.length]];
     hitSpec.start = th.releaseFrame; hitSpec.x = 18; hitSpec.y = -10; hitSpec.r = 0;
@@ -1160,6 +1925,13 @@ function loadHit(idx: number): boolean {
 /** Frames our side stays busy after landing starter `idx`, counted from its hit frame. */
 function starterLag(idx: number): number {
   const def = CHARACTER_DEFS.aeval;
+  if (idx >= S_ORB0) {
+    const nsp = def.moves.nspecial;
+    const full = idx === S_ORB0 + 1;
+    loadHit(idx);
+    const total = nsp.totalFrames + (full && nsp.chargeCastFrames !== undefined ? nsp.chargeCastFrames : 0);
+    return Math.max(0, total - hitSpec.start);
+  }
   if (idx >= COMBO_MOVES.length) {
     const th = grabKitOf(def).throws[COMBO_THROWS[idx - COMBO_MOVES.length]];
     return th.totalFrames - th.releaseFrame;
@@ -1214,9 +1986,10 @@ function launchKills(p: number, pos: number, blast: Rect, si: StageInfo): boolea
   const dirY = -Math.sin(rad);
   let spd = kb * TUNING.knockback.toVel;
   let fall = 0;
-  // Launched toward the nearer blast line from a ledge spot, from the middle otherwise.
-  let x = pos === 1 ? si.maxX - 20 : si.cx;
-  let y = pos === 2 ? si.topY - 80 : si.topY - 10;
+  // Launched toward the nearer blast line from a ledge spot, from the middle otherwise; from off
+  // the stage, beside the ledge and below it (where a spike sends them down).
+  let x = pos === 1 ? si.maxX - 20 : pos === 3 ? si.maxX + 40 : si.cx;
+  let y = pos === 2 ? si.topY - 80 : pos === 3 ? si.topY + 30 : si.topY - 10;
   const hs = Math.floor(kb * TUNING.knockback.hitstunPerKb);
   let vx = 0; let vy = 0;
   for (let k = 0; k < hs; k++) {
@@ -1225,6 +1998,13 @@ function launchKills(p: number, pos: number, blast: Rect, si: StageInfo): boolea
     vx = dirX * spd; vy = dirY * spd + fall;
     x += vx; y += vy;
     if (x < blast.x || x > blast.x + blast.w || y < blast.y || y > blast.y + blast.h) return true;
+  }
+  if (pos === 3) {
+    // Off the stage the hitstun only has to leave them deeper than a double jump and the geyser
+    // can climb back from: a spike that does that is a KO even if the blast line is still far.
+    const jumpRise = (def.doubleJumpVel * def.doubleJumpVel) / (2 * def.gravity);
+    const outX = x > si.maxX ? x - si.maxX : x < si.minX ? si.minX - x : 0;
+    if (y - si.topY > jumpRise + 85 + 20 && outX > 0) return true;
   }
   return false;
 }
@@ -1251,20 +2031,22 @@ function followFits(starter: number, p: number, grounded: boolean, f: number): b
   const startX = hitSpec.x + 13;
   const vdx = startX + comboOut.dx;
   const vdy = comboOut.dy;
-  // The follow-up's own best box.
-  let best = -1;
-  for (let i = 0; i < mv.hitboxes.length; i++) if (best < 0 || mv.hitboxes[i].damage > mv.hitboxes[best].damage) best = i;
-  const hb = mv.hitboxes[best];
   const slack = comboOut.hitstun - reach;
   const travel = aerial ? def.airSpeed * (st + slack) : def.dashSpeed * Math.max(0, slack);
-  const needX = Math.abs(vdx - hb.x) - hb.r - 13;
-  if (needX > travel) return false;
-  // Vertical: the box band against the body band [vdy - 40, vdy], lifted by a hop for aerials.
+  // Any box of the follow-up will do: the long chains (ftilt to 80 px, dash attack and fsmash to
+  // 102 px) connect with their outer circles where the inner ones would not reach.
   const t = st;
   const lift = aerial ? Math.max(3.5 * t - 0.075 * t * t, Math.min(97, 5.4 * t - 0.075 * t * t)) : 0;
-  const top = hb.y - hb.r - lift - (aerial ? 50 : 0);
-  const bottom = hb.y + hb.r - (aerial ? 0 : 0);
-  return top <= vdy && bottom >= vdy - 40;
+  for (let i = 0; i < mv.hitboxes.length; i++) {
+    const hb = mv.hitboxes[i];
+    const needX = Math.abs(vdx - hb.x) - hb.r - 13;
+    if (needX > travel) continue;
+    // Vertical: the box band against the body band [vdy - 40, vdy], lifted by a hop for aerials.
+    const top = hb.y - hb.r - lift - (aerial ? 50 : 0);
+    const bottom = hb.y + hb.r;
+    if (top <= vdy && bottom >= vdy - 40) return true;
+  }
+  return false;
 }
 
 let chainBestDmg = 0;
@@ -1298,11 +2080,11 @@ function chainSearch(starter: number, p: number, grounded: boolean, depth: numbe
 function buildComboTable(stageId: string): void {
   const kbT = TUNING.knockback;
   const blast = STAGE_DEFS[stageId].blast;
-  const sig = `${kbT.toVel}|${kbT.decay}|${kbT.hitstunPerKb}|${kbT.tumbleKb}|${kbT.kbMul}|${kbT.sakuraiThreshold}|${blast.x}|${blast.y}|${blast.w}|${blast.h}|${stageId}`;
+  const si = stageInfo(stageId);
+  const sig = `${kbT.toVel}|${kbT.decay}|${kbT.hitstunPerKb}|${kbT.tumbleKb}|${kbT.kbMul}|${kbT.sakuraiThreshold}|${blast.x}|${blast.y}|${blast.w}|${blast.h}|${stageId}|${si.minX}|${si.maxX}|${si.topY}`;
   if (sig === comboSig) return;
   comboSig = sig;
-  const si = stageInfo(stageId);
-  comboNext.fill(-1); comboLen.fill(0); comboDamage.fill(0); comboKills.fill(0);
+  comboNext.fill(-1); comboLen.fill(0); comboDamage.fill(0); comboKills.fill(0); killConfirm.fill(0);
   const scoreF = new Float32Array(COMBO_MOVES.length);
   for (let s = 0; s < N_STARTERS; s++) {
     if (!loadHit(s)) continue;
@@ -1332,6 +2114,8 @@ function buildComboTable(stageId: string): void {
           scoreF[bi] = -1;
         }
         comboLen[e] = bestLen; comboDamage[e] = bestDmg; comboKills[e] = bestKill ? 1 : 0;
+        loadHit(s);
+        killConfirm[e] = bestKill || launchKills(pAfter, pos, blast, si) ? 1 : 0;
       }
     }
   }
@@ -1356,7 +2140,7 @@ export function aevalmereComboSummary(stageId: string): { entries: number; chain
         if (comboLen[e] >= 4) chains4++;
         if (comboKills[e] === 1) kills++;
         if (example === '' && comboLen[e] >= 3) {
-          const name = s < COMBO_MOVES.length ? COMBO_MOVES[s] : COMBO_THROWS[s - COMBO_MOVES.length];
+          const name = starterName(s);
           example = `${name} at ${BRACKETS[b]}% -> ${COMBO_MOVES[comboNext[e * 3]]} (chain ${comboLen[e]} hits, ${comboDamage[e].toFixed(0)}%${comboKills[e] ? ', kills' : ''})`;
         }
       }
@@ -1365,10 +2149,35 @@ export function aevalmereComboSummary(stageId: string): { entries: number; chain
   return { entries, chains3, chains4, kills, example };
 }
 
+function starterName(s: number): string {
+  return s < S_THROW0 ? COMBO_MOVES[s] : s < S_ORB0 ? COMBO_THROWS[s - S_THROW0] : COMBO_ORBS[s - S_ORB0];
+}
+
+/** Lowest victim-percent bracket (its representative percent) at which each kill-confirm starter confirms, per spot. */
+export function aevalmereKillConfirms(stageId: string): string {
+  buildComboTable(stageId);
+  const parts: string[] = [];
+  const list = ['dtilt', 'utilt', 'nair', 'fthrow', 'bthrow', 'uthrow', 'dthrow', 'dair', 'orbFull'];
+  for (let i = 0; i < list.length; i++) {
+    const s = comboIndexOf(list[i]);
+    if (s < 0) continue;
+    let mid = -1; let ledge = -1; let off = -1;
+    for (let b = N_BRACKET - 1; b >= 0; b--) {
+      if (killConfirm[(s * N_BRACKET + b) * N_POS + 0] === 1) mid = BRACKETS[b];
+      if (killConfirm[(s * N_BRACKET + b) * N_POS + 1] === 1) ledge = BRACKETS[b];
+      if (killConfirm[(s * N_BRACKET + b) * N_POS + 3] === 1) off = BRACKETS[b];
+    }
+    const f = (v: number): string => (v < 0 ? '-' : `${v}%`);
+    parts.push(`${list[i]} mid ${f(mid)} ledge ${f(ledge)} off ${f(off)}`);
+  }
+  return parts.join(', ');
+}
+
 function comboIndexOf(id: string | null): number {
   if (id === null) return -1;
   for (let i = 0; i < COMBO_MOVES.length; i++) if (COMBO_MOVES[i] === id) return i;
-  for (let i = 0; i < COMBO_THROWS.length; i++) if (COMBO_THROWS[i] === id) return COMBO_MOVES.length + i;
+  for (let i = 0; i < COMBO_THROWS.length; i++) if (COMBO_THROWS[i] === id) return S_THROW0 + i;
+  for (let i = 0; i < COMBO_ORBS.length; i++) if (COMBO_ORBS[i] === id) return S_ORB0 + i;
   return -1;
 }
 
@@ -1392,6 +2201,21 @@ let rMateTaken = 0;
 let rGrabbed = false;
 let rFsCaught = false;
 let rBackHome = false;
+/** Our closest approach to any blast line during the rollout, px (E4: recovery keeps the widest margin). */
+let rMinMargin = 0;
+/** The rollout ends with our stock gone or as good as gone: KO'd, launched into a KO, or off the stage with no way back. */
+let rLost = false;
+/** Combo-table starter index of our last hit on the modelled opponent in the rollout, -1 none. */
+let rStarter = -1;
+/** A hit in the rollout opened a table kill chain. */
+let rChain = false;
+/**
+ * E3: a rollout in which a starter lands whose chain the combo table says ends past the blast line
+ * (from the victim's bracket and spot at that hit) is worth a little more than a raw launch that
+ * would KO: the chain is a true combo from there, where a raw kill move is a read a shield answers.
+ * A KO actually seen inside the horizon (520) still outranks it.
+ */
+const CHAIN_KILL_VALUE = 400;
 
 interface Base { myPct: number; oppPct: number; myStocks: number; oppStocks: number; stall: boolean }
 const base: Base = { myPct: 0, oppPct: 0, myStocks: 0, oppStocks: 0, stall: false };
@@ -1400,14 +2224,60 @@ const base: Base = { myPct: 0, oppPct: 0, myStocks: 0, oppStocks: 0, stall: fals
  * Runs plan `pid` for `h` frames on a copy of `from`, the opponent replying with `model`, and
  * scores the future. Everyone else keeps holding what they held.
  */
-function rollout(from: GameState, work: GameState, meI: number, oppI: number, pid: number, model: number, h: number, myPrev: number): number {
-  copyGameStateInto(from, work);
+/**
+ * Delay-window replay, set for the length of one decision. The brain sees the opponent as it was
+ * REACT frames ago; anything it started since is invisible. Rather than assume it kept holding what
+ * it held (which is all the perceived state can say), every rollout starts from that old observation
+ * with the reply model already acting, replays our own known inputs for those REACT frames, and then
+ * puts our true fighter back (we always know our own state). So the "it jumped four frames ago and
+ * is about to footstool us" reply is checked like any other, and no unseen input is ever read.
+ */
+let dlyState: GameState | null = null;
+
+let dlyFrom = 0;
+let dlyMem: AmMem | null = null;
+let dlyReal: FighterState | null = null;
+let dlyN = 0;
+
+function rollout(from: GameState, work: GameState, meI: number, oppI: number, pid: number, model: number, arg: number, h: number, myPrev: number): number {
   const fs = work.fighters;
-  for (let i = 0; i < fs.length; i++) rollPrev[i] = fs[i].inputHeld;
-  rollPrev[meI] = myPrev;
-  oCont = fs[oppI].inputHeld;
+  let tOff = 0;
   oTeched = false;
+  if (dlyState !== null && dlyMem !== null && dlyReal !== null) {
+    copyGameStateInto(dlyState, work);
+    for (let i = 0; i < fs.length; i++) rollPrev[i] = fs[i].inputHeld;
+    oCont = fs[oppI].inputHeld;
+    for (let k = 0; k < dlyN; k++) {
+      const fi = ((dlyFrom + k) % HIST + HIST) % HIST;
+      for (let j = 0; j < fs.length; j++) {
+        const inp = rollInputs[j];
+        if (j === meI) {
+          const held = dlyMem.outHeld[fi];
+          inp.held = held; inp.pressed = held & ~rollPrev[j]; inp.released = rollPrev[j] & ~held; inp.direct = dlyMem.outDirect[fi];
+          rollPrev[j] = held;
+        } else if (j === oppI) {
+          oPrev = rollPrev[j];
+          oppStep(model, arg, k, fs[j], fs[meI]);
+          inp.held = oHeld; inp.pressed = oHeld & ~rollPrev[j]; inp.released = rollPrev[j] & ~oHeld; inp.direct = oDirect;
+          rollPrev[j] = oHeld;
+        } else {
+          inp.held = fs[j].inputHeld; inp.pressed = 0; inp.released = 0; inp.direct = 0;
+        }
+      }
+      stepGame(work, rollInputs);
+    }
+    copyFighterInto(dlyReal, fs[meI]);
+    work.events.length = 0;
+    tOff = dlyN;
+  } else {
+    copyGameStateInto(from, work);
+    for (let i = 0; i < fs.length; i++) rollPrev[i] = fs[i].inputHeld;
+    oCont = fs[oppI].inputHeld;
+  }
+  rollPrev[meI] = myPrev;
   rDealt = 0; rTaken = 0; rKoOpp = 0; rKoMe = 0; rKoOther = 0; rKoMate = 0; rMateTaken = 0; rGrabbed = false; rFsCaught = false; rBackHome = false;
+  rMinMargin = 1e9; rLost = false; rStarter = -1; rChain = false;
+  const blast = blastOf(work);
   const meSlot = fs[meI].slot;
   const oppSlot = fs[oppI].slot;
   let t = 0;
@@ -1424,7 +2294,7 @@ function rollout(from: GameState, work: GameState, meI: number, oppI: number, pi
       const inp = rollInputs[i];
       if (i === oppI) {
         oPrev = rollPrev[i];
-        oppStep(model, t, o, m);
+        oppStep(model, arg, t + tOff, o, m);
         inp.held = oHeld; inp.pressed = oHeld & ~rollPrev[i]; inp.released = rollPrev[i] & ~oHeld; inp.direct = oDirect;
         rollPrev[i] = oHeld;
       } else {
@@ -1433,12 +2303,32 @@ function rollout(from: GameState, work: GameState, meI: number, oppI: number, pi
       }
     }
     stepGame(work, rollInputs);
+    {
+      const mm = fs[meI];
+      if (mm.action !== 'dead' && mm.action !== 'respawn') {
+        const mg = Math.min(mm.x - blast.x, blast.x + blast.w - mm.x, mm.y - blast.y, blast.y + blast.h - mm.y);
+        if (mg < rMinMargin) rMinMargin = mg;
+      }
+    }
     const ev = work.events;
     for (let e = 0; e < ev.length; e++) {
       const x = ev[e];
       if (x.type === 'hit') {
         // Only damage to an enemy is worth anything; damage a teammate takes counts against us.
-        if (x.attacker === meSlot && x.victim !== meSlot && !sameTeam(work, meSlot, x.victim)) rDealt += x.damage;
+        if (x.attacker === meSlot && x.victim !== meSlot && !sameTeam(work, meSlot, x.victim)) {
+          rDealt += x.damage;
+          if (x.victim === oppSlot) {
+            const mf = fs[meI] as SimFighter;
+            const id = mf.action === 'throw' && mf.activeThrowId !== null ? mf.activeThrowId : mf.action === 'attack' ? mf.moveId : null;
+            rStarter = comboIndexOf(id);
+            if (rStarter >= 0) {
+              // The hit lands a starter whose true-combo chain the table says ends past the blast line.
+              const v = fs[oppI];
+              const pos = offstage(v, cSi) && v.y > cSi.topY - 10 ? 3 : !v.onGround && v.y < fs[meI].y - 30 ? 2 : (v.x < cSi.minX + 50 || v.x > cSi.maxX - 50) ? 1 : 0;
+              if (comboKills[(rStarter * N_BRACKET + bracketOf(v.percent)) * N_POS + pos] === 1) rChain = true;
+            }
+          }
+        }
         else if (x.victim === meSlot) rTaken += x.damage;
         else if (sameTeam(work, meSlot, x.victim)) rMateTaken += x.damage;
       } else if (x.type === 'ko') {
@@ -1489,6 +2379,7 @@ function evaluate(st: GameState, meI: number, oppI: number, frames: number): num
       const out = o.x < si.minX ? si.minX - o.x : o.x > si.maxX ? o.x - si.maxX : 0;
       s += out * 0.06 + Math.max(0, o.y - si.topY) * 0.08;
     }
+    if (rChain && projectedKo(o, blast) < 1) s += CHAIN_KILL_VALUE * reach;
     if (o.action === 'shieldBreak') s += 140;
     if (o.action === 'grabbed') {
       s += 14;
@@ -1498,7 +2389,10 @@ function evaluate(st: GameState, meI: number, oppI: number, frames: number): num
     if (!launched(o) && busyFrames(m) <= 4) s += 45 * killThreat(m, o, blast);
     if (o.action === 'finalSmashVictim') s += 90;
   }
+  if (rKoMe > 0) rLost = true;
   if (rKoMe === 0 && m.stocks > 0) {
+    if (launched(m) && projectedKo(m, blast) >= 0.75) rLost = true;
+    if (offstage(m, si) && recoverable(m, si) === 0) rLost = true;
     if (launched(m)) {
       s -= 420 * projectedKo(m, blast);
       s -= Math.min(m.hitstun, 30) * 0.45;
@@ -1535,15 +2429,34 @@ function evaluate(st: GameState, meI: number, oppI: number, frames: number): num
 // Decision
 // ---------------------------------------------------------------------------
 
-const cand = new Int32Array(64);
-const candBonus = new Float64Array(64);
+const cand = new Int32Array(80);
+const candBonus = new Float64Array(80);
 let nCand = 0;
-const models = new Int32Array(8);
-const mWeight = new Float64Array(8);
+const MAX_MODELS = 10;
+const models = new Int32Array(MAX_MODELS);
+const mArg = new Int32Array(MAX_MODELS);
+const mWeight = new Float64Array(MAX_MODELS);
 let nModels = 0;
-const scoreBuf = new Float64Array(8);
+/** True when the reply set is a neutral one: movement is then only judged against its first two. */
+let neutralSit = false;
+const scoreBuf = new Float64Array(MAX_MODELS);
+const wBuf = new Float64Array(MAX_MODELS);
+const tailIdx = new Int32Array(MAX_MODELS);
+const topUsed = new Uint8Array(NA);
 /** Normalised reply weight below which a model no longer counts toward the worst case. */
 const WORST_MIN_W = 0.08;
+/** Bonus for a starter the kill-confirm table says leads to a KO from the victim's bracket. */
+const KC_BONUS = 10;
+/** Bonus for an edgeguard, a spike route or an aerial on a victim off the stage, when it connects. */
+const EG_BONUS = 6;
+/** E4: the worst TAIL_Q of the reply weight is the tail that gets reweighted. */
+const TAIL_Q = 0.25;
+/** E4: lambda floor when a stock ahead with no timer. */
+const LAMBDA_AHEAD = 0.7;
+/** Per decision, recovering: score per px of the smallest margin to a blast line (capped at 200 px). */
+const MARGIN_W = 0.4;
+/** Direct code of each attack class (0 when the class is not a direct move). */
+const CLASS_CODE = new Int32Array(NA);
 
 function addCand(pid: number, bonus: number): void {
   for (let i = 0; i < nCand; i++) if (cand[i] === pid) { if (bonus > candBonus[i]) candBonus[i] = bonus; return; }
@@ -1551,9 +2464,14 @@ function addCand(pid: number, bonus: number): void {
   cand[nCand] = pid; candBonus[nCand] = bonus; nCand++;
 }
 
-function addModel(model: number, w: number): void {
-  if (nModels >= models.length || w <= 0) return;
-  models[nModels] = model; mWeight[nModels] = w; nModels++;
+/** Adds a reply model, merging its weight into an identical one already in the set. */
+function addModel(model: number, w: number, arg: number): void {
+  if (w <= 0) return;
+  for (let i = 0; i < nModels; i++) {
+    if (models[i] === model && mArg[i] === arg) { mWeight[i] += w; return; }
+  }
+  if (nModels >= MAX_MODELS) return;
+  models[nModels] = model; mArg[nModels] = arg; mWeight[nModels] = w; nModels++;
 }
 
 function habitW(mem: AmMem, ctx: number, i: number): number {
@@ -1562,52 +2480,177 @@ function habitW(mem: AmMem, ctx: number, i: number): number {
   return mem.habits[ctx * HB_WIDTH + i] / (sum > 0 ? sum : 1);
 }
 
-/** Opponent reply models for the opponent's (perceived) situation, weighted by what it tends to do. */
-function pickModels(mem: AmMem, o: FighterState, si: StageInfo): number {
+/** True while `o` is tumbling over the stage, where the tech options are the replies. */
+function techCase(o: FighterState, si: StageInfo): boolean {
+  return (launched(o) || o.action === 'tumble') && o.action === 'tumble' && o.x > si.minX && o.x < si.maxX;
+}
+
+/**
+ * The fixed reply models for the opponent's (perceived) situation, weighted by its habit tables.
+ * These are the floor under the predictor: a never-seen option is still checked. Returns lambda.
+ */
+function fixedModels(mem: AmMem, o: FighterState, si: StageInfo): number {
   nModels = 0;
-  if (o.action === 'dead' || o.action === 'respawn' || o.stocks <= 0) { addModel(OM_CONT, 1); return LAMBDA_NEUTRAL; }
+  neutralSit = false;
+  if (o.action === 'dead' || o.action === 'respawn' || o.stocks <= 0) { addModel(OM_CONT, 1, 0); return LAMBDA_NEUTRAL; }
   if (o.action === 'ledgeHang') {
-    addModel(OM_L_UP, habitW(mem, HB_LEDGE, 0)); addModel(OM_L_ATK, habitW(mem, HB_LEDGE, 1));
-    addModel(OM_L_ROLL, habitW(mem, HB_LEDGE, 2)); addModel(OM_L_JUMP, habitW(mem, HB_LEDGE, 3));
-    addModel(OM_CONT, habitW(mem, HB_LEDGE, 4));
+    addModel(OM_L_UP, habitW(mem, HB_LEDGE, 0), 0); addModel(OM_L_ATK, habitW(mem, HB_LEDGE, 1), 0);
+    addModel(OM_L_ROLL, habitW(mem, HB_LEDGE, 2), 0); addModel(OM_L_JUMP, habitW(mem, HB_LEDGE, 3), 0);
+    addModel(OM_CONT, habitW(mem, HB_LEDGE, 4), 0);
     return LAMBDA_READ;
   }
   if (o.action === 'downed') {
-    addModel(OM_D_UP, habitW(mem, HB_DOWN, 0)); addModel(OM_D_ATK, habitW(mem, HB_DOWN, 1));
-    addModel(OM_D_TO, habitW(mem, HB_DOWN, 2)); addModel(OM_D_AWAY, habitW(mem, HB_DOWN, 3));
+    addModel(OM_D_UP, habitW(mem, HB_DOWN, 0), 0); addModel(OM_D_ATK, habitW(mem, HB_DOWN, 1), 0);
+    addModel(OM_D_TO, habitW(mem, HB_DOWN, 2), 0); addModel(OM_D_AWAY, habitW(mem, HB_DOWN, 3), 0);
     return LAMBDA_READ;
   }
   if (launched(o) || o.action === 'tumble') {
-    const overStage = o.x > si.minX && o.x < si.maxX;
-    if (o.action === 'tumble' && overStage) {
-      addModel(OM_T_NONE, habitW(mem, HB_TECH, 0)); addModel(OM_T_IN, habitW(mem, HB_TECH, 1));
-      addModel(OM_T_TO, habitW(mem, HB_TECH, 2)); addModel(OM_T_AWAY, habitW(mem, HB_TECH, 3));
+    if (techCase(o, si)) {
+      addModel(OM_T_NONE, habitW(mem, HB_TECH, 0), 0); addModel(OM_T_IN, habitW(mem, HB_TECH, 1), 0);
+      addModel(OM_T_TO, habitW(mem, HB_TECH, 2), 0); addModel(OM_T_AWAY, habitW(mem, HB_TECH, 3), 0);
     } else {
-      addModel(OM_CONT, habitW(mem, HB_ESC, 3) + habitW(mem, HB_ESC, 2));
-      addModel(OM_ESC, habitW(mem, HB_ESC, 1));
-      addModel(OM_ATK, habitW(mem, HB_ESC, 0));
+      addModel(OM_CONT, habitW(mem, HB_ESC, 3) + habitW(mem, HB_ESC, 2), 0);
+      addModel(OM_ESC, habitW(mem, HB_ESC, 1), 0);
+      addModel(OM_ATK, habitW(mem, HB_ESC, 0), 0);
     }
     return LAMBDA_READ + (1 - mem.repetition) * 0.15;
   }
-  if (offstage(o, si)) { addModel(OM_REC, 1); return LAMBDA_NEUTRAL; }
+  if (offstage(o, si)) {
+    // Every recovery the opponent could take, the middle one likeliest until the predictor says otherwise.
+    addModel(OM_REC, 0.55, 0); addModel(OM_REC_E, 0.15, 0); addModel(OM_REC_L, 0.15, 0); addModel(OM_REC_AD, 0.15, 0);
+    return LAMBDA_NEUTRAL;
+  }
   if (o.action === 'shield' || o.action === 'shieldStun') {
     // Out of a shield the options are few, and each opponent favours some: weight them by habit.
-    addModel(OM_CONT, 0.15 + habitW(mem, HB_SHIELD, 1));
-    addModel(OM_DEF, 0.15 + habitW(mem, HB_SHIELD, 0));
-    addModel(OM_ATK, 0.1 + habitW(mem, HB_SHIELD, 4) * 0.5);
-    addModel(OM_R_TO, habitW(mem, HB_SHIELD, 2));
-    addModel(OM_R_AWAY, habitW(mem, HB_SHIELD, 3));
+    addModel(OM_CONT, 0.15 + habitW(mem, HB_SHIELD, 1), 0);
+    addModel(OM_DEF, 0.15 + habitW(mem, HB_SHIELD, 0), 0);
+    addModel(OM_ATK, 0.1 + habitW(mem, HB_SHIELD, 4) * 0.5, 0);
+    addModel(OM_R_TO, habitW(mem, HB_SHIELD, 2), 0);
+    addModel(OM_R_AWAY, habitW(mem, HB_SHIELD, 3), 0);
     return LAMBDA_NEUTRAL - mem.repetition * 0.25;
   }
   // A passive opponent (one that stands there, or only walks) is read as such: the "keeps doing what
   // it does" reply takes the weight, and the attacking and shielding replies shrink toward nothing.
   const passive = passivity(mem);
   const active = 1 - passive;
-  addModel(OM_CONT, 0.25 * active + habitW(mem, HB_NEUTRAL, 2) * 0.5 + passive * 1.5);
-  addModel(OM_ATK, (0.25 + habitW(mem, HB_NEUTRAL, 0) * 0.5) * active);
-  addModel(OM_DEF, (0.2 + habitW(mem, HB_NEUTRAL, 1) * 0.5) * active);
+  neutralSit = true;
+  addModel(OM_CONT, 0.25 * active + habitW(mem, HB_NEUTRAL, 2) * 0.5 + passive * 1.5, 0);
+  addModel(OM_ATK, (0.25 + habitW(mem, HB_NEUTRAL, 0) * 0.5) * active, 0);
+  addModel(OM_DEF, (0.2 + habitW(mem, HB_NEUTRAL, 1) * 0.5) * active, 0);
   // A CPU that repeats itself is read harder: the worst case matters less once it is predictable.
   return LAMBDA_NEUTRAL - mem.repetition * 0.25 - passive * 0.45;
+}
+
+/** The reply model (and its arg, in mArgOut) that plays out predicted action class `cls` in situation `sit`. */
+let classArg = 0;
+function classModel(cls: number, sit: number, tech: boolean): number {
+  classArg = 0;
+  if (sit === SIT_OFF) {
+    if (cls === AC_JUMP) return OM_REC_E;
+    if (cls === AC_AD) return OM_REC_AD;
+    if (cls === 15) return OM_REC_L;        // uspecial: the geyser saved for last
+    return OM_REC;
+  }
+  if (sit === SIT_LAUNCHED && tech) {
+    if (cls === AC_ROLL_TO) return OM_T_TO;
+    if (cls === AC_ROLL_AWAY) return OM_T_AWAY;
+    if (cls === AC_STAND) return OM_T_IN;
+    return OM_T_NONE;
+  }
+  if (cls < 17) {
+    if (sit === SIT_LAUNCHED) return OM_ATK;
+    classArg = CLASS_CODE[cls];
+    return classArg > 0 ? OM_USE : OM_ATK;
+  }
+  switch (cls) {
+    case 17: return OM_L_ATK;
+    case 18: return OM_D_ATK;
+    case AC_GRAB: return sit === SIT_SHIELD ? OM_DEF : OM_GRAB;
+    case AC_SHIELD: return OM_DEF;
+    case AC_ROLL_TO: return sit === SIT_LEDGE ? OM_L_ROLL : sit === SIT_DOWN ? OM_D_TO : OM_R_TO;
+    case AC_ROLL_AWAY: return sit === SIT_DOWN ? OM_D_AWAY : sit === SIT_LEDGE ? OM_L_ROLL : OM_R_AWAY;
+    case AC_SPOT: return OM_SPOT;
+    case AC_JUMP: return sit === SIT_LEDGE ? OM_L_JUMP : sit === SIT_LAUNCHED ? OM_CONT : OM_JUMP;
+    case AC_AD: return sit === SIT_LAUNCHED ? OM_ESC : OM_AD;
+    case AC_IN: return OM_IN;
+    case AC_OUT: return sit === SIT_LEDGE ? OM_CONT : OM_OUT;
+    case AC_STAND: return sit === SIT_LEDGE ? OM_L_UP : sit === SIT_DOWN ? OM_D_UP : OM_CONT;
+    default: return OM_CONT;
+  }
+}
+
+/**
+ * Reply models for the decision (E2): the fixed habit-weighted set, then the predictor's top-k next
+ * actions for the current context with their probabilities. The predictor takes up to PRED_SHARE of
+ * the weight, scaled by how much it has seen in this context, so the fixed set keeps a floor.
+ * Sorted by weight; in neutral the attacking reply is kept among the first two, since movement is
+ * judged against those only. Returns lambda.
+ */
+/** The perceived frame of the decision in progress (for the rhythm row). */
+let curFrame = 0;
+/** How well the current opponent is read right now: context confidence times recent top-guess accuracy, 0..1. */
+let predictability = 0;
+/** Lambda comes down by up to this much against an opponent the predictor reads well. */
+const LAMBDA_READ_DROP = 0.25;
+
+function pickModels(mem: AmMem, o: FighterState, m: FighterState, si: StageInfo, P: Pred | null): number {
+  predictability = 0;
+  const lambda = fixedModels(mem, o, si);
+  let wsum = 0;
+  for (let k = 0; k < nModels; k++) wsum += mWeight[k];
+  for (let k = 0; k < nModels; k++) mWeight[k] /= wsum > 0 ? wsum : 1;
+  const alive = o.action !== 'dead' && o.action !== 'respawn' && o.stocks > 0;
+  if (P !== null && alive) {
+    const sit = sitOf(o, si);
+    const tech = techCase(o, si);
+    ctxRows(P, sit, distBucket(m, o), oursOf(m), phaseOf(P, curFrame));
+    const conf = predict(P, pk0, pk1, pk2, rhythmRow(P, curFrame));
+    let hits = 0;
+    for (let i = 0; i < P.ringN; i++) hits += P.ring[i];
+    const acc = P.ringN >= 10 ? hits / P.ringN : 0.5;
+    predictability = conf * acc;
+    // The predictor gets the weight it has earned: its context confidence, times how often its top
+    // guess has been right lately (a coin-flip record against a random player earns almost nothing).
+    const earned = Math.max(0, Math.min(1, (acc - 0.25) / 0.4));
+    const share = PRED_SHARE * conf * earned;
+    if (share > 0.01) {
+      for (let k = 0; k < nModels; k++) mWeight[k] *= 1 - share;
+      topUsed.fill(0);
+      let sumTop = 0;
+      const picked = tailIdx;     // scratch: the top-k classes
+      let nPick = 0;
+      for (let r = 0; r < PRED_TOPK; r++) {
+        let b = -1;
+        for (let a = 0; a < NA; a++) if (topUsed[a] === 0 && (b < 0 || predP[a] > predP[b])) b = a;
+        if (b < 0) break;
+        topUsed[b] = 1;
+        picked[nPick++] = b;
+        sumTop += predP[b];
+      }
+      for (let r = 0; r < nPick; r++) {
+        const cls = picked[r];
+        const mdl = classModel(cls, sit, tech);
+        addModel(mdl, share * predP[cls] / (sumTop > 0 ? sumTop : 1), classArg);
+      }
+    }
+  }
+  // Heaviest first (insertion sort on the parallel arrays).
+  for (let i = 1; i < nModels; i++) {
+    const md = models[i]; const ar = mArg[i]; const w = mWeight[i];
+    let j = i - 1;
+    while (j >= 0 && mWeight[j] < w) { models[j + 1] = models[j]; mArg[j + 1] = mArg[j]; mWeight[j + 1] = mWeight[j]; j--; }
+    models[j + 1] = md; mArg[j + 1] = ar; mWeight[j + 1] = w;
+  }
+  if (neutralSit && nModels > 2 && models[0] !== OM_ATK && models[1] !== OM_ATK) {
+    for (let i = 2; i < nModels; i++) {
+      if (models[i] !== OM_ATK) continue;
+      const md = models[1]; const ar = mArg[1]; const w = mWeight[1];
+      models[1] = models[i]; mArg[1] = mArg[i]; mWeight[1] = mWeight[i];
+      models[i] = md; mArg[i] = ar; mWeight[i] = w;
+      break;
+    }
+  }
+  return lambda;
 }
 
 /** Plans matching a combo-table follow-up, for our current footing. */
@@ -1626,14 +2669,18 @@ function addFollowPlans(moveIdx: number, grounded: boolean, facingIn: boolean, b
     case 'fair': if (facingIn) { addCand(grounded ? P_SH_FAIR : P_A_FAIR, bonus); if (grounded) addCand(P_FH_FAIR, bonus); } break;
     case 'bair': if (!facingIn) addCand(grounded ? P_SH_BAIR : P_A_BAIR, bonus); break;
     case 'uair': addCand(grounded ? P_SH_UAIR : P_A_UAIR, bonus); if (grounded) { addCand(P_FH_UAIR, bonus); addCand(P_FH_UAIR_L, bonus); } else addCand(P_A_DJ_UAIR, bonus); break;
-    case 'dair': addCand(grounded ? P_SH_DAIR : P_A_DAIR, bonus); break;
+    case 'dair': addCand(grounded ? P_SH_DAIR : P_A_DAIR, bonus); if (!grounded) addCand(P_A_DAIR_SPIKE, bonus); break;
     case 'uspecial': addCand(grounded ? P_USPEC_G : P_A_USPEC, bonus); break;
     default: break;
   }
 }
 
+function kcOn(starter: number, b: number, pos: number): boolean {
+  return killConfirm[(starter * N_BRACKET + b) * N_POS + pos] === 1;
+}
+
 /** Builds the candidate list for our situation. Returns false when there is nothing to decide. */
-function buildCandidates(st: GameState, meI: number, oppI: number, mem: AmMem, canFs: boolean): boolean {
+function buildCandidates(st: GameState, meI: number, oppI: number, mem: AmMem, canFs: boolean, P: Pred | null): boolean {
   nCand = 0;
   const m = st.fighters[meI];
   const o = st.fighters[oppI];
@@ -1644,6 +2691,7 @@ function buildCandidates(st: GameState, meI: number, oppI: number, mem: AmMem, c
   const facingIn = m.facing === cDir;
   const oLaunched = launched(o) || o.action === 'tumble';
   const oBusy = busyFrames(o);
+  const oOffstage = offstage(o, si);
   let shots = 0;
   for (let i = 0; i < st.projectiles.length; i++) {
     const pr = st.projectiles[i];
@@ -1656,7 +2704,7 @@ function buildCandidates(st: GameState, meI: number, oppI: number, mem: AmMem, c
   // Combo table suggestions when the opponent is still in our hitstun.
   if (oLaunched && mem.lastStarter >= 0) {
     const b = bracketOf(o.percent);
-    const pos = !o.onGround && dy < -30 ? 2 : (o.x < si.minX + 50 || o.x > si.maxX - 50) ? 1 : 0;
+    const pos = oOffstage && o.y > si.topY - 10 ? 3 : !o.onGround && dy < -30 ? 2 : (o.x < si.minX + 50 || o.x > si.maxX - 50) ? 1 : 0;
     const e = (mem.lastStarter * N_BRACKET + b) * N_POS + pos;
     for (let k = 0; k < 3; k++) {
       const f = comboNext[e * 3 + k];
@@ -1665,8 +2713,13 @@ function buildCandidates(st: GameState, meI: number, oppI: number, mem: AmMem, c
     }
   }
 
+  // Spike routing (E3): a victim off the stage below the ledge, or one we can carry there.
+  const oLow = oOffstage && o.y > si.topY - 20;
+  const oSameSide = (o.x < si.cx) === (m.x < si.cx);
+
   switch (m.action) {
     case 'ledgeHang':
+      if (oLow && adx < 70 && dy > -10) addCand(P_L_DROP_DAIR, EG_BONUS);
       addCand(P_L_WAIT, 0); addCand(P_L_GETUP, 0); addCand(P_L_ATK, 0); addCand(P_L_ROLL, 0);
       addCand(P_L_JUMP, 0); addCand(P_L_JUMP_FAIR, 0); addCand(P_L_DROP_FAIR, 0);
       return true;
@@ -1684,22 +2737,63 @@ function buildCandidates(st: GameState, meI: number, oppI: number, mem: AmMem, c
       if (adx < 80) { addCand(facingIn ? P_OOS_FAIR : P_OOS_BAIR, 0); addCand(P_OOS_UAIR, 0); }
       addCand(P_SPOT, 0); addCand(P_ROLL_B, 0); addCand(P_ROLL_F, 0);
       return true;
-    case 'tumble':
-      addCand(P_X_STAY, 0); addCand(P_X_DJ_S, 0); addCand(P_X_AD_S, 0); addCand(P_X_DRIFT_S, 0);
+    case 'tumble': {
+      const offMe = offstage(m, si);
+      addCand(P_X_STAY, 0); addCand(P_X_DJ_S, 0); addCand(P_X_DRIFT_S, 0);
+      // Never air dodge toward the ledge while a jump is left (E4): the jump is the safer way home.
+      if ((!offMe || m.jumpsLeft === 0) && canAirDodge(m)) addCand(P_X_AD_S, 0);
       if (m.jumpsLeft > 0) addCand(P_X_DJ_B, 0);
       addCand(P_X_FF, 0);
       if (adx < 60) addCand(P_X_NAIR, 0);
       return true;
+    }
     default: break;
+  }
+
+  // Kill confirms (E3): the victim sits in a bracket where one of these starters leads to a KO.
+  if (!oLaunched && o.onGround && Math.abs(dy) < 40 && adx < 130) {
+    const b = bracketOf(o.percent);
+    const pos = (o.x < si.minX + 50 || o.x > si.maxX - 50) ? 1 : 0;
+    let grabKills = false;
+    for (let i = 0; i < COMBO_THROWS.length; i++) if (kcOn(S_THROW0 + i, b, pos)) grabKills = true;
+    if (m.onGround) {
+      if (grabKills) { if (adx < 64) addCand(P_GRAB, KC_BONUS); addCand(P_DASHGRAB, KC_BONUS); }
+      if (adx < 70 && kcOn(comboIndexOf('dtilt'), b, pos)) addCand(P_DTILT, KC_BONUS);
+      if (adx < 44 && kcOn(comboIndexOf('utilt'), b, pos)) addCand(P_UTILT, KC_BONUS);
+      if (adx < 120 && kcOn(comboIndexOf('nair'), b, pos)) addCand(P_SH_NAIR, KC_BONUS);
+    } else if (adx < 60 && kcOn(comboIndexOf('nair'), b, pos)) {
+      addCand(P_A_NAIR, KC_BONUS);
+    }
+  }
+
+  // Exploits (E2): the opponent answers our approaches one way more than EXPLOIT_P of the time.
+  if (P !== null && m.onGround && o.onGround && !oLaunched && adx < 150) {
+    const mask = exploitMask(P);
+    if (mask !== 0) {
+      if ((mask & (1 << RS_SHIELD)) !== 0) { if (adx < 64) addCand(P_GRAB, EXPLOIT_BONUS); addCand(P_DASHGRAB, EXPLOIT_BONUS); }
+      if ((mask & (1 << RS_ROLL)) !== 0) { addCand(P_DASHATK, EXPLOIT_BONUS); addCand(P_DASHGRAB, EXPLOIT_BONUS); if (adx < 116) addCand(P_FSMASH, EXPLOIT_BONUS); addCand(P_WAIT, 0); }
+      if ((mask & (1 << RS_JUMP)) !== 0) { if (adx < 44) { addCand(P_USMASH, EXPLOIT_BONUS); addCand(P_UTILT, EXPLOIT_BONUS); } addCand(P_SH_UAIR, EXPLOIT_BONUS); addCand(P_FH_UAIR, EXPLOIT_BONUS); }
+      if ((mask & (1 << RS_AD)) !== 0) { addCand(P_DASHATK, EXPLOIT_BONUS); if (adx < 44) addCand(P_USMASH, EXPLOIT_BONUS); if (adx < 60) addCand(P_DSMASH, EXPLOIT_BONUS); }
+      if ((mask & (1 << RS_SPOT)) !== 0) { if (adx < 116) addCand(P_FSMASH_C, EXPLOIT_BONUS); if (adx < 70) addCand(P_DTILT, EXPLOIT_BONUS); }
+      if ((mask & (1 << RS_ATTACK)) !== 0) { addCand(P_SH_BAIR_R, EXPLOIT_BONUS); addCand(P_DD_B, 0); if (adx < 92) addCand(P_FTILT, EXPLOIT_BONUS); }
+    }
   }
 
   if (!m.onGround) {
     const off = offstage(m, si);
     if (off) {
-      addCand(P_REC_MID, 0); addCand(P_REC_EARLY, 0); addCand(P_REC_LATE, 0); addCand(P_REC_AD, 0);
+      addCand(P_REC_MID, 0); addCand(P_REC_EARLY, 0); addCand(P_REC_LATE, 0);
+      // The air dodge onto the ledge only once the jumps are spent (E4).
+      if (m.jumpsLeft === 0 && canAirDodge(m)) addCand(P_REC_AD, 0);
       if (m.jumpsLeft > 0) addCand(P_A_DJ_F, 0);
       if (m.action === 'air') addCand(P_A_USPEC, 0);
-      addCand(P_A_AD_S, 0);
+      if (m.jumpsLeft === 0 && canAirDodge(m)) addCand(P_A_AD_S, 0);
+    }
+    if (oLow && dy > 0 && adx < 70 && m.action === 'air') addCand(P_A_DAIR_SPIKE, EG_BONUS);
+    // Hits on a victim off the stage are edgeguards: the aerials that reach it come first.
+    if (oOffstage && adx < 90 && Math.abs(dy) < 90) {
+      addCand(facingIn ? P_A_FAIR : P_A_BAIR, EG_BONUS); addCand(P_A_NAIR, EG_BONUS);
+      if (dy > 10) addCand(P_A_DAIR, EG_BONUS);
     }
     addCand(P_A_NONE, 0); addCand(P_A_F, 0); addCand(P_A_B, 0);
     if (m.vy > -1 && !m.fastFalling && !off) { addCand(P_A_FF, 0); addCand(P_A_FF_B, 0); addCand(P_A_FF_F, 0); }
@@ -1716,15 +2810,31 @@ function buildCandidates(st: GameState, meI: number, oppI: number, mem: AmMem, c
       if (adx < 110) { addCand(P_A_DJ_F, 0); if (dy < 0) addCand(P_A_DJ_UAIR, 0); addCand(facingIn ? P_A_DJ_FAIR : P_A_DJ_BAIR, 0); }
       addCand(P_A_DJ_N, 0);
     }
-    if (threat && adx < 100) { addCand(P_A_AD_B, 0); addCand(P_A_AD_F, 0); }
-    if (adx > 60 && adx < 200 && Math.abs(dy) < 40) { addCand(P_A_NSPEC, 0); addCand(P_A_SSPEC, 0); }
+    // The one air dodge of this airborne period is spent only on a real threat, and never twice.
+    if (threat && adx < 100 && canAirDodge(m)) { addCand(P_A_AD_B, 0); addCand(P_A_AD_F, 0); }
+    if (adx > 60 && adx < 230 && Math.abs(dy) < 40) { addCand(P_A_NSPEC, 0); addCand(P_A_SSPEC, 0); }
     // The geyser rises about 85 px: a target far above is out of its reach, and the rise is a whiff.
     if (dy < -30 && dy > -130 && adx < 40) addCand(P_A_USPEC, 0);
     return true;
   }
 
   // Grounded.
-  const oOff = offstage(o, si) || o.action === 'ledgeHang';
+  const oOff = oOffstage || o.action === 'ledgeHang';
+  // Edgeguards and spike routes first (E3): examined before the generic list, so the step budget
+  // never truncates them, and with a bonus when they connect. Rollout-verified as every candidate.
+  if (oOff && m.jumpsLeft > 0 && m.percent < 150) {
+    const nearEdge = Math.min(Math.abs(m.x - si.minX), Math.abs(m.x - si.maxX)) < 70;
+    if (oSameSide) {
+      if (nearEdge) { addCand(P_EG_NAIR, EG_BONUS); addCand(facingIn ? P_EG_FAIR : P_EG_BAIR, EG_BONUS); }
+      // Spike routes reach further: the hop off carries us out to a victim falling below the ledge.
+      const nearSpike = Math.min(Math.abs(m.x - si.minX), Math.abs(m.x - si.maxX)) < 130;
+      if (nearEdge || (oLow && nearSpike)) addCand(P_EG_DAIR, EG_BONUS);
+      if (oLow && nearSpike) addCand(facingIn ? P_EG_FAIR_DAIR : P_EG_BAIR_DAIR, EG_BONUS);
+      // The crescent covers the space the recovery has to pass through.
+      if (adx < 300) addCand(P_SSPEC, EG_BONUS);
+      addCand(P_EG_HOG, 0);
+    }
+  }
   addCand(P_WAIT, 0);
   addCand(P_DASH_F, 0); addCand(P_DASH_B, 0);
   if (adx < 160) { addCand(P_DD_F, 0); addCand(P_DD_B, 0); }
@@ -1732,17 +2842,24 @@ function buildCandidates(st: GameState, meI: number, oppI: number, mem: AmMem, c
   if (adx < 110) addCand(P_WALK_F, 0);
   if (threat || adx < 80) { addCand(P_SHIELD, 0); addCand(P_SPOT, 0); addCand(P_ROLL_B, 0); }
   if (threat && adx < 60) addCand(P_ROLL_F, 0);
+  // Reaches from the move data: jab and dtilt close, ftilt to 80 px, fsmash and dash attack to 102 px.
   if (adx < 64 && Math.abs(dy) < 60) {
-    addCand(P_JAB, 0); addCand(P_FTILT, 0); addCand(P_DTILT, 0); addCand(P_GRAB, 0);
-    addCand(P_FSMASH, 0); addCand(P_DSMASH, 0);
+    addCand(P_JAB, 0); addCand(P_DTILT, 0); addCand(P_GRAB, 0); addCand(P_DSMASH, 0);
+  }
+  if (adx < 96 && Math.abs(dy) < 60) addCand(P_FTILT, 0);
+  if (adx < 118 && Math.abs(dy) < 60) {
+    addCand(P_FSMASH, 0);
     if (oBusy >= 22) addCand(P_FSMASH_C, 0);
   }
-  if (adx < 44 && dy < 20) {
+  // Up tilt and up smash reach about 60 px up (the charged smash is also held for a target
+  // falling into it); a target far above is out of reach and the swing is a whiff.
+  if (adx < 44 && dy < 20 && dy > -150) {
     addCand(P_UTILT, 0); addCand(P_USMASH, 0);
     if (oBusy >= 22 || (dy < -60 && !o.onGround)) addCand(P_USMASH_C, 0);
   }
   if (adx < 34) addCand(P_DSPEC, 0);
-  if (adx < 130) { addCand(P_DASHATK, 0); addCand(P_DASHGRAB, 0); }
+  if (adx < 150) addCand(P_DASHATK, 0);
+  if (adx < 130) addCand(P_DASHGRAB, 0);
   if (adx < 120 && dy > -120) {
     addCand(P_SH_NAIR, 0); addCand(P_SH_NAIR_FF, 0);
     if (facingIn) { addCand(P_SH_FAIR, 0); addCand(P_SH_FAIR_FF, 0); addCand(P_FH_FAIR, 0); }
@@ -1751,76 +2868,89 @@ function buildCandidates(st: GameState, meI: number, oppI: number, mem: AmMem, c
   }
   if (dy < -20 && adx < 80) { addCand(P_SH_UAIR, 0); addCand(P_FH_UAIR, 0); addCand(P_FH_UAIR_L, 0); addCand(P_FH_NAIR, 0); addCand(P_FH_EMPTY_N, 0); }
   if (dy > 20 && adx < 120 && onSoftPlatform(st, m)) { addCand(P_PLATDROP, 0); if (adx < 60) addCand(P_SH_DAIR, 0); }
-  if (adx > 50 && adx < 220 && Math.abs(dy) < 40 && !oLaunched) { addCand(P_NSPEC, 0); addCand(P_SSPEC, 0); }
+  if (adx > 50 && adx < 240 && Math.abs(dy) < 40 && !oLaunched) { addCand(P_NSPEC, 0); addCand(P_SSPEC, 0); }
+  // The full orb: a long-range bullet, and a ledge-timing tool against a recovering opponent.
+  if (facingIn && !oLaunched && ((adx > 170 && adx < 380 && Math.abs(dy) < 50) || (oOff && adx < 380))) addCand(P_NSPEC_FULL, 0);
   if (adx < 40 && dy < -20 && dy > -130) addCand(P_USPEC_G, 0);
-  if (oOff && m.jumpsLeft > 0 && m.percent < 150) {
-    const nearEdge = Math.min(Math.abs(m.x - si.minX), Math.abs(m.x - si.maxX)) < 70;
-    const oSameSide = (o.x < si.cx) === (m.x < si.cx);
-    if (oSameSide) {
-      addCand(P_EG_HOG, 0);
-      if (nearEdge) { addCand(P_EG_NAIR, 0); addCand(P_EG_DAIR, 0); addCand(facingIn ? P_EG_FAIR : P_EG_BAIR, 0); }
-    }
-  }
   return true;
 }
 
 /**
- * The search: every candidate against every reply model, blended, the no-whiff rule applied,
- * then the humanizer's occasional safe alternative. Returns the chosen plan id.
+ * The search: every candidate against every reply model, scored by the E4 objective (a blend of
+ * the worst reply and a tail-weighted mean), the no-whiff and loss vetoes applied, spike routes
+ * taken at once when they are sure, then the humanizer's occasional safe alternative.
  */
-function decide(real: GameState, st: GameState, work: GameState, meI: number, oppI: number, mem: AmMem, rand: () => number, canFs: boolean): number {
+function decide(st: GameState, work: GameState, meI: number, oppI: number, mem: AmMem, rand: () => number, canFs: boolean, P: Pred | null): number {
   const m = st.fighters[meI];
   const o = st.fighters[oppI];
-  if (!buildCandidates(st, meI, oppI, mem, canFs)) return -1;
-  const lambda = Math.max(0.1, Math.min(0.8, pickModels(mem, o, cSi)));
-  let wsum = 0;
-  for (let k = 0; k < nModels; k++) wsum += mWeight[k];
-  for (let k = 0; k < nModels; k++) mWeight[k] /= wsum > 0 ? wsum : 1;
-  const neutralModels = nModels >= 3 && models[0] === OM_CONT && models[1] === OM_ATK;
+  if (!buildCandidates(st, meI, oppI, mem, canFs, P)) return -1;
+  curFrame = st.frame;
+  let lambda = pickModels(mem, o, m, cSi, P);
+  // A player the model reads well is played against its predicted replies more than its worst one.
+  lambda -= LAMBDA_READ_DROP * predictability;
+  // Stock-up management (E4): a stock ahead with no timer, stay in the maximin regime.
+  const ahead = m.stocks - o.stocks;
+  if (ahead >= 1 && st.config.timeLimitSec <= 0) lambda = Math.max(lambda, LAMBDA_AHEAD - passivity(mem) * 0.45);
+  lambda = Math.max(0.1, Math.min(0.8, lambda));
+  const tailMul = ahead >= 1 ? 2 : ahead === 0 ? 1 : 0.5;
+  const moveModels = neutralSit ? Math.min(2, nModels) : nModels;
 
   let budget = warming || st.frame >= RAMP_FRAMES ? STEP_BUDGET : RAMP_BUDGET;
-  let best = -1;
-  let bestScore = -Infinity;
+  // Budget: candidates are examined in priority order (FS, combo follow-ups, spikes, kill confirms,
+  // exploits, then the rest), each at its full horizon against every reply model it needs. When the
+  // step budget runs low the last candidates get shorter horizons and then none: a larger reply set
+  // costs horizon at the tail of the list, never a reply model. (Shrinking every horizon evenly was
+  // tried and measured worse: kill moves need their whole horizon to show the launch.)
+  const extra = dlyState !== null ? dlyN : 0;
+  let bestSafe = -1; let bestSafeScore = -Infinity;
+  let bestAny = -1; let bestAnyScore = -Infinity;
   let altBest = -1;
   let altScore = -Infinity;
-  let bestWorst = -Infinity;
   const recovering = offstage(m, cSi);
   for (let c = 0; c < nCand; c++) {
     const pid = cand[c];
     const flags = PLAN_FLAGS[pid];
+    const nm = (flags & F_ATTACK) === 0 ? moveModels : nModels;
     let h = PLAN_H[pid];
-    // Models: movement is judged against the continuing and the attacking reply; commitments get
-    // the shielding one too, since "safe on shield" is half of the no-whiff rule.
-    let nm = nModels;
-    if (neutralModels && (flags & F_ATTACK) === 0) nm = 2;
-    if (budget < h * nm) {
-      if (budget < 12 * nm) break;
-      h = Math.floor(budget / nm);
+    if (budget < (h + extra) * nm) {
+      if (budget < (12 + extra) * nm) break;
+      h = Math.floor(budget / nm) - extra;
     }
-    budget -= h * nm;
+    budget -= (h + extra) * nm;
+    let wsum = 0;
+    for (let k = 0; k < nm; k++) wsum += mWeight[k];
     let worst = Infinity;
     let avg = 0;
-    let wUsed = 0;
     let connects = false;
     let shieldSafe = false;
     let returns = true;
     let fsAll = pid === P_FS;
     let atkSafe = true;
+    let spikeAll = (flags & F_SPIKE) !== 0;
+    let lossy = false;
+    let punished = false;
+    let minMargin = 1e9;
     for (let k = 0; k < nm; k++) {
-      const sc = rollout(st, work, meI, oppI, pid, models[k], h, mem.prevHeld);
+      const sc = rollout(st, work, meI, oppI, pid, models[k], mArg[k], h, mem.prevHeld);
+      const w = mWeight[k] / (wsum > 0 ? wsum : 1);
       scoreBuf[k] = sc;
-      mem.steps += h;
+      wBuf[k] = w;
+      mem.steps += h + extra;
       // A reply the habits have all but ruled out does not get to set the worst case.
-      if (mWeight[k] >= WORST_MIN_W && sc < worst) worst = sc;
-      avg += sc * mWeight[k];
-      wUsed += mWeight[k];
+      if (w >= WORST_MIN_W && sc < worst) worst = sc;
+      avg += sc * w;
       if (rDealt > 0 || rGrabbed || rKoOpp > 0) connects = true;
       if (models[k] === OM_DEF && rTaken === 0 && !rKoMe) shieldSafe = true;
       if (models[k] === OM_ATK && (rTaken > 0 || rKoMe > 0)) atkSafe = false;
       if ((flags & F_EG) !== 0 && !rBackHome && rKoOpp === 0) returns = false;
       if (pid === P_FS && !rFsCaught) fsAll = false;
+      if (spikeAll && (rKoOpp === 0 || !rBackHome || rLost)) spikeAll = false;
+      if (w > LIKELY_W) {
+        if (rLost) lossy = true;
+        if (rTaken > 0 || rKoMe > 0) punished = true;
+      }
+      if (rMinMargin < minMargin) minMargin = rMinMargin;
     }
-    avg /= wUsed > 0 ? wUsed : 1;
     if (worst === Infinity) worst = avg;
     if (pid === P_FS) {
       if (!fsAll) continue;
@@ -1832,15 +2962,43 @@ function decide(real: GameState, st: GameState, work: GameState, meI: number, op
       if ((flags & F_PROJ) === 0 ? !shieldSafe : !atkSafe) continue;
     }
     if ((flags & F_EG) !== 0 && !returns) continue;
-    let score = lambda * worst + (1 - lambda) * avg + candBonus[c] * (connects ? 1 : 0);
+    if (spikeAll && nm > 0) {
+      // A spike that KOs in every reply and brings us back: take it now (E3).
+      mem.decisions++;
+      for (let i = 0; i < PLAN_COUNT; i++) mem.used[i] *= STALE_DECAY;
+      mem.used[pid] += 1;
+      return pid;
+    }
+    // E4: the worst TAIL_Q of the reply weight counts tailMul times in the mean.
+    for (let k = 0; k < nm; k++) {
+      let j = k - 1;
+      tailIdx[k] = k;
+      while (j >= 0 && scoreBuf[tailIdx[j]] > scoreBuf[k]) { tailIdx[j + 1] = tailIdx[j]; j--; }
+      tailIdx[j + 1] = k;
+    }
+    let num = 0; let den = 0; let cum = 0;
+    for (let r = 0; r < nm; r++) {
+      const k = tailIdx[r];
+      const mul = cum < TAIL_Q ? tailMul : 1;
+      cum += wBuf[k];
+      num += wBuf[k] * mul * scoreBuf[k];
+      den += wBuf[k] * mul;
+    }
+    const tailMean = den > 0 ? num / den : avg;
+    let score = lambda * worst + (1 - lambda) * tailMean + candBonus[c] * (connects ? 1 : 0);
+    if (recovering) score += MARGIN_W * Math.min(200, minMargin);
     if (pid === mem.plan && (flags & F_INTR) !== 0) score += CONTINUITY;
     if ((flags & (F_ATTACK | F_STALE)) !== 0) score -= mem.used[pid] * STALE_COST * ((flags & (F_PROJ | F_STALE)) !== 0 ? 2 : 1);
     score += rand() * 0.25;
-    if (score > bestScore) { bestScore = score; best = pid; bestWorst = worst; }
-    if ((flags & F_MOVE) !== 0 && worst > -2 && score > altScore) { altScore = score; altBest = pid; }
+    if (score > bestAnyScore) { bestAnyScore = score; bestAny = pid; }
+    if (!lossy && score > bestSafeScore) { bestSafeScore = score; bestSafe = pid; }
+    // E5: the humanizer's alternative is never one a likely reply punishes.
+    if ((flags & F_MOVE) !== 0 && worst > -2 && !punished && !lossy && score > altScore) { altScore = score; altBest = pid; }
   }
+  // E4: a stock lost in any likely reply vetoes the candidate whenever a candidate without one exists.
+  const best = bestSafe >= 0 ? bestSafe : bestAny;
+  const bestScore = bestSafe >= 0 ? bestSafeScore : bestAnyScore;
   mem.decisions++;
-  void real; void bestWorst;
   for (let i = 0; i < PLAN_COUNT; i++) mem.used[i] *= STALE_DECAY;
   if (best >= 0 && (PLAN_FLAGS[best] & (F_ATTACK | F_STALE)) !== 0) mem.used[best] += 1;
   // Humanizer: now and then take a safe movement option instead of the best one, when it costs
@@ -1861,6 +3019,7 @@ const MOVE_IDS: readonly MoveId[] = [
   'jab', 'ftilt', 'utilt', 'dtilt', 'dashatk', 'fsmash', 'usmash', 'dsmash', 'nair', 'fair', 'bair',
   'uair', 'dair', 'nspecial', 'sspecial', 'uspecial', 'dspecial', 'ledgeatk', 'getupatk',
 ];
+for (let i = 0; i < 17; i++) CLASS_CODE[i] = dc(MOVE_IDS[i]);
 
 /** Frames of an opponent standing free in neutral that count as one "did nothing" observation. */
 const IDLE_BUMP = 20;
@@ -1870,6 +3029,10 @@ function neutralFree(o: FighterState): boolean {
   switch (o.action) {
     case 'idle': case 'walk': case 'dash': case 'run': case 'turn': case 'crouch': case 'land': case 'air':
       return o.hitstun <= 0 && o.stocks > 0;
+    // A tumble that has run out of hitstun on the floor is a fighter lying there choosing nothing
+    // (a spike on a grounded fighter can leave one resting in tumble until it presses something).
+    case 'tumble':
+      return o.hitstun <= 0 && o.hitlag === 0 && o.onGround && o.stocks > 0;
     default: return false;
   }
 }
@@ -1977,7 +3140,16 @@ function observe(state: GameState, meI: number, oppI: number, mem: AmMem): void 
     if (ev.attacker === meSlot && ev.victim === o.slot) {
       const sf = me as SimFighter;
       const id = me.action === 'throw' && sf.activeThrowId !== null ? sf.activeThrowId : me.moveId;
-      const ci = comboIndexOf(id);
+      let ci = me.action === 'attack' || me.action === 'throw' ? comboIndexOf(id) : -1;
+      // An orb (or its burst) of ours at the hit point: the tap and the full charge are separate starters.
+      const pr = state.projectiles;
+      for (let k = 0; k < pr.length; k++) {
+        const q = pr[k];
+        if (q.owner !== meSlot || (q.defId !== 'orb' && q.defId !== 'orbBurst')) continue;
+        if (Math.abs(q.x - ev.x) > 40 || Math.abs(q.y - ev.y) > 40) continue;
+        ci = S_ORB0 + (q.scale >= 1.2 ? 1 : 0);
+        break;
+      }
       if (ci >= 0) mem.lastStarter = ci;
     }
   }
@@ -2150,7 +3322,10 @@ export function warmAevalmere(config: MatchConfig): void {
  */
 export function aevalmereInput(state: GameState, slot: number, rand: () => number, out: InputFrame): InputFrame {
   const mem = memSlots[slot];
-  if (mem.matchRef !== state.config || state.frame < mem.lastFrame - 60) {
+  const newMatch = mem.matchRef !== state.config || state.frame < mem.lastFrame - 60;
+  if (newMatch) {
+    // The match before ends here if the host never said so: its profiles go back to their stores.
+    if (mem.matchRef !== null) saveProfiles(mem);
     const keepHist = mem.hist;
     const keepP = mem.perceived;
     const keepW = mem.work;
@@ -2170,6 +3345,18 @@ export function aevalmereInput(state: GameState, slot: number, rand: () => numbe
   snapshot(state, mem);
   cSi = stageInfo(state.stageId);
   const me = state.fighters[meI];
+  if (newMatch) startPredictors(state, meI, mem);
+  // Watch every enemy, every frame, whatever we are doing (E2).
+  let koSeen = false;
+  for (let i = 0; i < state.fighters.length; i++) {
+    if (i === meI) continue;
+    const f = state.fighters[i];
+    if (f.slot < 0 || f.slot >= mem.preds.length || sameTeam(state, me.slot, f.slot)) continue;
+    const P = mem.preds[f.slot];
+    if (P !== null) predObserve(state, meI, i, P, cSi);
+  }
+  for (let e = 0; e < state.events.length; e++) if (state.events[e].type === 'ko') koSeen = true;
+  if (koSeen) saveProfiles(mem);
 
   if (me.stocks <= 0 || me.action === 'dead') { mem.plan = -1; return finish(mem, state, out, 0, 0); }
   const oppI = nearestOpp(state, meI);
@@ -2199,7 +3386,7 @@ export function aevalmereInput(state: GameState, slot: number, rand: () => numbe
   }
   if (oppI < 0) {
     // Nobody to fight: stay home.
-    mem.plan = P_REC_MID; mem.planT = 0; mem.planHome = me.x < cSi.cx ? 1 : -1;
+    mem.plan = P_REC_MID; mem.planT = 0; mem.planHome = homeSign(me.x, me.y, cSi);
   }
 
   const o = oppI >= 0 ? state.fighters[oppI] : me;
@@ -2214,15 +3401,15 @@ export function aevalmereInput(state: GameState, slot: number, rand: () => numbe
       nCand = 0;
       addCand(P_T_IN, 0); addCand(P_T_L, 0); addCand(P_T_R, 0);
       cDir = o.x >= me.x ? 1 : -1;
-      cHome = me.x < cSi.cx ? 1 : -1;
-      pickModels(mem, o, cSi);
+      cHome = homeSign(me.x, me.y, cSi);
+      fixedModels(mem, o, cSi);
       let bestS = -Infinity;
       for (let c = 0; c < nCand; c++) {
         let s = 0;
         let w = 0;
         for (let k = 0; k < nModels; k++) {
-          const md = models[k] >= OM_L_UP ? OM_CONT : models[k];
-          s += rollout(state, work, meI, oppI, cand[c], md, 36, mem.prevHeld) * mWeight[k];
+          const md = models[k] >= OM_L_UP && models[k] !== OM_REC_E && models[k] !== OM_REC_L && models[k] !== OM_REC_AD ? OM_CONT : models[k];
+          s += rollout(state, work, meI, oppI, cand[c], md, 0, 36, mem.prevHeld) * mWeight[k];
           w += mWeight[k];
           mem.steps += 36;
         }
@@ -2271,7 +3458,7 @@ export function aevalmereInput(state: GameState, slot: number, rand: () => numbe
     // A plan that lost its footing (launched, grabbed onto a ledge) is thought through again.
     if (!need && pid >= 0 && act && (launched(me) || me.action === 'ledgeHang' || me.action === 'downed')) {
       const flags = PLAN_FLAGS[pid];
-      const ledgePlan = pid >= P_L_WAIT && pid <= P_L_DROP_FAIR;
+      const ledgePlan = pid >= P_L_WAIT && pid <= P_L_DROP_DAIR;
       const downPlan = pid >= P_D_UP && pid <= P_D_ROLL_R;
       if ((me.action === 'ledgeHang' && !ledgePlan) || (me.action === 'downed' && !downPlan)) need = true;
       void flags;
@@ -2282,16 +3469,22 @@ export function aevalmereInput(state: GameState, slot: number, rand: () => numbe
   if (forced >= 0) {
     mem.plan = forced; mem.planT = 0; mem.lastDecide = state.frame;
     mem.planDir = o.x >= me.x ? 1 : -1;
-    mem.planHome = me.x < cSi.cx ? 1 : -1;
+    mem.planHome = homeSign(me.x, me.y, cSi);
   } else if (need && oppI >= 0) {
     const P = perceive(state, meI, mem);
     const pm = P.fighters[meI];
     const po = P.fighters[oppI];
     cDir = po.x > pm.x ? 1 : po.x < pm.x ? -1 : pm.facing;
-    cHome = pm.x < cSi.cx ? 1 : -1;
+    cHome = homeSign(pm.x, pm.y, cSi);
     const bm = P.fighters[meI];
     base.myPct = bm.percent; base.oppPct = po.percent; base.myStocks = bm.stocks; base.oppStocks = po.stocks;
-    const pid = decide(state, P, work, meI, oppI, mem, rand, canFs);
+    const pred = mem.preds[po.slot];
+    const hiD = (((state.frame - AEVALMERE_REACT) % HIST) + HIST) % HIST;
+    if (state.frame >= AEVALMERE_REACT && mem.histFrame[hiD] === state.frame - AEVALMERE_REACT) {
+      dlyState = mem.hist[hiD].st; dlyFrom = state.frame - AEVALMERE_REACT; dlyMem = mem; dlyReal = state.fighters[meI]; dlyN = AEVALMERE_REACT;
+    }
+    const pid = decide(P, work, meI, oppI, mem, rand, canFs, pred !== undefined ? pred : null);
+    dlyState = null; dlyMem = null; dlyReal = null; dlyN = 0;
     mem.lastDecide = state.frame;
     if (pid >= 0) {
       if (pid !== mem.plan || (PLAN_FLAGS[pid] & F_INTR) === 0) mem.planT = 0;

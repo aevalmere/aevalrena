@@ -14,9 +14,9 @@ import { canBeHit, projectileChargePower, projectileChargeScale } from '../sim/h
 import { isLedgeAction } from '../sim/ledge';
 import { PROJECTILE_DEFS } from '../sim/projectiles';
 import { fighterHurtbox, sameTeam, type SimFighter } from '../sim/state';
-import { aevalmereInput, warmAevalmere } from './aevalmere';
+import { aevalmereInput, flushAevalmereProfiles, warmAevalmere } from './aevalmere';
 
-export { warmAevalmere };
+export { flushAevalmereProfiles, warmAevalmere };
 
 // Per-slot scratch state. Preallocated once; cpuInput only mutates these, never allocates.
 interface CpuMem {
@@ -510,9 +510,12 @@ for (let i = 0; i < MAX_PLAYERS; i++) {
 
 const groundCache = new Map<string, GroundInfo>();
 
+/**
+ * The solid ground and blast top of a stage, read from the live StageDef on every call into one
+ * cached object per stage (no allocation after the first), so nothing here assumes Tidegate and a
+ * stage edited at runtime is seen at once.
+ */
 function getGround(stageId: string): GroundInfo {
-  const cached = groundCache.get(stageId);
-  if (cached) return cached;
   const stage = STAGE_DEFS[stageId];
   let minX = -180;
   let maxX = 180;
@@ -529,9 +532,14 @@ function getGround(stageId: string): GroundInfo {
       }
     }
   }
-  const b = stage ? stage.blast : { x: -483, y: -480, w: 966, h: 720 };
-  const info: GroundInfo = { minX, maxX, topY, blastTop: b.y };
-  groundCache.set(stageId, info);
+  const blastTop = stage ? stage.blast.y : -480;
+  let info = groundCache.get(stageId);
+  if (info === undefined) {
+    info = { minX, maxX, topY, blastTop };
+    groundCache.set(stageId, info);
+  } else {
+    info.minX = minX; info.maxX = maxX; info.topY = topY; info.blastTop = blastTop;
+  }
   return info;
 }
 
@@ -1221,10 +1229,12 @@ function rollNow(mem: CpuMem, dirBit: number): number {
 }
 
 /**
- * Dodge pressed while airborne: an air dodge, invincible on frames 3-27 of 30. A held direction
- * gives it momentum, so it doubles as a movement and recovery mixup.
+ * Dodge pressed while airborne: an air dodge (AIR_DODGE: invincible on frames 2-31 of 34), one per
+ * airborne period. A held direction gives it momentum, so it doubles as a movement mixup. Once it is
+ * spent the press would be refused and consumed, so it is not offered again until a landing.
  */
 function airDodgeSafe(me: FighterState, g: GroundInfo): boolean {
+  if ((me as unknown as { airDodgeUsed?: boolean }).airDodgeUsed === true) return false;
   return me.x > g.minX + 10 && me.x < g.maxX - 10 && me.y < g.topY + 10;
 }
 
@@ -2552,7 +2562,10 @@ function decide(state: GameState, slot: number, prof: CpuProfile, rand: () => nu
       // climb is fast. Sitting on one answer is what a human learns to camp.
       const foe = nearestOpponent(state, slot, me);
       const close = foe !== null && Math.abs(foe.x - me.x) < 70;
-      if (rand() < (close ? 0.8 : 0.4) * prof.punishChance) return Btn.Attack;
+      // A ledge attack only with an enemy somewhere it could reach: swung at empty air (or at a
+      // teammate standing on the ledge) it is a free punish and a thrown-away mixup.
+      const inReach = foe !== null && Math.abs(foe.x - me.x) < 150 && Math.abs(foe.y - me.y) < 90;
+      if (inReach && rand() < (close ? 0.8 : 0.4) * prof.punishChance) return Btn.Attack;
       // Ledge roll is the Dodge button; it comes up past someone standing on the ledge.
       if (close && mem.dodgeCd === 0 && rand() < 0.3 * prof.dodgeSkill) {
         mem.dodgeCd = DODGE_COOLDOWN;
@@ -2601,7 +2614,10 @@ function decide(state: GameState, slot: number, prof: CpuProfile, rand: () => nu
     // Just past the corner and high over the lip, drifting home lands on the stage by itself; an up
     // special there only swings at whoever stands below.
     const edgeOut = me.x < ground.minX ? ground.minX - me.x : me.x > ground.maxX ? me.x - ground.maxX : 0;
-    const driftsHome = edgeOut < 30 && me.y < ground.topY - 100;
+    // Drifting home works when the air speed covers the gap before the fall reaches the lip.
+    const fallFrames = (ground.topY - me.y) / Math.max(1, me.vy);
+    // (A few px out and still above the lip, the drift lands on the stage or the ledge snaps.)
+    const driftsHome = me.y < ground.topY - 4 && edgeOut + 4 < CHARACTER_DEFS[me.charId].airSpeed * fallFrames;
     if (me.jumpsLeft === 0 && me.vy > 0 && me.action === 'air' && !driftsHome) return Btn.Special | Btn.Up;
     return 0;
   }
@@ -3145,6 +3161,15 @@ export function cpuInput(state: GameState, slot: number, level: number, rand: ()
         onSoftPlatform(state, me)) {
       held &= ~Btn.Attack;
     }
+  }
+  // Airborne (or in jump squat, where a press is buffered into the jump), a fresh Attack while the
+  // gate is up can only be an aerial: hard-gated here whichever decision path asked for it.
+  if (gateBefore > 0 && me !== null && !me.onGround && !holding && me.action !== 'grabbed' &&
+      !isLedgeAction(me.action) && (held & Btn.Attack) !== 0 && (mem.prevHeld & Btn.Attack) === 0) {
+    held &= ~Btn.Attack;
+  }
+  if (gateBefore > 0 && me !== null && me.action === 'jumpsquat' && (held & Btn.Attack) !== 0 && (mem.prevHeld & Btn.Attack) === 0) {
+    held &= ~Btn.Attack;
   }
   if (mem.shieldTimer > 0) {
     held |= Btn.Shield;
