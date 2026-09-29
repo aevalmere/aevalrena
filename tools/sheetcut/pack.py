@@ -93,6 +93,8 @@ def anim_ts(name: str, a: dict, strip: str = "") -> str:
     ]
     if a.get("mirror"):
         parts.append("mirror: true")
+    if "loopFrom" in a:
+        parts.append(f"loopFrom: {int(a['loopFrom'])}")
     return f"  {name}: {{ {', '.join(parts)} }},"
 
 
@@ -104,6 +106,10 @@ def main() -> int:
         for name, a in smap[group].items():
             if len(a["frames"]) != len(a["holds"]):
                 print(f"error: {group}.{name} has {len(a['frames'])} frames but {len(a['holds'])} holds")
+                return 1
+            lf = a.get("loopFrom")
+            if lf is not None and (group != "fx" or not 0 <= lf < len(a["frames"])):
+                print(f"error: {group}.{name} loopFrom {lf} is not an fx frame index")
                 return 1
 
     body_names = ordered_unique(f for a in smap["body"].values() for f in a["frames"])
@@ -152,7 +158,16 @@ def main() -> int:
         "export const AEVAL_ANIMS: Record<AnimName, AnimDef> = {",
     ]
     lines += [anim_ts(n, a) for n, a in smap["body"].items()]
-    lines += ["};", "", "export const AEVAL_FX_ANIMS: Record<string, AnimDef> = {"]
+    lines += [
+        "};",
+        "",
+        "/** An fx anim; `loopFrom` = frame index a loop returns to after the last frame (default 0). */",
+        "export interface FxAnimDef extends AnimDef {",
+        "  loopFrom?: number;",
+        "}",
+        "",
+        "export const AEVAL_FX_ANIMS: Record<string, FxAnimDef> = {",
+    ]
     lines += [anim_ts(n, a, "fx_") for n, a in smap["fx"].items()]
     lines += ["};", ""]
     (OUT / "anims.ts").write_text("\n".join(lines), encoding="utf-8", newline="\n")
