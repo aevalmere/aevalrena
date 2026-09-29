@@ -222,3 +222,64 @@ numpy (a BFS over a boolean array is fine; images are at most 2172x1024).
 - No source PNG in Downloads was modified.
 - Report: the per-sheet scale, the frame counts per row, anything blanked by
   the text or ledge rules that looked wrong, and the path of the contact sheets.
+
+## Orb sheet (neutral special, 2026-09-28c)
+
+Script: `python tools/sheetcut/cut_orb.py` (run after `cut.py`, which would
+otherwise rewrite the old orb0-2 / burst0-2 crops and their manifest entries).
+Then `python tools/sheetcut/pack.py`.
+
+Source: `ChatGPT Image Sep 28, 2026, 11_36_20 PM.png` (1672x940 RGBA), copied
+once to `art/aeval/sheets/orb.png`; the Downloads original is never written.
+
+1. Key: luma = (0.299 R + 0.587 G + 0.114 B) * A/255. Luma <= 40 is background
+   (the navy halo). Alpha ramps from 0 at luma 40 to 255 at luma 110.
+2. Bands (source y, inclusive), all at x 30..1661 (the left border rule at x 21
+   is outside). Titles sit above each band and never enter it:
+   | fx name   | band y   | number strip y | sprites on sheet | crops |
+   |-----------|----------|----------------|------------------|-------|
+   | orbCharge | 40..148  | 136..147       | 8                | 8     |
+   | orb       | 182..292 | 280..291       | 13               | 12    |
+   | orbBig    | 316..460 | 445..459       | 11               | 11    |
+   | burst     | 494..666 | 652..664       | 11               | 11    |
+3. Captions: a connected component (8-connectivity, luma > 40) lying wholly in
+   the row's number strip and within 12 px in x of a measured number centre is
+   removed. Components under 2 px are dropped.
+4. Frames: each row has measured sprite x ranges (in `cut_orb.py`); columns are
+   split halfway between neighbouring ranges. A component goes whole to the
+   slot holding most of its pixels, unless two slots each hold 20+ px, then it
+   is split by column. The core plus its sparks stay one frame.
+   - TRAVEL (NORMAL) has 13 sprites (two are numbered 6); the second "6"
+     (source x 612..701) is dropped so the row has 12.
+   - TRAVEL (EXPANDED) has 11 sprites although its numbers run to 12 (two are
+     numbered 8 under one sprite). All 11 are cut as orbBig0..10.
+5. Scale (one factor per row, so growth inside a row is kept):
+   - orb: widest side of the largest luma > 150 blob, median over frames 6..11,
+     scaled to 16 px (0.4103).
+   - orbBig: the widest frame (orbBig10) scaled to 72 px (0.3000; core about
+     21 px). The renderer draws Big anims at native size, not times the sim
+     scale; only the hit circle grows.
+   - burst: the widest frame scaled to 40 px (0.2116).
+   - orbCharge: the orb factor, so the formed charge matches the shot.
+   Downscale: premultiplied box filter with 2 px padding, then alpha
+   a' = clamp(2a - 64) (50% coverage -> ~75% opacity, faint haze drops out),
+   pixels with a' < 8 cleared, tight bbox.
+6. Anchor. orb and orbBig: centroid of the largest luma > 150 blob (the head
+   of the shot), mapped through the scale and trim, so the hit circle sits on
+   the head. orbCharge: the same, but only when that blob holds at least 60% of
+   the bright pixels; the ring frames (orbCharge2-4) keep the bbox centre.
+   burst: bbox centre (w//2, h//2). Manifest `fx` entries:
+   `{w, h, ax, ay, anchor: "core" | "centre", src: "orb_<row>_<n>"}` with n the
+   1-based sprite index on the sheet.
+7. Output: `crops/fx_orbCharge0..7.png`, `fx_orb0..11.png`, `fx_orbBig0..10.png`,
+   `fx_burst0..10.png`, and `crops/CONTACT_orb.png` (3x, red cross = anchor).
+8. Sheetmap `fx` anims: orbCharge 8 frames (picked by charge fraction, not the
+   clock), orb 12 frames holds 2 loop with `loopFrom: 8` (growth done by sim
+   frame 24, then 8..11 cycle), orbBig 11 frames holds 2 loop with
+   `loopFrom: 7` (frame 7 by sim frame 14, then 7..10 cycle), burst 11 frames
+   holds 2 (30 fps) no loop. `loopFrom` is an optional fx-only anim field:
+   pack.py emits it into anims.ts (`FxAnimDef`), and after the last frame the
+   loop returns to that index. The renderer
+   squeezes a one-shot projectile anim into the def lifetime (burst lives 10
+   sim frames) so it plays through once.
+

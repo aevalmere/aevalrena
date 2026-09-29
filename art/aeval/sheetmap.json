@@ -71,8 +71,10 @@
     "getupatk":      { "frames": ["defense_roll_9","ground_sweepF_1","ground_sweepF_2","ground_sweepF_3","ground_sweepF_5"], "holds": [7,7,4,3,13], "loop": false }
   },
   "fx": {
-    "orb":      { "frames": ["fx_orb0","fx_orb1","fx_orb0"], "holds": [5,5,5], "loop": true },
-    "burst":    { "frames": ["fx_burst0","fx_burst1","fx_burst2"], "holds": [4,4,4], "loop": false },
+    "orbCharge": { "frames": ["fx_orbCharge0","fx_orbCharge1","fx_orbCharge2","fx_orbCharge3","fx_orbCharge4","fx_orbCharge5","fx_orbCharge6","fx_orbCharge7"], "holds": [4,4,4,4,4,4,4,4], "loop": true, "_note": "drawn at the hand while nspecial charges; frame = floor(charge fraction * 7), not the clock" },
+    "orb":      { "frames": ["fx_orb0","fx_orb1","fx_orb2","fx_orb3","fx_orb4","fx_orb5","fx_orb6","fx_orb7","fx_orb8","fx_orb9","fx_orb10","fx_orb11"], "holds": [2,2,2,2,2,2,2,2,2,2,2,2], "loop": true, "loopFrom": 8, "_note": "growth plays once (done by sim frame 24), then frames 8..11 cycle" },
+    "orbBig":   { "frames": ["fx_orbBig0","fx_orbBig1","fx_orbBig2","fx_orbBig3","fx_orbBig4","fx_orbBig5","fx_orbBig6","fx_orbBig7","fx_orbBig8","fx_orbBig9","fx_orbBig10"], "holds": [2,2,2,2,2,2,2,2,2,2,2], "loop": true, "loopFrom": 7, "_note": "11 expanded frames on the sheet; growth plays once (frame 7 by sim frame 14), then 7..10 cycle. Drawn when projectile scale >= 1.2" },
+    "burst":    { "frames": ["fx_burst0","fx_burst1","fx_burst2","fx_burst3","fx_burst4","fx_burst5","fx_burst6","fx_burst7","fx_burst8","fx_burst9","fx_burst10"], "holds": [2,2,2,2,2,2,2,2,2,2,2], "loop": false, "_note": "renderer fits a one-shot projectile anim into the def lifetime so it plays once" },
     "crescent": { "frames": ["fx_crescent0","fx_crescent1","fx_crescent2"], "holds": [6,6,6], "loop": true },
     "arrow":    { "frames": ["fx_arrow0"], "holds": [6], "loop": true },
     "hitspark": { "frames": ["fx_hitspark0","fx_hitspark1","fx_hitspark2"], "holds": [3,3,3], "loop": false },
