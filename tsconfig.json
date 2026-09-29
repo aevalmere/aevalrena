@@ -8,7 +8,9 @@
     "noUnusedLocals": true,
     "noUnusedParameters": false,
     "isolatedModules": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "types": []
   },
-  "include": ["src"]
+  "include": ["src"],
+  "exclude": ["src/net/discoverytest.ts"]
 }

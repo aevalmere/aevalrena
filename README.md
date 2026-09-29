@@ -17,7 +17,23 @@ npm run dev
 npm run build
 ```
 
-Output goes to `dist/`. `npm run typecheck` runs `tsc --noEmit` on its own.
+Output goes to `dist/`. `npm run typecheck` runs `tsc --noEmit` for the game and for the LAN agent (`server/`).
+
+## Play on LAN
+
+Everyone on the same Wi-Fi or wired network can see each other's lobbies and join any of them.
+Each player needs this repo and [Node.js](https://nodejs.org) 20 or newer.
+
+1. `npm install` (once).
+2. `npm run lan`. It builds the game and prints `Open http://localhost:5180/`.
+3. Open that address, then Mode select > LAN. Every lobby on the network shows up in the list
+   within a second or two. Pick one to join, or create your own.
+
+Windows asks once whether Node.js may use the network: allow it on Private networks, or other
+machines cannot see or join your lobbies. If a lobby does not appear (some routers block the
+discovery broadcast), type the other machine's address, as printed by its `npm run lan`
+(for example `192.168.1.20:5180`), into "Join by address". To run a second agent on one machine,
+use `npm run lan -- --port 5181`. Details and limits: [docs/LAN.md](docs/LAN.md).
 
 ## Deploy to GitHub Pages
 

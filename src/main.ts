@@ -14,7 +14,7 @@ import type {
 } from './core/types';
 import { CHARACTER_LIST } from './characters/registry';
 import { STAGE_LIST } from './stages/registry';
-import { cpuInput, warmAevalmere } from './ai';
+import { cpuInput, flushAevalmereProfiles, warmAevalmere } from './ai';
 import { createInputSystem, createLocalSession, padStartPressed } from './input';
 import { createTuner, type Tuner } from './debug/tuner';
 import { createRenderer } from './render';
@@ -24,6 +24,15 @@ import { STAGE_DEFS } from './stages/registry';
 import { cloneGameState, createGameState, stepGame } from './sim';
 import { createUi } from './ui';
 import { createHud, type HudView } from './ui/hud';
+import { createLanSessionImpl, p1OnlyConfig, type LanSession } from './input/session';
+import { startBackgroundTicker, type BackgroundTicker } from './net/bgtick';
+import { lanClient } from './net/client';
+import { eliminateFighter } from './net/eliminate';
+import type { InputHistory, MatchStart, Retirement } from './net/protocol';
+import { RollbackSession, type LocalSource, type RollbackOptions } from './net/rollback';
+import { createWebSocketTransport } from './net/transport';
+import { createLocalView, type LocalView } from './net/view';
+import { createLanOverlay, type LanOverlay } from './ui/lan';
 
 /**
  * App entry point and state machine: title -> mode -> select (all owned by the
@@ -50,7 +59,47 @@ interface Match {
   hasHuman: boolean;
   endTimer: number;
   ended: boolean;
+  /** Present for a LAN match (docs/LAN.md): the rollback engine steps the sim, not step(). */
+  lan?: LanMatch;
 }
+
+interface LanMatch {
+  session: LanSession;
+  rollback: RollbackSession;
+  view: LocalView;
+  transport: ReturnType<typeof createWebSocketTransport>;
+  overlay: LanOverlay;
+  /** Steps the match from a Worker while the tab is hidden (rAF stops there). */
+  ticker: BackgroundTicker;
+  /** Slots whose player dropped, with their name and the time the reconnect window closes. */
+  dropped: Map<number, { name: string; until: number }>;
+  /**
+   * Players who left for good, by slot, with when the news arrived. They are eliminated in the
+   * sim (RollbackSession.retire), so the match plays on or ends by the normal rule.
+   */
+  left: Map<number, { name: string; at: number }>;
+  /** When this browser lost the lobby for good (0 = never): results follow a short banner. */
+  lostAt: number;
+  /** Consecutive ticks the engine could not advance (a peer is behind). */
+  waitTicks: number;
+  desyncFrame: number;
+  offKey: () => void;
+}
+
+/**
+ * Longest catch-up per background tick, in sim frames, and the most elapsed time one tick may
+ * cover. A background browser can deliver Worker messages as rarely as once a second or two,
+ * so a hidden peer must be able to catch up a full second at once (a step costs ~50 us).
+ */
+const BG_MAX_STEPS = 90;
+const BG_MAX_ELAPSED_MS = 1500;
+/** The rAF loop counts as stalled after this long without a step. */
+const LOOP_STALL_MS = 120;
+const FRAME_MS = 1000 / 60;
+/** How long a "left the match" banner stays up. */
+const LEFT_BANNER_MS = 3000;
+/** How long "You lost the connection" shows before results. */
+const LOST_BANNER_MS = 1800;
 
 const debugFlags: DebugFlags = { hitboxes: false, frameData: false, perf: false };
 const perf: PerfSample = { simMs: 0, renderMs: 0, fps: 0 };
@@ -254,11 +303,21 @@ function boot(): void {
   let fpsWindowStart = performance.now();
   let freezeCpu = false;
 
-  function endMatch(): void {
+  function endMatch(sendBackToLobby = true): void {
     hud.stop();
     hudHost.hidden = true;
     if (match === null) return;
     match.session.stop();
+    const lan = match.lan;
+    if (lan !== undefined) {
+      lan.session.stop();
+      lan.transport.dispose();
+      lan.overlay.dispose();
+      lan.ticker.stop();
+      lan.offKey();
+      lanClient.matchActive = false;
+      if (sendBackToLobby) lanClient.backToLobby();
+    }
     match = null;
   }
 
@@ -274,6 +333,7 @@ function boot(): void {
   function showResults(): void {
     if (match === null || ui === null) return;
     const data = buildResults(match.state);
+    flushAevalmereProfiles();
     phase = 'results';
     hudHost.hidden = true;
     ui.show('results', data);
@@ -282,6 +342,10 @@ function boot(): void {
   function step(): void {
     if (match === null || phase !== 'match') return;
     const m = match;
+    if (m.lan !== undefined) {
+      stepLan(m, m.lan);
+      return;
+    }
     const inputs = m.session.inputsForFrame(m.state.frame);
     if (inputs === null) return;
 
@@ -321,6 +385,11 @@ function boot(): void {
     // finished match once the UI has moved off it.
     if (phase === 'results' && ui !== null) {
       const screen = ui.current();
+      if (screen !== null && screen !== 'results' && match !== null && match.lan !== undefined) {
+        // After a LAN match every way off the results screen leads back to the lobby.
+        leaveLanMatch(false);
+        return;
+      }
       if (screen !== null && screen !== 'results') {
         loop.stop();
         endMatch();
@@ -331,7 +400,14 @@ function boot(): void {
     }
 
     const renderStart = performance.now();
-    if (match !== null) {
+    if (match !== null && match.lan !== undefined) {
+      // LAN: display code reads the local-P1 view; the sim state itself is untouched.
+      const view = match.lan.view;
+      const rb = match.lan.rollback;
+      view.update(match.state, () => rb.drainEvents());
+      renderer.render(view.render, match.prev, alpha, debugFlags, perf);
+      hud.update(view.hud, stepTagCamera(tagCam, match.state, match.prev, alpha));
+    } else if (match !== null) {
       renderer.render(match.state, match.prev, alpha, debugFlags, perf);
       hud.update(match.state, stepTagCamera(tagCam, match.state, match.prev, alpha));
     }
@@ -346,7 +422,16 @@ function boot(): void {
     }
   }
 
-  const loop: Loop = createLoop({ step, render, hz: 60 });
+  /** When the rAF loop last stepped; a LAN match falls back to the Worker ticker if it stops. */
+  let lastLoopStepAt = 0;
+  const loop: Loop = createLoop({
+    step: () => {
+      lastLoopStepAt = performance.now();
+      step();
+    },
+    render,
+    hz: 60,
+  });
 
   function pauseMatch(): void {
     if (match === null || ui === null || phase !== 'match') return;
@@ -393,6 +478,277 @@ function boot(): void {
     loop.start();
   }
 
+  // ---------------- LAN (docs/LAN.md) ----------------
+
+  function openLanScreen(): void {
+    ui?.show('lan');
+  }
+
+  /** Leave a finished or abandoned LAN match for the LAN screen; `vote` also votes Rematch. */
+  function leaveLanMatch(vote: boolean): void {
+    loop.stop();
+    endMatch();
+    if (vote) lanClient.rematch();
+    phase = 'menu';
+    clearCanvas();
+    openLanScreen();
+  }
+
+  /**
+   * Results for every peer. Players who left were eliminated in the sim, so the winner is the
+   * sim's own; they are tagged "(left)". A browser that lost the lobby shows what it had.
+   */
+  function showLanResults(m: Match, lan: LanMatch): void {
+    if (ui === null) return;
+    const data = buildResults(m.state);
+    const mySlot = lanClient.me()?.slot ?? -1;
+    for (const p of data.players) {
+      if (!lan.left.has(p.slot) && !(lan.lostAt > 0 && p.slot === mySlot)) continue;
+      p.name = `${p.name ?? `P${p.slot + 1}`} (left)`;
+    }
+    lan.overlay.dispose();
+    phase = 'results';
+    hudHost.hidden = true;
+    ui.show('results', data);
+  }
+
+  function stepLan(m: Match, lan: LanMatch): void {
+    snapshotPrev(m.prev, m.state);
+    const simStart = performance.now();
+    const advanced = lan.session.tick();
+    perf.simMs = performance.now() - simStart;
+    lan.waitTicks = advanced ? 0 : lan.waitTicks + 1;
+
+    const rb = lan.rollback;
+    const now = performance.now();
+    let text = '';
+    let color = '#ffd27f';
+    let recentLeft = '';
+    for (const l of lan.left.values()) if (now - l.at < LEFT_BANNER_MS) recentLeft = l.name;
+    if (lan.lostAt > 0) {
+      text = 'You lost the connection';
+      color = '#ffb38a';
+      if (now - lan.lostAt > LOST_BANNER_MS) {
+        showLanResults(m, lan);
+        return;
+      }
+    } else if (recentLeft !== '') {
+      text = `${recentLeft} left the match`;
+      color = '#ffb38a';
+    } else if (lanClient.lobbyStatus === 'reconnecting') {
+      text = 'Connection lost. Reconnecting...';
+    } else if (lan.dropped.size > 0) {
+      const d = lan.dropped.values().next().value;
+      if (d !== undefined) text = `Waiting for ${d.name}... (${Math.max(0, Math.ceil((d.until - now) / 1000))} s)`;
+    } else if (lan.desyncFrame >= 0) {
+      text = `Desync at frame ${lan.desyncFrame}`;
+      color = '#ff7f7f';
+    } else if (lan.waitTicks > 20) {
+      text = 'Waiting for players...';
+    }
+    lan.overlay.banner(text, color);
+    if ((rb.tick & 15) === 0) {
+      lan.overlay.stat(`Ping ${lanClient.rtt < 0 ? '--' : lanClient.rtt} ms · delay ${rb.inputDelay} · rollback ${rb.stats.maxRollback}`);
+    }
+    if (!advanced) return;
+
+    // A finish seen on predicted inputs can still be rolled back; wait until it is confirmed.
+    if (m.state.finished && rb.confirmedFrame() >= m.state.endFrame - 1) {
+      if (!m.ended) {
+        m.ended = true;
+        m.endTimer = RESULTS_DELAY;
+      } else if (m.endTimer > 0) {
+        m.endTimer--;
+        if (m.endTimer === 0) showLanResults(m, lan);
+      }
+    }
+  }
+
+  let bgLast = 0;
+  let bgAcc = 0;
+  /** Test hook: act as if the tab were hidden (the rAF loop is paused and the Worker drives). */
+  let forceBackground = false;
+
+  /**
+   * Worker-driven step whenever the rAF loop is not stepping: a hidden tab, and also a visible
+   * but occluded or throttled one (rAF can drop to a few frames a second without the page
+   * reporting hidden). A stalled peer would freeze everyone. Catch-up is capped per tick.
+   */
+  function backgroundTick(): void {
+    const now = performance.now();
+    const loopStalled = now - lastLoopStepAt > LOOP_STALL_MS;
+    if (!(document.hidden || forceBackground || loopStalled) || phase !== 'match' || match === null || match.lan === undefined) {
+      bgLast = now;
+      bgAcc = 0;
+      return;
+    }
+    bgAcc += Math.min(BG_MAX_ELAPSED_MS, now - bgLast);
+    bgLast = now;
+    let n = 0;
+    while (bgAcc >= FRAME_MS && n < BG_MAX_STEPS) {
+      step();
+      bgAcc -= FRAME_MS;
+      n++;
+    }
+    if (n === BG_MAX_STEPS) bgAcc = 0;
+  }
+
+  /** Start (or, with `history`, rejoin) a LAN match from the lobby agent's start message. */
+  function startLanMatch(start: MatchStart, history?: InputHistory, retirements: Retirement[] = []): void {
+    if (ui === null) return;
+    const me = lanClient.me();
+    const ws = lanClient.ws;
+    if (me === null || ws === null) return;
+    // Replacing a finished LAN match: the agent already counts us in the new one.
+    endMatch(false);
+
+    const config = start.config;
+    const peer = me.slot;
+    const localIndex = Math.max(0, config.players.findIndex((p) => p.slot === peer && !p.cpu));
+    // The local player always plays on Player 1's keys and pad (docs/LAN.md).
+    const p1 = createLocalSession(input, p1OnlyConfig(config));
+    const lanSession = createLanSessionImpl(p1);
+    const cpuRng = createRng((config.seed ^ 0x9e3779b9) >>> 0);
+    const rand = (): number => nextFloat(cpuRng);
+    const ownsCpu = config.players.some((p, i) => p.cpu && start.owners[i] === peer);
+    if (ownsCpu && config.players.some((p) => p.cpu && p.cpuLevel >= 10)) warmAevalmere(config);
+    // CPU slots belong to the lobby host's peer: it runs the AI once per frame and sends the
+    // result like a human input, so the AI is never re-run by a rollback.
+    const sources: (LocalSource | null)[] = config.players.map((p, i) => {
+      if (start.owners[i] !== peer) return null;
+      if (p.cpu) return (_frame: number, st: GameState) => cpuInput(st, p.slot, p.cpuLevel, rand);
+      return () => lanSession.localSource();
+    });
+    const transport = createWebSocketTransport(ws);
+    const lan: LanMatch = {
+      session: lanSession,
+      rollback: null as unknown as RollbackSession,
+      view: createLocalView(config, localIndex),
+      transport,
+      overlay: createLanOverlay(app),
+      ticker: startBackgroundTicker(backgroundTick),
+      dropped: new Map(),
+      left: new Map(),
+      lostAt: 0,
+      waitTicks: 0,
+      desyncFrame: -1,
+      offKey: () => {},
+    };
+    const opts: RollbackOptions = {
+      config,
+      sim: { createGameState, stepGame, eliminate: eliminateFighter },
+      peer,
+      owners: start.owners,
+      sources,
+      transport,
+      inputDelay: start.inputDelay,
+      onDesync: (frame, from, local, remote) => {
+        if (lan.desyncFrame < 0) lan.desyncFrame = frame;
+        console.warn(`[lan] desync at frame ${frame} vs peer ${from}: local ${local.toString(16)} remote ${remote.toString(16)}`);
+      },
+    };
+    lan.rollback = history === undefined ? new RollbackSession(opts) : RollbackSession.fromHistory(opts, history, retirements);
+    // A resumed page learns who already left from the agent, for the results tags.
+    for (const r of retirements) {
+      for (const i of r.players) {
+        const p = config.players[i];
+        if (p !== undefined && !p.cpu) lan.left.set(p.slot, { name: p.name ?? `P${p.slot + 1}`, at: 0 });
+      }
+    }
+    lanSession.setEngine(lan.rollback);
+    const state = lan.rollback.state;
+    lan.view.update(state);
+
+    // No pause in a LAN match: Escape asks before leaving, and the match keeps running meanwhile.
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.code !== 'Escape' || phase !== 'match' || lan.overlay.confirming()) return;
+      e.preventDefault();
+      void lan.overlay.confirmLeave().then((leave) => {
+        if (!leave || match === null || match.lan !== lan) return;
+        lanClient.leaveMatch();
+        leaveLanMatch(false);
+      });
+    };
+    window.addEventListener('keydown', onKey);
+    lan.offKey = () => window.removeEventListener('keydown', onKey);
+
+    match = { config, state, prev: cloneGameState(state), session: p1, hasHuman: true, endTimer: 0, ended: false, lan };
+    lanClient.matchActive = true;
+    renderer.setStage(config.stageId);
+    tagCam.primed = false;
+    hud.start(lan.view.hud);
+    hudHost.hidden = false;
+    ui.hide();
+    phase = 'match';
+    lanSession.start();
+    drainInputs();
+    bgLast = performance.now();
+    bgAcc = 0;
+    lastLoopStepAt = bgLast;
+    loop.setPaused(false);
+    loop.start();
+  }
+
+  // Test hook for the LAN browser checks, only with ?lantest in the URL. Automation runs in an
+  // isolated world, so it talks through a DOM event and answers in a data attribute.
+  if (new URLSearchParams(location.search).has('lantest')) {
+    document.addEventListener('aevlantest', (e: Event) => {
+      const cmd = String((e as CustomEvent<unknown>).detail ?? '');
+      if (cmd.startsWith('drop')) lanClient.simulateDrop(Number(cmd.slice(4)) || 0);
+      if (cmd === 'background' || cmd === 'foreground') {
+        forceBackground = cmd === 'background';
+        loop.setPaused(forceBackground);
+      }
+      const lan = match?.lan;
+      document.documentElement.dataset.aevlan = JSON.stringify({
+        phase,
+        hidden: document.hidden,
+        agentStatus: lanClient.agentStatus,
+        lobbyStatus: lanClient.lobbyStatus,
+        message: lanClient.message,
+        rtt: lanClient.rtt,
+        lobby: lanClient.lobby,
+        match: lan === undefined ? null : {
+          tick: lan.rollback.tick, confirmed: lan.rollback.confirmedFrame(), delay: lan.rollback.inputDelay, stats: lan.rollback.stats,
+          finished: lan.rollback.state.finished, endFrame: lan.rollback.state.endFrame, winner: lan.rollback.state.winner,
+          stocks: lan.rollback.state.fighters.map((f) => f.stocks),
+        },
+      });
+    });
+  }
+
+  lanClient.onStart = (start: MatchStart): void => {
+    if (match !== null && match.lan !== undefined && phase === 'match') return;
+    startLanMatch(start);
+  };
+  lanClient.onResumed = (start: MatchStart, history: InputHistory, retirements: Retirement[]): void => {
+    startLanMatch(start, history, retirements);
+  };
+  lanClient.onPeerDropped = (slot: number, name: string, timeoutMs: number): void => {
+    match?.lan?.dropped.set(slot, { name, until: performance.now() + timeoutMs });
+  };
+  lanClient.onPeerResumed = (slot: number): void => {
+    match?.lan?.dropped.delete(slot);
+  };
+  lanClient.onPeerGone = (slot: number, name: string, _reason: 'left' | 'timeout', retirement: Retirement): void => {
+    const lan = match?.lan;
+    if (lan === undefined || lan.left.has(slot)) return;
+    lan.dropped.delete(slot);
+    lan.left.set(slot, { name, at: performance.now() });
+    // Eliminated at the agreed frame on every peer; the sim decides who won.
+    lan.rollback.retire(retirement.players, retirement.frame, retirement.tail);
+  };
+  lanClient.onLinkLost = (): void => {
+    const lan = match?.lan;
+    if (lan === undefined) {
+      // A reload whose seat could not be resumed: show the LAN screen with the reason.
+      if (match === null && phase === 'menu') openLanScreen();
+      return;
+    }
+    if (lan.lostAt > 0 || phase !== 'match') return;
+    lan.lostAt = performance.now();
+  };
+
   function resume(): void {
     if (match === null || ui === null || phase !== 'paused') return;
     ui.hide();
@@ -413,6 +769,11 @@ function boot(): void {
 
   function rematch(): void {
     if (match === null) return;
+    // LAN: Rematch is a vote; the lobby restarts with the same settings once everyone votes.
+    if (match.lan !== undefined) {
+      leaveLanMatch(true);
+      return;
+    }
     const previous = match.config;
     const players: MatchConfig['players'] = previous.players.map((p) => ({
       slot: p.slot,
@@ -428,8 +789,11 @@ function boot(): void {
       stocks: previous.stocks,
       timeLimitSec: previous.timeLimitSec,
       seed: nextSeed(previous.seed),
-      finalSmash: previous.finalSmash,
+      // Final Smash is disabled this wave (owner request): always false, whatever was saved.
+      finalSmash: false,
       cpuZeroMoves: previous.cpuZeroMoves,
+      // Teams is automatic (contract 9); the previous match already computed it from the same
+      // slots and colours, so a rematch just carries it forward.
       teams: previous.teams,
     });
   }
@@ -493,6 +857,8 @@ function boot(): void {
     .then(() => {
       resizeView();
       if (ui !== null) ui.show('title');
+      // A reload in the middle of a LAN match: take the seat back and land in the match.
+      lanClient.resumeSavedSeat();
     })
     .catch((err: unknown) => {
       showBootError(uiRoot, err);

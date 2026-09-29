@@ -11,6 +11,7 @@ import * as controls from './controls';
 import * as pause from './pause';
 import * as results from './results';
 import * as movelist from './movelist';
+import * as lan from './lan';
 
 type ScreenRenderer = (container: HTMLElement, ctx: MenuCtx) => void;
 
@@ -22,10 +23,11 @@ const SCREEN_RENDERERS: Record<UiScreen, ScreenRenderer> = {
   pause: pause.render,
   results: results.render,
   movelist: movelist.render,
+  lan: lan.render,
 };
 
 /** Screen modules may export a CSS string with their own rules. */
-const SCREEN_MODULES: object[] = [title, mode, select, controls, pause, results, movelist];
+const SCREEN_MODULES: object[] = [title, mode, select, controls, pause, results, movelist, lan];
 
 function screenCss(mod: object): string {
   const css = (mod as Record<string, unknown>).CSS;

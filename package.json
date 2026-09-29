@@ -7,12 +7,18 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.server.json",
     "test:sim": "npx --yes tsx src/sim/selftest.ts",
-    "calibrate": "npx --yes tsx src/sim/calibrate.ts"
+    "calibrate": "npx --yes tsx src/sim/calibrate.ts",
+    "lan": "npx --yes tsx server/lan.ts",
+    "test:net": "npx --yes tsx --expose-gc src/net/nettest.ts",
+    "test:discovery": "npx --yes tsx src/net/discoverytest.ts",
+    "test:lobby": "npx --yes tsx server/lobbytest.ts"
   },
   "devDependencies": {
+    "@types/ws": "^8.18.1",
     "typescript": "^7.0.2",
-    "vite": "^8.2.2"
+    "vite": "^8.2.2",
+    "ws": "^8.22.0"
   }
 }
