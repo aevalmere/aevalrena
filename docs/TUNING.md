@@ -40,9 +40,18 @@ set of values.
 ## Camera
 
 - `lerp`: how fast the camera moves toward its target, 0 to 1 per frame.
-- `zoomMin`: closest the camera is allowed to pull in.
-- `zoomMax`: furthest the camera is allowed to push out.
+- `zoomMin` (0.6): furthest the camera may pull out. At 0.6 the 640x360 base view shows 1067x600
+  world px, enough for a fighter at the top blast line and the stage floor in one frame. Every
+  stage's `cameraBounds` is at least that big (both arenas are 1080x608).
+- `zoomMax` (1.8): closest the camera may push in.
 - `margin`: px of empty space kept around the fighters.
+
+Framing (fixed in `src/render/camera.ts`, not sliders): the fit box is every live fighter's full
+body (13 px each side, feet to 44 px head) plus `margin`, plus head room of 10% of `VIEW_H` (36 px)
+above the highest head, and it always holds the main walk line (y 0) so the stage stays in view.
+The camera clamps to `cameraBounds` extended 40% of `VIEW_H` (144 px) upward and 48 px left and right, so a fighter launched
+up stays on screen until the blast line; on an axis where the view is at least the clamp rect, the
+camera centres that axis.
 - `shakeMax`: px of screen shake at the strongest hit.
 - `shakeFrames`: frames a shake takes to fade out.
 

@@ -7,7 +7,23 @@ import { liveView } from './scale';
 /**
  * Camera that frames every live fighter plus a margin, zooms and smooths with
  * the live TUNING.camera values, leads slightly in the direction the framed
- * group is moving, and never shows outside the stage bounds.
+ * group is moving, and never shows outside the stage bounds except for the
+ * head room above them.
+ *
+ * Framing rules (docs/WAVE_ARENA_BALANCE.md, Worker A step 5):
+ * - The fit box holds every live fighter's full extent (hurtbox half width
+ *   each side, feet to head) plus TUNING.camera.margin, plus HEAD_ROOM above
+ *   the highest head, plus the main walk line (world y = 0), so the stage
+ *   stays in frame while a fighter flies up.
+ * - zoomMin 0.6 shows 1067x600 world px, enough to hold a fighter at the top
+ *   blast line together with the stage floor.
+ * - The clamp rect is the stage's cameraBounds extended upward by TOP_ROOM,
+ *   so a fighter launched up is never cut off before the blast line (blast
+ *   top is 48 px above the bounds, the head another 44), and by SIDE_ROOM
+ *   (48 px, the side blast pad) left and right, so a fighter in the last
+ *   48 px before a side KO stays on screen. On an axis where the
+ *   view is at least as big as the clamp rect, the camera centres that axis
+ *   instead of fighting the fit.
  *
  * Every TUNING field is read at the moment it is used. Nothing here caches one
  * at import time, so the debug sliders take effect on the next render frame.
@@ -19,6 +35,16 @@ const BODY_HEIGHT = 44;
 const LEAD_PER_VX = 6;
 /** Hard cap on the lead so fast play never throws the framing off. */
 const LEAD_MAX = 24;
+/** Half the fighter's width, so the fit holds the whole body, not the feet point. */
+const BODY_HALF_W = 13;
+/** Extra world px kept above the highest head, relative to the base view height. */
+const HEAD_ROOM = Math.round(VIEW_H * 0.1);
+/** World px the camera may look above cameraBounds (covers blast top + head + head room). */
+const TOP_ROOM = Math.round(VIEW_H * 0.4);
+/** World px the camera may look past cameraBounds on the left and right (the blast pad). */
+const SIDE_ROOM = 48;
+/** Main platform walk line (contract 1: world y = 0). Kept inside the fit box. */
+const STAGE_FLOOR_Y = 0;
 
 export interface CameraState {
   x: number;
@@ -59,13 +85,13 @@ function computeTarget(
     const feet = posY[i];
     const head = feet - BODY_HEIGHT;
     if (found === 0) {
-      minX = fx;
-      maxX = fx;
+      minX = fx - BODY_HALF_W;
+      maxX = fx + BODY_HALF_W;
       minY = head;
       maxY = feet;
     } else {
-      if (fx < minX) minX = fx;
-      if (fx > maxX) maxX = fx;
+      if (fx - BODY_HALF_W < minX) minX = fx - BODY_HALF_W;
+      if (fx + BODY_HALF_W > maxX) maxX = fx + BODY_HALF_W;
       if (head < minY) minY = head;
       if (feet > maxY) maxY = feet;
     }
@@ -82,8 +108,12 @@ function computeTarget(
 
   minX -= margin;
   maxX += margin;
-  minY -= margin;
+  minY -= margin + HEAD_ROOM;
   maxY += margin;
+  // Keep the stage floor in the box, so a fighter flying up never takes the
+  // camera away from the arena.
+  if (maxY < STAGE_FLOOR_Y + margin) maxY = STAGE_FLOOR_Y + margin;
+  if (minY > STAGE_FLOOR_Y - margin) minY = STAGE_FLOOR_Y - margin;
 
   const needW = maxX - minX;
   const needH = maxY - minY;
@@ -100,15 +130,21 @@ function computeTarget(
 function clampToBounds(cam: CameraState, bounds: Rect): void {
   const halfW = liveView.w / (2 * cam.zoom);
   const halfH = liveView.h / (2 * cam.zoom);
-  if (halfW * 2 >= bounds.w) {
-    cam.x = bounds.x + bounds.w / 2;
+  // The clamp rect is the bounds plus TOP_ROOM of head room above them and
+  // SIDE_ROOM past each side.
+  const top = bounds.y - TOP_ROOM;
+  const h = bounds.h + TOP_ROOM;
+  const left = bounds.x - SIDE_ROOM;
+  const w = bounds.w + 2 * SIDE_ROOM;
+  if (halfW * 2 >= w) {
+    cam.x = left + w / 2;
   } else {
-    cam.x = clamp(cam.x, bounds.x + halfW, bounds.x + bounds.w - halfW);
+    cam.x = clamp(cam.x, left + halfW, left + w - halfW);
   }
-  if (halfH * 2 >= bounds.h) {
-    cam.y = bounds.y + bounds.h / 2;
+  if (halfH * 2 >= h) {
+    cam.y = top + h / 2;
   } else {
-    cam.y = clamp(cam.y, bounds.y + halfH, bounds.y + bounds.h - halfH);
+    cam.y = clamp(cam.y, top + halfH, top + h - halfH);
   }
 }
 
