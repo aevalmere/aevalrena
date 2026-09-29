@@ -148,6 +148,10 @@ interface ModeItem {
 }
 
 export function render(container: HTMLElement, ctx: MenuCtx): void {
+  // Final Smash is disabled this wave (owner request): force it off every time this screen is
+  // entered, whatever a saved/default state carried in with.
+  ctx.state.finalSmash = false;
+
   const { list } = buildMenuPanel(container, 'Mode select');
 
   const items: ModeItem[] = [];
@@ -181,7 +185,7 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
   }
 
   addBasicItem('Local', { activate: () => ctx.go('select') });
-  addBasicItem('LAN', { disabled: true, tag: 'soon' });
+  addBasicItem('LAN', { activate: () => ctx.go('lan') });
   addBasicItem('Online', { disabled: true, tag: 'soon' });
   addBasicItem('Controls', {
     activate: () => {
@@ -253,6 +257,25 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
     });
   }
 
+  /**
+   * A read-only rules row: label, then a static value in the stepper's value column, no
+   * buttons, not stepped and not selectable. Dimmed the same way a disabled item is (LAN,
+   * Online), so it reads as fixed rather than as a broken control.
+   */
+  function addStaticItem(label: string, valueText: string): void {
+    const el = menuRow(label);
+    el.classList.add('ui-item-disabled');
+    const stepper = document.createElement('span');
+    stepper.className = 'aev-step';
+    const valueEl = document.createElement('span');
+    valueEl.className = 'aev-step-value';
+    valueEl.textContent = valueText;
+    stepper.appendChild(valueEl);
+    el.appendChild(stepper);
+    list.appendChild(el);
+    items.push({ el, disabled: true });
+  }
+
   addStepperItem(
     'Stocks',
     (dir) => {
@@ -265,16 +288,8 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
     }
   );
 
-  // A two-state rule: either arrow flips it, so neither button is ever disabled.
-  addStepperItem(
-    'Final Smash',
-    () => {
-      ctx.state.finalSmash = !ctx.state.finalSmash;
-    },
-    (valueEl) => {
-      valueEl.textContent = ctx.state.finalSmash ? 'On' : 'Off';
-    }
-  );
+  // Final Smash is disabled this wave (owner request): read-only, cannot be toggled.
+  addStaticItem('Final Smash', 'Disabled');
 
   // A two-state rule: either arrow flips it, so neither button is ever disabled.
   addStepperItem(
@@ -287,16 +302,8 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
     }
   );
 
-  // A two-state rule: same team colour on Character Select = one side, no friendly fire.
-  addStepperItem(
-    'Teams',
-    () => {
-      ctx.state.teams = ctx.state.teams !== true;
-    },
-    (valueEl) => {
-      valueEl.textContent = ctx.state.teams === true ? 'On' : 'Off';
-    }
-  );
+  // Teams is automatic from Character Select team colours (owner request): read-only.
+  addStaticItem('Teams', 'Same colour = team');
 
   function enabledIndices(): number[] {
     const out: number[] = [];

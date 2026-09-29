@@ -130,6 +130,11 @@ export interface ProjectileDef {
   lifetime: number;         // frames
   r: number;                // hit circle radius, centered on projectile
   damage: number; angle: number; bkb: number; kbg: number;
+  /**
+   * Clash tier. Two opposing projectiles that touch compare strength only: the strictly
+   * stronger one destroys the other and flies on untouched, equal strength destroys both.
+   */
+  strength: number;
   destroyOnHit: boolean;
   sprite: string;           // key into the character's effect sheet
   animFps?: number;
@@ -148,6 +153,12 @@ export interface ProjectileDef {
   returnPower?: number;
   /** Counts as a low hit, so rolls do not dodge it. */
   low?: boolean;
+  /**
+   * Values at full charge. Each field lerps from the base value above to this one on the
+   * projectile charge curve (exponential, so the last quarter of the charge matters most).
+   * Omitted fields keep the base value at every charge. Only a chargeable move charges.
+   */
+  charged?: { vx?: number; lifetime?: number; damage?: number; bkb?: number; kbg?: number; r?: number; strength?: number };
 }
 
 export interface MoveDef {
@@ -162,6 +173,11 @@ export interface MoveDef {
   chargeable?: boolean;     // hold to charge before totalFrames start
   /** Button that must stay held to charge. Defaults to 'attack' (smashes). */
   chargeButton?: 'attack' | 'special';
+  /**
+   * Extra frames added to both every projectile spawnFrame and totalFrames at full charge,
+   * scaled linearly by the charge fraction and rounded. A charged cast takes longer.
+   */
+  chargeCastFrames?: number;
   invuln?: [number, number];
   helplessAfter?: boolean;  // up-special: fall helpless when done in air
   airOnly?: boolean;
@@ -525,7 +541,7 @@ export interface LocalSession extends SessionAdapter {
 // export function cpuInput(state: GameState, slot: number, level: number, rand: () => number): InputFrame
 
 // ---- src/ui/index.ts ----
-export type UiScreen = 'title' | 'mode' | 'select' | 'controls' | 'pause' | 'results' | 'movelist';
+export type UiScreen = 'title' | 'mode' | 'select' | 'controls' | 'pause' | 'results' | 'movelist' | 'lan';
 export interface ResultsData {
   winner: number;
   seed: number;

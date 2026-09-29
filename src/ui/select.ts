@@ -527,7 +527,7 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
   ));
   hint.appendChild(document.createElement('br'));
   hint.appendChild(document.createTextNode(
-    'N / pad X (Square) or click the name: type a name (Enter / Esc done)   T / pad Y (Triangle) or click the swatch: team colour'
+    'N / pad X (Square) or click the name: type a name (Enter / Esc done)   T / pad Y (Triangle) or click the swatch: team colour. Same colour = one team'
   ));
   panel.appendChild(hint);
 
@@ -555,6 +555,20 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
 
   function activeSlotCount(): number {
     return state.slots.filter((s) => s.mode !== 'off').length;
+  }
+
+  /** Teams rule (contract 9): on iff two or more active slots share a team colour. */
+  function computeTeams(): boolean {
+    const active: number[] = [];
+    state.slots.forEach((s, slot) => {
+      if (s.mode !== 'off') active.push(slot);
+    });
+    for (let i = 0; i < active.length; i += 1) {
+      for (let j = i + 1; j < active.length; j += 1) {
+        if (teamOf(active[i]) === teamOf(active[j])) return true;
+      }
+    }
+    return false;
   }
 
   function clampCharIndex(index: number): number {
@@ -767,9 +781,10 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
       players,
       stocks: state.stocks,
       timeLimitSec: 0,
-      finalSmash: state.finalSmash,
+      // Final Smash is disabled this wave (owner request): always false, whatever was saved.
+      finalSmash: false,
       cpuZeroMoves: state.cpuZeroMoves,
-      teams: state.teams === true,
+      teams: computeTeams(),
       seed: (Date.now() >>> 0) || 1,
     });
   }

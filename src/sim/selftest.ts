@@ -1,18 +1,20 @@
 import {
-  FOOTSTOOL, FS_METER, KNOCKDOWN, ROLL, SHIELD_DECAY, SHIELD_MAX, SHORTCUT_REPLACE_FRAMES, TUNING,
+  AIR_DODGE, FOOTSTOOL, FS_METER, KNOCKDOWN, ROLL, SHIELD_DECAY, SHIELD_MAX, SHORTCUT_REPLACE_FRAMES, TUNING,
 } from '../core/constants';
 import { Btn, DIRECT_CODES, DIRECT_MOVES } from '../core/types';
 import type {
-  ActionId, CommandAction, DirectMoveId, GameState, InputFrame, MatchConfig, MoveDef, ProjectileDef, SimEvent,
+  ActionId, CommandAction, DirectMoveId, GameState, InputFrame, MatchConfig, MoveDef, MoveId, ProjectileDef, SimEvent,
 } from '../core/types';
 import { CHARACTER_DEFS } from '../characters/registry';
+import { STAGE_DEFS } from '../stages/registry';
 import { dodgesHit } from './dodge';
 import { canBeGrabbed, forceGrab } from './grab';
-import { canBeHit } from './hits';
+import { canBeHit, projectileChargeScale } from './hits';
 import { cloneGameState, createGameState, stepGame } from './index';
 import { koFighter } from './match';
-import { PROJECTILE_DEFS, spawnProjectile } from './projectiles';
-import { setAction, simFighters } from './state';
+import { startMove } from './moves';
+import { PROJECTILE_DEFS, chargedStat, spawnProjectile } from './projectiles';
+import { setAction, simFighters, type SimFighter } from './state';
 
 declare const process: {
   argv: string[];
@@ -29,9 +31,9 @@ function inp(held: number, pressed: number): InputFrame {
   return { held, pressed, released: 0 };
 }
 
-function matchConfig(seed: number): MatchConfig {
+function matchConfig(seed: number, stageId = 'tidegate'): MatchConfig {
   return {
-    stageId: 'tidegate',
+    stageId,
     players: [
       { slot: 0, charId: 'aeval', cpu: false, cpuLevel: 0 },
       { slot: 1, charId: 'aeval', cpu: false, cpuLevel: 0 },
@@ -52,10 +54,19 @@ function settle(state: GameState, frames: number): void {
   for (let i = 0; i < frames; i++) step(state, NONE, NONE);
 }
 
-function fresh(seed: number, settleFrames: number): GameState {
-  const state = createGameState(matchConfig(seed));
+function fresh(seed: number, settleFrames: number, stageId = 'tidegate'): GameState {
+  const state = createGameState(matchConfig(seed, stageId));
   settle(state, settleFrames);
   return state;
+}
+
+/** Every stage id, so edge tests run on each arena. */
+const STAGE_IDS = Object.keys(STAGE_DEFS);
+
+/** The main platform's left and right edges, read from the stage def (platforms[0]). */
+function mainEdges(stageId: string): { left: number; right: number } {
+  const p = STAGE_DEFS[stageId].platforms[0];
+  return { left: p.x, right: p.x + p.w };
 }
 
 function testLanding(): SelfTestResult {
@@ -86,7 +97,7 @@ function testWalkAndJump(): SelfTestResult {
   const hold = inp(Btn.Right | Btn.Walk, 0);
   for (let i = 0; i < 120; i++) step(state, hold, NONE);
   const walkedX = f.x;
-  const walkOk = walkedX > startX + 100 && walkedX < 180 && f.onGround;
+  const walkOk = walkedX > startX + 100 && walkedX < mainEdges('tidegate').right && f.onGround;
 
   settle(state, 20);
   const groundY = f.y;
@@ -231,6 +242,7 @@ const RETURN_DEF: ProjectileDef = {
   lifetime: 60,
   r: 8,
   damage: 10, angle: 0, bkb: 0, kbg: 0,
+  strength: 1,
   destroyOnHit: false,
   sprite: 'orb',
   returnFrame: RETURN_FRAME,
@@ -364,7 +376,7 @@ function testLedgeGrab(): SelfTestResult {
  * finally spawned carries. Shared by the charge cases below so they all read the same
  * path through advanceMove rather than calling the curve directly.
  */
-function throwOrb(holdFrames: number): { power: number; scale: number; charge: number; frame: number } {
+function throwOrb(holdFrames: number): { power: number; scale: number; damage: number; charge: number; frame: number } {
   const state = createGameState(matchConfig(7));
   const me = simFighters(state)[0];
   // Settle the spawn drop so the special comes out from a grounded, idle fighter.
@@ -390,7 +402,9 @@ function throwOrb(holdFrames: number): { power: number; scale: number; charge: n
       }
     }
   }
-  return { power, scale, charge, frame };
+  // What this orb deals: the charged lerp of its def damage times its power.
+  const damage = chargedStat(PROJECTILE_DEFS['orb'], scale, 'damage') * power;
+  return { power, scale, damage, charge, frame };
 }
 
 /**
@@ -398,12 +412,9 @@ function throwOrb(holdFrames: number): { power: number; scale: number; charge: n
  * the button stays down, and the orb that finally spawns carries that charge as extra damage and
  * a bigger hit circle.
  *
- * A tap used to spawn the def's own numbers, power 1 and scale 1. It no longer does: the orb now
- * rides an exponential curve from a feeble, small tap (power 0.25, scale 0.6) up to exactly the
- * old full-charge ceiling (power 1.4, scale 1.5), so a no-charge throw is a distinct chip option
- * instead of a weaker version of the same shot. The tap expectation was updated to those new
- * intended numbers; what the case proves is unchanged, and the full-charge ceiling is still
- * pinned to exactly 1.4 so the fully charged orb deals what it always did.
+ * The orb has a `charged` block, so its damage comes from that lerp alone (4 on a tap, 16 at
+ * full) and its power is exactly 1 at every charge: no double scaling. Its scale still rides the
+ * exponential curve from 0.6 on a tap to 1.5 at full.
  */
 function testChargedOrb(): SelfTestResult {
   const tap = throwOrb(0);
@@ -412,44 +423,49 @@ function testChargedOrb(): SelfTestResult {
   // A one frame press fires on its own: nothing is held after the press and the orb
   // still comes out, on the move's own spawn frame, exactly as a charged one does. No
   // hold is needed to make the move happen at all.
+  // A full charge casts chargeCastFrames later (frame 27 rather than 11).
   const orbSpawnFrame = PROJECTILE_DEFS['orb'].spawnFrame;
-  const instant = tap.charge === 0 && tap.frame === orbSpawnFrame && full.frame === orbSpawnFrame;
-  const tapWeakAndSmall = tap.power === 0.25 && tap.scale === 0.6;
+  const castFrames = CHARACTER_DEFS['aeval'].moves.nspecial.chargeCastFrames ?? 0;
+  const instant = tap.charge === 0 && tap.frame === orbSpawnFrame && full.frame === orbSpawnFrame + castFrames
+    && orbSpawnFrame === 11 && castFrames === 16;
+  const tapWeakAndSmall = tap.power === 1 && tap.scale === 0.6 && Math.abs(tap.damage - 4) < 1e-9;
   const fullCharged = full.charge === 60;
-  const fullStrongAndBig = full.power === 1.4 && full.scale === 1.5;
-  const stronger = full.power > tap.power && full.scale > tap.scale;
+  const fullStrongAndBig = full.power === 1 && full.scale === 1.5 && Math.abs(full.damage - 16) < 1e-9;
+  const stronger = full.damage > tap.damage && full.scale > tap.scale;
   return {
     name: 'k. holding special charges the orb into a bigger, harder hit',
     pass: spawned && instant && tapWeakAndSmall && fullCharged && fullStrongAndBig && stronger,
-    detail: `tap: charge ${tap.charge} power ${tap.power.toFixed(2)} scale ${tap.scale.toFixed(2)} ` +
+    detail: `tap: charge ${tap.charge} power ${tap.power.toFixed(2)} scale ${tap.scale.toFixed(2)} damage ${tap.damage.toFixed(2)} ` +
       `spawned on move frame ${tap.frame} | full: charge ${full.charge} ` +
-      `power ${full.power.toFixed(2)} scale ${full.scale.toFixed(2)} spawned on move frame ${full.frame}`,
+      `power ${full.power.toFixed(2)} scale ${full.scale.toFixed(2)} damage ${full.damage.toFixed(2)} spawned on move frame ${full.frame}`,
   };
 }
 
 /**
  * The orb curve has to be a genuine exponential, not a line: each quarter of the charge
- * must be worth more than the one before it, so the last quarter buys far more damage
- * than the first. A straight line would make every quarter worth the same.
+ * must be worth more damage than the one before it, so the last quarter buys far more than
+ * the first. A straight line would make every quarter worth the same. The damage lerp rides
+ * (scale - 0.6) / 0.9 with scale = 0.6 * 2.5 ** t, so the last quarter is worth 2.5 ** 0.75,
+ * about 1.99 times the first.
  */
 function testOrbCurveIsExponential(): SelfTestResult {
   const q = [throwOrb(0), throwOrb(15), throwOrb(30), throwOrb(45), throwOrb(60)];
   const gains = [
-    q[1].power - q[0].power,
-    q[2].power - q[1].power,
-    q[3].power - q[2].power,
-    q[4].power - q[3].power,
+    q[1].damage - q[0].damage,
+    q[2].damage - q[1].damage,
+    q[3].damage - q[2].damage,
+    q[4].damage - q[3].damage,
   ];
   let rising = true;
   for (let i = 1; i < gains.length; i++) {
     if (gains[i] <= gains[i - 1]) rising = false;
   }
-  // Not just rising: the last quarter must be worth several times the first.
-  const lastDwarfsFirst = gains[3] > gains[0] * 3;
+  // Not just rising: the last quarter must be worth nearly twice the first.
+  const lastDwarfsFirst = gains[3] > gains[0] * 1.9;
   return {
     name: 'o. the orb charge curve is exponential, not linear',
     pass: rising && lastDwarfsFirst,
-    detail: `power ${q.map((r) => r.power.toFixed(3)).join(' ')} | ` +
+    detail: `damage ${q.map((r) => r.damage.toFixed(3)).join(' ')} | ` +
       `gains ${gains.map((g) => g.toFixed(3)).join(' ')}`,
   };
 }
@@ -497,6 +513,7 @@ const CLASH_BURST: ProjectileDef = {
   lifetime: 2,
   r: 1,
   damage: 0, angle: 0, bkb: 0, kbg: 0,
+  strength: 0,
   destroyOnHit: false,
   sprite: 'orb',
 };
@@ -509,14 +526,18 @@ const CLASH_DEF: ProjectileDef = {
   lifetime: 60,
   r: 8,
   damage: 10, angle: 0, bkb: 0, kbg: 0,
+  strength: 5,
   destroyOnHit: true,
   sprite: 'orb',
   burstId: CLASH_BURST.id,
 };
+/** One tier above CLASH_DEF and weaker in damage, so only strength can make it win. */
+const CLASH_STRONG: ProjectileDef = { ...CLASH_DEF, id: 'selftestClashStrong', damage: 1, strength: 6 };
 
 /** Two shots fired at each other from x 0 and x 80, run for `frames` steps. */
-function clashRun(powerA: number, powerB: number, frames: number): { state: GameState; bursts: number } {
+function clashRun(defA: ProjectileDef, defB: ProjectileDef, frames: number): { state: GameState; bursts: number } {
   PROJECTILE_DEFS[CLASH_DEF.id] = CLASH_DEF;
+  PROJECTILE_DEFS[CLASH_STRONG.id] = CLASH_STRONG;
   PROJECTILE_DEFS[CLASH_BURST.id] = CLASH_BURST;
   const state = fresh(1, 60);
   const left = simFighters(state)[0];
@@ -525,8 +546,8 @@ function clashRun(powerA: number, powerB: number, frames: number): { state: Game
   left.facing = 1;
   right.x = 80;
   right.facing = -1;
-  spawnProjectile(state, left, CLASH_DEF, powerA, 1);
-  spawnProjectile(state, right, CLASH_DEF, powerB, 1);
+  spawnProjectile(state, left, defA);
+  spawnProjectile(state, right, defB);
   let bursts = 0;
   for (let i = 0; i < frames; i++) {
     step(state, NONE, NONE);
@@ -539,7 +560,7 @@ function clashRun(powerA: number, powerB: number, frames: number): { state: Game
 }
 
 function testClashCancel(): SelfTestResult {
-  const run = clashRun(1, 1, 12);
+  const run = clashRun(CLASH_DEF, CLASH_DEF, 12);
   const a = run.state.projectiles[0];
   const b = run.state.projectiles[1];
   // Both slots were freed by the clash; each may now hold its own burst, which is
@@ -547,29 +568,32 @@ function testClashCancel(): SelfTestResult {
   const bothGone = a.defId === CLASH_BURST.id || !a.alive;
   const otherGone = b.defId === CLASH_BURST.id || !b.alive;
   return {
-    name: 'l. two equal opposing projectiles cancel and both burst',
+    name: 'l. two equal-strength opposing projectiles cancel and both burst',
     pass: bothGone && otherGone && run.bursts === 2,
     detail: `slot 0 ${a.defId}/${a.alive}, slot 1 ${b.defId}/${b.alive}, bursts ${run.bursts}`,
   };
 }
 
 function testClashPlowsThrough(): SelfTestResult {
-  // 30 effective damage against 10: a 67 percent gap, far outside the cancel band.
-  const run = clashRun(3, 1, 12);
+  // Strength 6 against 5, with 1 damage against 10: the tier decides, damage does not.
+  const run = clashRun(CLASH_STRONG, CLASH_DEF, 12);
   let survivors = 0;
+  let weaker = 0;
   let power = 0;
   for (let i = 0; i < run.state.projectiles.length; i++) {
     const p = run.state.projectiles[i];
-    if (!p.alive || p.defId !== CLASH_DEF.id) continue;
-    survivors++;
-    power = p.power;
+    if (!p.alive) continue;
+    if (p.defId === CLASH_STRONG.id) {
+      survivors++;
+      power = p.power;
+    }
+    if (p.defId === CLASH_DEF.id) weaker++;
   }
-  // It absorbed 10 of its 30, so 20 remain: power 3 becomes 2.
-  const kept = Math.abs(power - 2) < 1e-9;
+  // The survivor flies on untouched: power stays exactly 1.
   return {
-    name: 'm. a stronger projectile ploughs through a weaker one at reduced power',
-    pass: survivors === 1 && kept && run.bursts === 1,
-    detail: `survivors ${survivors}, power ${power.toFixed(3)} (want 2), bursts ${run.bursts}`,
+    name: 'm. a stronger-tier projectile destroys a weaker one and flies on untouched',
+    pass: survivors === 1 && weaker === 0 && power === 1 && run.bursts === 1,
+    detail: `stronger alive ${survivors}, weaker alive ${weaker}, power ${power} (want 1), bursts ${run.bursts}`,
   };
 }
 
@@ -1490,6 +1514,7 @@ const FS_BLOCK_DEF: ProjectileDef = {
   lifetime: 100,
   r: 200,
   damage: 5, angle: 0, bkb: 0, kbg: 0,
+  strength: 0,
   destroyOnHit: false,
   sprite: 'orb',
 };
@@ -1684,25 +1709,33 @@ function testTumbleAirDodge(): SelfTestResult {
 }
 
 function testRollStopsAtEdge(): SelfTestResult {
-  const state = fresh(1, 60);
-  const f = simFighters(state)[0];
-  state.fighters[1].x = -150;
-  f.x = 160;
-  f.facing = 1;
-  step(state, cmdInp('rollForward', 0, 0), NONE);
-  const rolled = f.action === 'roll';
-  let maxX = f.x;
-  let leftGround = false;
-  for (let i = 0; i < ROLL.total + 5; i++) {
-    step(state, NONE, NONE);
-    if (f.x > maxX) maxX = f.x;
-    if (!f.onGround) leftGround = true;
+  let pass = true;
+  const parts: string[] = [];
+  for (let s = 0; s < STAGE_IDS.length; s++) {
+    const id = STAGE_IDS[s];
+    const edge = mainEdges(id).right;
+    const state = fresh(1, 60, id);
+    const f = simFighters(state)[0];
+    state.fighters[1].x = edge - 330;
+    // 20 px inside the main platform's right edge, read from the stage def.
+    f.x = edge - 20;
+    f.facing = 1;
+    step(state, cmdInp('rollForward', 0, 0), NONE);
+    const rolled = f.action === 'roll';
+    let maxX = f.x;
+    let leftGround = false;
+    for (let i = 0; i < ROLL.total + 5; i++) {
+      step(state, NONE, NONE);
+      if (f.x > maxX) maxX = f.x;
+      if (!f.onGround) leftGround = true;
+    }
+    if (!(rolled && !leftGround && maxX <= edge && f.action === 'idle')) pass = false;
+    parts.push(`${id} edge ${edge}: rolled ${rolled}, left the ground ${leftGround}, furthest x ${maxX.toFixed(2)}, then ${f.action}`);
   }
-  // The main platform's right edge is x 180.
   return {
     name: 'ax. a forward roll toward the edge stops at it instead of rolling off',
-    pass: rolled && !leftGround && maxX <= 180 && f.action === 'idle',
-    detail: `rolled ${rolled}, left the ground ${leftGround}, furthest x ${maxX.toFixed(2)}, then ${f.action}`,
+    pass,
+    detail: parts.join(' | '),
   };
 }
 
@@ -2386,10 +2419,11 @@ function testTeamsContact(): SelfTestResult {
  * past either edge hovered at y = 0 forever.
  */
 function testCornerLanding(): SelfTestResult {
-  const drop = (edge: 'left' | 'right', dx: number): { x: number; y: number; action: ActionId; onGround: boolean; hover: number } => {
-    const state = fresh(1, 60);
+  const drop = (stageId: string, edge: 'left' | 'right', dx: number): { x: number; y: number; action: ActionId; onGround: boolean; hover: number } => {
+    const state = fresh(1, 60, stageId);
     const f = simFighters(state)[0];
-    f.x = edge === 'right' ? 180 + dx : -180 - dx;
+    const edges = mainEdges(stageId);
+    f.x = edge === 'right' ? edges.right + dx : edges.left - dx;
     f.y = -40;
     f.vx = 0;
     f.vy = 0;
@@ -2406,17 +2440,19 @@ function testCornerLanding(): SelfTestResult {
   };
   const parts: string[] = [];
   let ok = true;
-  for (const edge of ['left', 'right'] as const) {
-    for (const dx of [-4, 0]) {
-      const r = drop(edge, dx);
-      if (!(r.onGround && r.y === 0 && r.action === 'idle')) ok = false;
-      parts.push(`${edge} ${dx}: ${r.action} y ${r.y.toFixed(1)} ground ${r.onGround}`);
-    }
-    for (const dx of [1, 5, 10, 12.9]) {
-      const r = drop(edge, dx);
-      // Slid off: never more than 2 frames in a row airborne at the top, and not standing out there.
-      if (r.hover > 2 || (r.onGround && r.y === 0)) ok = false;
-      parts.push(`${edge} ${dx}: ${r.action} y ${r.y.toFixed(1)} hover ${r.hover}`);
+  for (const stageId of STAGE_IDS) {
+    for (const edge of ['left', 'right'] as const) {
+      for (const dx of [-4, 0]) {
+        const r = drop(stageId, edge, dx);
+        if (!(r.onGround && r.y === 0 && r.action === 'idle')) ok = false;
+        parts.push(`${stageId} ${edge} ${dx}: ${r.action} y ${r.y.toFixed(1)} ground ${r.onGround}`);
+      }
+      for (const dx of [1, 5, 10, 12.9]) {
+        const r = drop(stageId, edge, dx);
+        // Slid off: never more than 2 frames in a row airborne at the top, and not standing out there.
+        if (r.hover > 2 || (r.onGround && r.y === 0)) ok = false;
+        parts.push(`${stageId} ${edge} ${dx}: ${r.action} y ${r.y.toFixed(1)} hover ${r.hover}`);
+      }
     }
   }
   return {
@@ -2425,6 +2461,380 @@ function testCornerLanding(): SelfTestResult {
     detail: parts.join(' | '),
   };
 }
+
+/**
+ * The forward normals reach the tip of the water drawn on their active frames: 80 px for
+ * ftilt (ground_spikeMed_2), 102 px for dashatk and fsmash (ground_sweepF_2). The victim's
+ * near hurtbox edge is held `edgeGap` px ahead of the attacker's feet every frame, so the
+ * dash attack's slide cannot close the gap. Reports whether the move dealt any damage.
+ */
+function forwardReachHits(move: MoveId, edgeGap: number): boolean {
+  const state = fresh(1, 60);
+  const atk = simFighters(state)[0];
+  const vic = simFighters(state)[1];
+  atk.x = -80;
+  atk.facing = 1;
+  const half = CHARACTER_DEFS['aeval'].hurtbox.w / 2;
+  startMove(state, atk, CHARACTER_DEFS['aeval'], move);
+  for (let i = 0; i < 80 && atk.action === 'attack'; i++) {
+    vic.x = atk.x + edgeGap + half;
+    vic.vx = 0;
+    step(state, NONE, NONE);
+    if (vic.percent > 0) return true;
+  }
+  return false;
+}
+
+function testForwardReach(): SelfTestResult {
+  const cases: { move: MoveId; tip: number }[] = [
+    { move: 'ftilt', tip: 80 },
+    { move: 'dashatk', tip: 102 },
+    { move: 'fsmash', tip: 102 },
+  ];
+  let pass = true;
+  const parts: string[] = [];
+  for (let i = 0; i < cases.length; i++) {
+    const c = cases[i];
+    const atTip = forwardReachHits(c.move, c.tip - 1);
+    const past = forwardReachHits(c.move, c.tip + 10);
+    if (!atTip || past) pass = false;
+    parts.push(`${c.move} at ${c.tip - 1} px ${atTip}, at ${c.tip + 10} px ${past}`);
+  }
+  return {
+    name: 'bv. ftilt, dashatk and fsmash connect at the drawn tip and whiff 10 px past it',
+    pass,
+    detail: parts.join(' | '),
+  };
+}
+
+/**
+ * One orb thrown after holding special for `holdFrames`, from x -120 with the other fighter
+ * behind, followed to its death. Frames are counted from the release step.
+ */
+function orbFlight(holdFrames: number): { spawnFrame: number; moveEnd: number; vx: number; travel: number; life: number } {
+  const state = createGameState(matchConfig(7));
+  const me = simFighters(state)[0];
+  for (let i = 0; i < 40; i++) step(state, NONE, NONE);
+  me.x = -120;
+  me.facing = 1;
+  state.fighters[1].x = -220;
+  step(state, inp(Btn.Special, Btn.Special), NONE);
+  for (let i = 0; i < holdFrames; i++) step(state, inp(Btn.Special, 0), NONE);
+  let spawnFrame = -1;
+  let moveEnd = -1;
+  let spawnX = 0;
+  let vx = 0;
+  let travel = 0;
+  let life = -1;
+  for (let i = 0; i < 160 && life < 0; i++) {
+    step(state, NONE, NONE);
+    if (moveEnd < 0 && me.action !== 'attack') moveEnd = i;
+    for (let e = 0; e < state.events.length; e++) {
+      const ev = state.events[e];
+      if (ev.type === 'projectileSpawn' && ev.defId === 'orb' && spawnFrame < 0) {
+        spawnFrame = i;
+        spawnX = ev.x;
+      }
+      if (ev.type === 'projectileDie' && ev.defId === 'orb' && spawnFrame >= 0 && life < 0) {
+        travel = ev.x - spawnX;
+        life = i - spawnFrame;
+      }
+    }
+    for (let p = 0; p < state.projectiles.length; p++) {
+      const pr = state.projectiles[p];
+      if (pr.alive && pr.defId === 'orb') vx = pr.vx;
+    }
+  }
+  return { spawnFrame, moveEnd, vx, travel, life };
+}
+
+function testChargedOrbFlight(): SelfTestResult {
+  const tap = orbFlight(0);
+  const full = orbFlight(60);
+  // Tap: 3.5 px/frame for 48 frames. Full: 9.5 px/frame for 34 frames, 16 frames later.
+  const later = full.spawnFrame === tap.spawnFrame + 16 && full.moveEnd === tap.moveEnd + 16;
+  const faster = Math.abs(tap.vx - 3.5) < 1e-9 && Math.abs(full.vx - 9.5) < 1e-9;
+  const further = Math.abs(tap.travel - 3.5 * 48) < 1e-6 && Math.abs(full.travel - 9.5 * 34) < 1e-6;
+  return {
+    name: 'bw. a full-charge orb spawns later, flies faster and further than a tap',
+    pass: later && faster && further && full.travel > tap.travel,
+    detail: `tap: spawn ${tap.spawnFrame} move end ${tap.moveEnd} vx ${tap.vx} travel ${tap.travel.toFixed(1)} life ${tap.life} | `
+      + `full: spawn ${full.spawnFrame} move end ${full.moveEnd} vx ${full.vx} travel ${full.travel.toFixed(1)} life ${full.life}`,
+  };
+}
+
+/**
+ * The crescent turns on age 57 at 3.2 px/frame, 182.4 px past where it spawned, and dies at
+ * age 146, 89 frames later, 102.4 px behind its spawn point (82.4 behind a thrower who had
+ * not moved).
+ */
+function testCrescentFlight(): SelfTestResult {
+  const state = fresh(1, 60);
+  const me = simFighters(state)[0];
+  me.x = -60;
+  me.facing = 1;
+  state.fighters[1].x = mainEdges('tidegate').right - 13;   // parked on the far edge, out of the crescent's path
+  startMove(state, me, CHARACTER_DEFS['aeval'], 'sspecial');
+  let spawnX = 0;
+  let spawned = false;
+  let maxOut = 0;
+  let turnAge = -1;
+  let deathOffset = 0;
+  let deathAge = -1;
+  let lastAge = 0;
+  for (let i = 0; i < 200 && deathAge < 0; i++) {
+    step(state, NONE, NONE);
+    for (let p = 0; p < state.projectiles.length; p++) {
+      const pr = state.projectiles[p];
+      if (pr.defId !== 'crescent' || !pr.alive) continue;
+      if (turnAge < 0 && pr.returned) turnAge = pr.age - 1;   // flipped before this step's age++
+      if (spawned && pr.x - spawnX > maxOut) maxOut = pr.x - spawnX;
+      lastAge = pr.age;
+    }
+    for (let e = 0; e < state.events.length; e++) {
+      const ev = state.events[e];
+      if (ev.type === 'projectileSpawn' && ev.defId === 'crescent') {
+        spawned = true;
+        spawnX = ev.x;
+      }
+      if (ev.type === 'projectileDie' && ev.defId === 'crescent') {
+        deathOffset = ev.x - spawnX;
+        deathAge = lastAge + 1;
+      }
+    }
+  }
+  const turned = turnAge === 57 && Math.abs(maxOut - 182.4) < 1e-6;
+  const died = deathAge === 146 && Math.abs(deathOffset + 102.4) < 1e-6;
+  return {
+    name: 'bx. the crescent turns on age 57, 182.4 px out, and dies at age 146, 102.4 px behind its spawn',
+    pass: turned && died,
+    detail: `turned on age ${turnAge} at ${maxOut.toFixed(2)} px out, died on age ${deathAge} at ${deathOffset.toFixed(2)} px`,
+  };
+}
+
+
+/** Fighter 0 run off Tidegate's right edge and hanging on the ledge, fighter 1 far away. */
+function hangingState(): GameState {
+  const state = fresh(1, 10);
+  const f = simFighters(state)[0];
+  f.x = mainEdges('tidegate').right - 100;
+  state.fighters[1].x = -150;
+  for (let i = 0; i < 60 && f.onGround; i++) step(state, inp(Btn.Right, i === 0 ? Btn.Right : 0), NONE);
+  for (let i = 0; i < 60 && f.action !== 'ledgeHang'; i++) step(state, inp(Btn.Left, i === 0 ? Btn.Left : 0), NONE);
+  return state;
+}
+
+function testLedgeStall(): SelfTestResult {
+  const state = hangingState();
+  const f = simFighters(state)[0];
+  const hung = f.action === 'ledgeHang';
+  let stayed = true;
+  for (let i = 0; i < 600; i++) {
+    step(state, NONE, NONE);
+    if (f.action !== 'ledgeHang') stayed = false;
+  }
+  return {
+    name: 'by. a fighter hangs 600 frames with no input and is still in ledgeHang',
+    pass: hung && stayed && f.action === 'ledgeHang',
+    detail: `hung ${hung}, stayed for 600 frames ${stayed}, now ${f.action}, invuln ${f.invuln}`,
+  };
+}
+
+/**
+ * Ledge get-up invulnerability, each option taken after the hang invulnerability has run
+ * out: climb 28 frames, ledge roll through ROLL.invEnd + 6, ledge attack move frames 0-21,
+ * ledge jump 12 frames from the frame it leaves. Counts the steps the fighter is invulnerable.
+ */
+function ledgeOptionInvuln(press: InputFrame, action: ActionId): number {
+  const state = hangingState();
+  const f = simFighters(state)[0];
+  for (let i = 0; i < 60; i++) step(state, NONE, NONE);   // LEDGE_HANG_INVULN is 40
+  step(state, press, NONE);
+  let frames = 0;
+  let run = f.action === action && f.invuln > 0;
+  if (run) frames++;
+  for (let i = 0; i < 60 && run; i++) {
+    step(state, NONE, NONE);
+    run = f.action === action && f.invuln > 0;
+    if (run) frames++;
+  }
+  return frames;
+}
+
+function testLedgeGetUpInvuln(): SelfTestResult {
+  const climb = ledgeOptionInvuln(inp(Btn.Up, Btn.Up), 'ledgeClimb');
+  const roll = ledgeOptionInvuln(inp(Btn.Dodge, Btn.Dodge), 'ledgeRoll');
+  const attack = ledgeOptionInvuln(inp(Btn.Attack, Btn.Attack), 'attack');
+  const jump = ledgeOptionInvuln(inp(Btn.Jump, Btn.Jump), 'air');
+  // An option that sets invuln 2 each frame of its window leaves one step of tail at 1, so a
+  // window of n frames reads as n + 1 steps; the jump's plain 12-frame timer reads as 12.
+  const want = { climb: 28 + 1, roll: ROLL.invEnd + 6 + 1 + 1, attack: 22 + 1, jump: 12 };
+  const ok = climb === want.climb && roll === want.roll && attack === want.attack && jump === want.jump;
+  return {
+    name: 'bz. ledge get-up invulnerability: climb 28, roll through ROLL.invEnd + 6, ledgeatk 0-21, jump 12',
+    pass: ok,
+    detail: `invulnerable steps: climb ${climb} (want ${want.climb}), roll ${roll} (want ${want.roll}), `
+      + `ledgeatk ${attack} (want ${want.attack}), jump ${jump} (want ${want.jump})`,
+  };
+}
+
+/** One air dodge per airborne period, given back by landing, with the AIR_DODGE window. */
+function testOneAirDodge(): SelfTestResult {
+  const state = airborneState();
+  const f = simFighters(state)[0];
+  f.y -= 200;   // high enough that the dodge, a second try and the fall all happen in one airborne period
+  f.prevY = f.y;
+  step(state, inp(Btn.Shield, Btn.Shield), NONE);
+  const first = f.action === 'airDodge';
+  let invFirst = -1;
+  let invLast = -1;
+  let length = 0;
+  for (let i = 0; i < 60 && f.action === 'airDodge'; i++) {
+    length++;
+    if (f.invuln >= 2) {
+      if (invFirst < 0) invFirst = f.actionFrame;
+      invLast = f.actionFrame;
+    }
+    step(state, NONE, NONE);
+  }
+  const stillAir = !f.onGround;
+  step(state, inp(Btn.Shield, Btn.Shield), NONE);
+  const secondShield = f.action;
+  step(state, NONE, NONE);
+  step(state, inp(Btn.Dodge, Btn.Dodge), NONE);
+  const secondDodge = f.action;
+  step(state, cmdInp('airDodge', 0, 0), NONE);
+  const secondCmd = f.action;
+  for (let i = 0; i < 200 && !f.onGround; i++) step(state, NONE, NONE);
+  settle(state, 20);
+  step(state, inp(Btn.Jump, Btn.Jump), NONE);
+  for (let i = 0; i < 6; i++) step(state, inp(Btn.Jump, 0), NONE);
+  step(state, inp(Btn.Shield, Btn.Shield), NONE);
+  const afterLanding = f.action;
+  const refused = secondShield !== 'airDodge' && secondDodge !== 'airDodge' && secondCmd !== 'airDodge';
+  const window = invFirst === AIR_DODGE.invStart && invLast === AIR_DODGE.invEnd && length === AIR_DODGE.total
+    && AIR_DODGE.total === 34 && AIR_DODGE.invStart === 2 && AIR_DODGE.invEnd === 31;
+  return {
+    name: 'ca. one air dodge per airborne period: a second is refused, landing gives it back, invuln 2-31 of 34',
+    pass: first && stillAir && refused && afterLanding === 'airDodge' && window,
+    detail: `first ${first}, lasted ${length}, invuln frames ${invFirst}-${invLast}, still airborne ${stillAir} | `
+      + `second: Shield ${secondShield}, Dodge ${secondDodge}, command ${secondCmd} | after landing ${afterLanding}`,
+  };
+}
+
+/**
+ * Real Aeval shots fired at each other by two throwers 240 px apart. A number is the orb's
+ * hold in frames, null is a crescent. Reports the clash winner, which shots were still flying
+ * 6 frames later, and whether every survivor kept its power untouched.
+ * A burst born at the first clash can clash from the next frame, well inside those 6.
+ */
+function aevalClash(leftCharge: number | null, rightCharge: number | null): {
+  winner: number; clashed: boolean; leftAlive: boolean; rightAlive: boolean; powersKept: boolean;
+} {
+  const state = fresh(1, 60);
+  const left = simFighters(state)[0];
+  const right = simFighters(state)[1];
+  left.x = -120;
+  left.facing = 1;
+  right.x = 120;
+  right.facing = -1;
+  const shoot = (f: SimFighter, charge: number | null): number => {
+    const def = charge === null ? PROJECTILE_DEFS['crescent'] : PROJECTILE_DEFS['orb'];
+    const power = 1;   // both defs spawn at power 1: the orb scales through its charged lerp
+    const scale = charge === null ? 1 : projectileChargeScale(charge, true);
+    spawnProjectile(state, f, def, power, scale);
+    return state.nextProjectileId - 1;
+  };
+  const leftId = shoot(left, leftCharge);
+  const rightId = shoot(right, rightCharge);
+  const powers: Record<number, number> = {};
+  for (let i = 0; i < state.projectiles.length; i++) powers[state.projectiles[i].id] = state.projectiles[i].power;
+  let winner = -2;
+  let after = -1;
+  for (let i = 0; i < 60 && after < 6; i++) {
+    step(state, NONE, NONE);
+    for (let e = 0; e < state.events.length; e++) {
+      const ev = state.events[e];
+      if (ev.type === 'projectileClash' && winner === -2) winner = ev.winner;
+    }
+    if (winner !== -2) after++;
+  }
+  const alive = (id: number): boolean => state.projectiles.some((p) => p.id === id && p.alive);
+  let powersKept = true;
+  for (let i = 0; i < state.projectiles.length; i++) {
+    const p = state.projectiles[i];
+    if (p.alive && powers[p.id] !== undefined && p.power !== powers[p.id]) powersKept = false;
+  }
+  return { winner, clashed: winner !== -2, leftAlive: alive(leftId), rightAlive: alive(rightId), powersKept };
+}
+
+function testStrengthTiers(): SelfTestResult {
+  const fullOrb = aevalClash(60, null);
+  const tapOrb = aevalClash(null, 0);
+  const crescents = aevalClash(null, null);
+  const midCharge = 20;
+  const midStrength = chargedStat(PROJECTILE_DEFS['orb'], projectileChargeScale(midCharge, true), 'strength');
+  const midOrb = aevalClash(midCharge, null);
+  const fullOk = fullOrb.winner === 0 && fullOrb.leftAlive && !fullOrb.rightAlive && fullOrb.powersKept;
+  const tapOk = tapOrb.winner === 0 && tapOrb.leftAlive && !tapOrb.rightAlive;
+  const bothOk = crescents.clashed && crescents.winner === -1 && !crescents.leftAlive && !crescents.rightAlive;
+  // The orb loses (3.91 < 4), and its burst carries the same 3.91, so it cannot beat the
+  // crescent either: the crescent is still flying at the end.
+  const midOk = midStrength < 4 && midOrb.winner === 1 && !midOrb.leftAlive && midOrb.rightAlive;
+  return {
+    name: 'cb. strength tiers: a full orb breaks a crescent, a crescent breaks a tap orb, crescents cancel, a 20-frame orb loses',
+    pass: fullOk && tapOk && bothOk && midOk,
+    detail: `full orb v crescent winner ${fullOrb.winner} orb flies on ${fullOrb.leftAlive} untouched ${fullOrb.powersKept} | `
+      + `crescent v tap orb winner ${tapOrb.winner} crescent flies on ${tapOrb.leftAlive} | `
+      + `crescents winner ${crescents.winner} both gone ${!crescents.leftAlive && !crescents.rightAlive} | `
+      + `orb held ${midCharge} strength ${midStrength.toFixed(2)} v crescent winner ${midOrb.winner}`,
+  };
+}
+
+
+/**
+ * An orb that hits a fighter bursts, and its burst skips that fighter: the victim takes the
+ * orb's own damage and nothing else (4 on a tap, 16 at full), and the orb's launch is not
+ * overridden by the burst's weaker one.
+ */
+function orbHitTotal(holdFrames: number): { percent: number; burst: boolean } {
+  const state = createGameState(matchConfig(7));
+  const me = simFighters(state)[0];
+  const vic = simFighters(state)[1];
+  for (let i = 0; i < 40; i++) step(state, NONE, NONE);
+  me.x = -60;
+  me.facing = 1;
+  vic.x = 0;
+  vic.percent = 0;
+  step(state, inp(Btn.Special, Btn.Special), NONE);
+  for (let i = 0; i < holdFrames; i++) step(state, inp(Btn.Special, 0), NONE);
+  let burst = false;
+  for (let i = 0; i < 80; i++) {
+    step(state, NONE, NONE);
+    for (let e = 0; e < state.events.length; e++) {
+      const ev = state.events[e];
+      if (ev.type === 'projectileSpawn' && ev.defId === 'orbBurst') burst = true;
+    }
+  }
+  return { percent: vic.percent, burst };
+}
+
+function testBurstSkipsOrbVictim(): SelfTestResult {
+  const tap = orbHitTotal(0);
+  const full = orbHitTotal(60);
+  // What the burst deals to a fighter the orb missed: 2 from a tap orb, 8 from a full one.
+  const burstDef = PROJECTILE_DEFS['orbBurst'];
+  const tapBurst = chargedStat(burstDef, projectileChargeScale(0, true), 'damage');
+  const fullBurst = chargedStat(burstDef, projectileChargeScale(60, true), 'damage');
+  const burstOk = Math.abs(tapBurst - 2) < 1e-9 && Math.abs(fullBurst - 8) < 1e-9;
+  return {
+    name: 'cc. an orb that hits bursts, the burst skips its victim (tap 4, full 16), and a burst chips 2 to 8',
+    pass: tap.burst && full.burst && Math.abs(tap.percent - 4) < 1e-9 && Math.abs(full.percent - 16) < 1e-9 && burstOk,
+    detail: `tap: ${tap.percent.toFixed(2)} percent, burst ${tap.burst} | full: ${full.percent.toFixed(2)} percent, burst ${full.burst} | `
+      + `burst damage tap ${tapBurst.toFixed(2)} full ${fullBurst.toFixed(2)}`,
+  };
+}
+
 
 export function runSimSelfTest(): SelfTestResult[] {
   return [
@@ -2505,6 +2915,14 @@ export function runSimSelfTest(): SelfTestResult[] {
     testTeamsContact(),
     testCornerLanding(),
     testTeamsTimeOut(),
+    testForwardReach(),
+    testChargedOrbFlight(),
+    testCrescentFlight(),
+    testLedgeStall(),
+    testLedgeGetUpInvuln(),
+    testOneAirDodge(),
+    testStrengthTiers(),
+    testBurstSkipsOrbVictim(),
   ];
 }
 

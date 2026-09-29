@@ -71,9 +71,16 @@ export const AEVAL_ANIMS: Record<AnimName, AnimDef> = {
   getupatk: { frames: ['defense_roll_9', 'ground_sweepF_1', 'ground_sweepF_2', 'ground_sweepF_3', 'ground_sweepF_5'], holds: [7, 7, 4, 3, 13], fps: 9, loop: false },
 };
 
-export const AEVAL_FX_ANIMS: Record<string, AnimDef> = {
-  orb: { frames: ['orb0', 'orb1', 'orb0'], holds: [5, 5, 5], fps: 12, loop: true },
-  burst: { frames: ['burst0', 'burst1', 'burst2'], holds: [4, 4, 4], fps: 15, loop: false },
+/** An fx anim; `loopFrom` = frame index a loop returns to after the last frame (default 0). */
+export interface FxAnimDef extends AnimDef {
+  loopFrom?: number;
+}
+
+export const AEVAL_FX_ANIMS: Record<string, FxAnimDef> = {
+  orbCharge: { frames: ['orbCharge0', 'orbCharge1', 'orbCharge2', 'orbCharge3', 'orbCharge4', 'orbCharge5', 'orbCharge6', 'orbCharge7'], holds: [4, 4, 4, 4, 4, 4, 4, 4], fps: 15, loop: true },
+  orb: { frames: ['orb0', 'orb1', 'orb2', 'orb3', 'orb4', 'orb5', 'orb6', 'orb7', 'orb8', 'orb9', 'orb10', 'orb11'], holds: [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2], fps: 30, loop: true, loopFrom: 8 },
+  orbBig: { frames: ['orbBig0', 'orbBig1', 'orbBig2', 'orbBig3', 'orbBig4', 'orbBig5', 'orbBig6', 'orbBig7', 'orbBig8', 'orbBig9', 'orbBig10'], holds: [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2], fps: 30, loop: true, loopFrom: 7 },
+  burst: { frames: ['burst0', 'burst1', 'burst2', 'burst3', 'burst4', 'burst5', 'burst6', 'burst7', 'burst8', 'burst9', 'burst10'], holds: [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2], fps: 30, loop: false },
   crescent: { frames: ['crescent0', 'crescent1', 'crescent2'], holds: [6, 6, 6], fps: 10, loop: true },
   arrow: { frames: ['arrow0'], holds: [6], fps: 10, loop: true },
   hitspark: { frames: ['hitspark0', 'hitspark1', 'hitspark2'], holds: [3, 3, 3], fps: 20, loop: false },

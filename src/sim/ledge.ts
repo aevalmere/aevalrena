@@ -8,7 +8,11 @@ import { startMove } from './moves';
 /** Feet sit this far below the platform top while hanging. */
 const HANG_DROP = 20;
 const CLIMB_FRAMES = 30;
-const CLIMB_INVULN_FRAMES = 20;
+const CLIMB_INVULN_FRAMES = 28;
+/** Extra invulnerable frames a ledge roll gets past a ground roll's ROLL.invEnd. */
+const LEDGE_ROLL_EXTRA_INVULN = 6;
+/** A ledge jump is invulnerable for this many frames from the frame it leaves the ledge. */
+const LEDGE_JUMP_INVULN = 12;
 const CLIMB_INSET = 14;
 const ROLL_INSET = 34;
 const LEDGE_DROP_COOLDOWN = 12;
@@ -57,6 +61,7 @@ function grabLedge(
   f.onGround = false;
   f.fastFalling = false;
   f.jumpsLeft = def.jumps;
+  f.airDodgeUsed = false;
   setAction(f, 'ledgeHang');
   f.stats.ledgeGrabs++;
   f.ledgeRegrabs++;
@@ -138,6 +143,7 @@ export function stepLedge(state: GameState, f: SimFighter, def: CharacterDef): v
       f.vy = -def.jumpVel;
       f.jumpsLeft = def.jumps - 1;
       f.ledgeCooldown = LEDGE_DROP_COOLDOWN;
+      if (f.invuln < LEDGE_JUMP_INVULN) f.invuln = LEDGE_JUMP_INVULN;
       state.events.push({ type: 'jump', x: f.x, y: f.y, slot: f.slot, double: false });
       if (!state.finished) f.stats.jumps++;
       return;
@@ -149,11 +155,13 @@ export function stepLedge(state: GameState, f: SimFighter, def: CharacterDef): v
     }
     if (takeBuffered(f, Btn.Dodge) || cmd === 'ledgeRoll') {
       setAction(f, 'ledgeRoll');
+      if (f.invuln < 2) f.invuln = 2;   // covered from the frame it starts, not the one after
       return;
     }
     const dir = heldDir(f);
     if (cmd === 'ledgeGetUp' || heldUp(f) || dir === inward) {
       setAction(f, 'ledgeClimb');
+      if (f.invuln < 2) f.invuln = 2;   // covered from the frame it starts, not the one after
       return;
     }
     if (heldDown(f) || dir === -inward) {
@@ -176,7 +184,7 @@ export function stepLedge(state: GameState, f: SimFighter, def: CharacterDef): v
   }
 
   if (f.action === 'ledgeRoll') {
-    if (f.actionFrame <= ROLL.invEnd && f.invuln < 2) f.invuln = 2;
+    if (f.actionFrame <= ROLL.invEnd + LEDGE_ROLL_EXTRA_INVULN && f.invuln < 2) f.invuln = 2;
     if (f.actionFrame >= ROLL.total) {
       placeOnStage(f, def, p, cornerX, inward, ROLL_INSET);
       setAction(f, 'idle');

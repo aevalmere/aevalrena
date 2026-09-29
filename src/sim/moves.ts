@@ -3,7 +3,17 @@ import { Btn } from '../core/types';
 import type { CharacterDef, GameState, MoveDef, MoveId } from '../core/types';
 import { setAction, type SimFighter } from './state';
 import { spawnProjectile } from './projectiles';
-import { projectileChargePower, projectileChargeScale } from './hits';
+import { chargeFraction, projectileChargePower, projectileChargeScale } from './hits';
+
+/**
+ * Frames a charged cast adds to both the projectile spawn frames and totalFrames:
+ * chargeCastFrames times the charge fraction, rounded. f.charge stays on the fighter for
+ * the whole move, so this reads the same on every frame of it.
+ */
+export function castDelay(f: SimFighter, mv: MoveDef): number {
+  if (mv.chargeCastFrames === undefined) return 0;
+  return Math.round(mv.chargeCastFrames * chargeFraction(f.charge, mv.chargeable));
+}
 
 export function moveOf(f: SimFighter, def: CharacterDef): MoveDef {
   return def.moves[f.moveId as MoveId];
@@ -32,13 +42,19 @@ function applyMoveFrame(state: GameState, f: SimFighter, mv: MoveDef, frame: num
   }
   const shots = mv.projectiles;
   if (shots !== undefined) {
-    // A charged shot swells and hits harder on its own exponential curve, so a tap is a
-    // small feeble shot that comes out at once and a full charge still tops out where it
-    // always did. An unchargeable move spawns at exactly 1 and 1.
+    // A charged shot swells on the exponential scale curve (hit circle and sprite). A def
+    // with `charged` gets all of its extra damage, strength and knockback from that lerp,
+    // so its power stays exactly 1 (no double scaling); a chargeable def without `charged`
+    // still rides projectileChargePower. An unchargeable move spawns at exactly 1 and 1.
     const power = projectileChargePower(f.charge, mv.chargeable);
     const scale = projectileChargeScale(f.charge, mv.chargeable);
+    const delay = castDelay(f, mv);
     for (let i = 0; i < shots.length; i++) {
-      if (shots[i].spawnFrame === frame) spawnProjectile(state, f, shots[i], power, scale);
+      const at = shots[i].spawnFrame;
+      // A burst-only def (spawnFrame -1) never fires from the timeline, delay or not.
+      if (at >= 0 && at + delay === frame) {
+        spawnProjectile(state, f, shots[i], shots[i].charged === undefined ? power : 1, scale);
+      }
     }
   }
   const inv = mv.invuln;
@@ -104,7 +120,7 @@ export function advanceMove(state: GameState, f: SimFighter, def: CharacterDef):
     return false;
   }
 
-  if (f.actionFrame >= mv.totalFrames) {
+  if (f.actionFrame >= mv.totalFrames + castDelay(f, mv)) {
     endMove(f, mv);
     return true;
   }

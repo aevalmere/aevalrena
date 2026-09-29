@@ -422,7 +422,7 @@ export const SHIELD_BREAK_STUN = 180;
 export const SHIELD_STUN_PER_DAMAGE = 0.6;  // frames of shield stun per damage point, +2 floor
 export const SPOT_DODGE = { total: 22, invStart: 3, invEnd: 17 };
 export const ROLL = { total: 30, invStart: 4, invEnd: 19, distance: 44 };
-export const AIR_DODGE = { total: 30, invStart: 3, invEnd: 27 };
+export const AIR_DODGE = { total: 34, invStart: 2, invEnd: 31 };   // one per airborne period, no cooldown
 export const LEDGE_HANG_INVULN = 40;
 export const LEDGE_MAX_REGRABS = 3;
 export const RESPAWN_INVULN = 120;
@@ -504,7 +504,7 @@ Ground, actionable (idle, walk, run, dash, turn, crouch, land after lag):
 | Attack, Down held, or G&S | dtilt |
 | Attack, Down within the smash tap window while Walk is not held, C-stick down, or F&S | dsmash (chargeable) |
 | Attack while dashing or running | dash attack |
-| Special, no direction | nspecial |
+| Special, no direction | nspecial | 40 (56 full charge) | projectile f11 (f27 full charge) | 4 (16 full) | 40 | 14 / 30 (40 / 36 full) | Water Orb: vx 3.5 to 9.5, lifetime 48 to 34, r 8 to 12, clash strength 2 to 10, chargeCastFrames 16; `charged` fields lerp on the exponential charge curve and power stays 1 (no double scaling), scale 0.6-1.5 sizes the circle and sprite; destroyOnHit; bursts (2 dmg on a tap to 8 at full, same strength and scale as the orb) and the burst skips every fighter the orb hit |
 | Special + a side | sspecial (faces that way) |
 | Special + Up, jump-cancelled from jumpsquat, or out of shield | uspecial (`helplessAfter` in the air) |
 | Special + Down | dspecial |
@@ -571,6 +571,11 @@ projectile flagged `low`, all still connect. In tumble, Shield is only a tech pr
 tumble or dodge by itself); Dodge (or the `airDodge` / `dirAirDodge` commands) air dodges out of
 tumble while airborne.
 
+Air dodge: one per airborne period, no cooldown timer. Every way in (Shield or Dodge in the air, the
+`airDodge` / `dirAirDodge` commands, a dodge out of tumble) starts only while the fighter field
+`airDodgeUsed` is false, and sets it. Landing, a ledge grab and a respawn clear it; being hit does
+not. `AIR_DODGE.total` is 34 frames, invulnerable on frames 2 to 31.
+
 #### Shortcuts
 
 A chord is two or more `KeyboardEvent.code`s (or pad codes) joined by `&` in a binding, e.g.
@@ -620,14 +625,22 @@ pushback (2 px/frame decaying). Shield HP <= 0 = `shieldBreak` for `SHIELD_BREAK
 
 Invulnerable victims (invuln > 0, dodge inv frames, ledge hang invuln) are not hit.
 
+Projectile clashes compare `ProjectileDef.strength` only (lerped by charge through `charged.strength`
+where a def has one). Two opposing shots whose hit circles touch: the strictly stronger destroys the
+weaker and flies on untouched; equal strength destroys both. A destroyed shot still bursts. Aeval's
+tiers: jabDrop 1, orb 2 (tap) to 10 (full), orbBurst the same 2 to 10 as its orb (it rides the inherited charge, so it never out-ranks its orb), crescent 4.
+
 ### 4.5 Ledges
 
 A platform with `ledgeLeft/ledgeRight` has a grab point at its top corner. A fighter that is airborne,
 falling (vy > 0), not in hitstun, not attacking, and whose `ledgeGrabBox` overlaps a grab point (and
 is facing it or moving toward it) snaps to `ledgeHang` at the ledge with `LEDGE_HANG_INVULN` frames
-of invuln. From hang: up or toward-stage = `ledgeClimb` (30f), jump = `ledgeJump`, attack =
-`ledgeatk`, shield = `ledgeRoll`, down or away = drop (regain double jump). Each regrab without
-landing increments `ledgeRegrabs`; above `LEDGE_MAX_REGRABS` the ledge does not grant invuln.
+of invuln. From hang: up or toward-stage = `ledgeClimb` (30f, invulnerable for its first 28),
+jump = `ledgeJump` (invulnerable for 12 frames from the frame it leaves), attack = `ledgeatk`
+(invulnerable on move frames 0 to 21), shield = `ledgeRoll` (invulnerable through `ROLL.invEnd + 6`),
+down or away = drop (regain double jump). A hang never times out: nothing but the fighter's own
+ledge option or a KO ends it (ledge stalling is allowed). Each regrab without landing increments
+`ledgeRegrabs`; above `LEDGE_MAX_REGRABS` the ledge does not grant invuln.
 
 ### 4.6 Match
 
@@ -671,24 +684,24 @@ fresh (0%) opponent is KO'd by a full-charge fsmash around 90% from center stage
 | Move | Total | Active | Dmg | Angle | bkb / kbg | Notes |
 |---|---|---|---|---|---|---|
 | jab | 18 | 4-7 | 3 | 361 | 20 / 40 | short water slap, iasa 14 |
-| ftilt | 26 | 8-12 | 8 | 361 | 19 / 51 | forward splash |
+| ftilt | 30 | 10-14 | 8 | 361 | 19 / 51 | forward splash, chain of r 10 circles x 12 to 70 at y -18 (reach 80), iasa 26 |
 | utilt | 24 | 6-11 | 7 | 90 | 37 / 90 | upward ripple |
 | dtilt | 22 | 5-9 | 6 | 80 | 34 / 95 | low puddle poke, pops up |
-| dashatk | 32 | 6-16 | 9 | 60 | 32 / 50 | slide on a wave, velocity +3 vx on frame 4 |
-| fsmash | 44 | 16-21 | 15 | 361 | 19 / 46 | chargeable, big crescent wave |
+| dashatk | 36 | 8-18 | 9 | 60 | 32 / 50 | slide on a wave, velocity +3 vx on frame 4, chain of r 11 circles x 14 to 91 at y -16 (reach 102) |
+| fsmash | 48 | 18-23 | 15 | 361 | 19 / 46 | chargeable, big crescent wave, chain of r 13 circles x 16 to 89 at y -18 (reach 102) |
 | usmash | 40 | 12-18 | 14 | 88 | 30 / 74 | chargeable, geyser burst |
 | dsmash | 42 | 12-15 both sides | 12 | 30 | 21 / 52 | chargeable, ring wave both sides |
 | nair | 34 | 5-22 | 7 | 60 | 21 / 63 | orbiting bubble, landing lag 8 |
 | fair | 30 | 9-13 | 10 | 45 | 18 / 54 | forward wave slash, landing lag 12 |
 | bair | 28 | 7-10 | 11 | 361 | 21 / 56 | back splash, landing lag 12 |
-| uair | 26 | 6-10 | 9 | 85 | 26 / 79 | upward flick, landing lag 9 |
+| uair | 30 | 8-12 | 9 | 85 | 26 / 79 | upward flick, landing lag 11 |
 | dair | 36 | 12-16 | 12 | 270 (spike) | 30 / 85 | downward drop, landing lag 16 |
-| nspecial | 40 | projectile f18 | 6 | 40 | 24 / 48 | Water Orb: vx 3.5, lifetime 90, destroyOnHit |
-| sspecial | 42 | projectile f12 | 9 | 361 | 27 / 48 | Tidal Crescent: vx 5, lifetime 45, pierces (destroyOnHit false), fighter gets +2 vx on f8 |
+| nspecial | 40 (56 full charge) | projectile f11 (f27 full charge) | 4 (11 full) | 40 | 14 / 30 (40 / 84 full) | Water Orb: vx 3.5 to 9.5, lifetime 48 to 34, r 8 to 12, clash strength 2 to 10, chargeCastFrames 16; stats lerp on the exponential charge curve, then power 0.25-1.4 and scale 0.6-1.5 on top; destroyOnHit, bursts with the orb's power and scale |
+| sspecial | 42 | projectile f10 | 9 | 361 | 24 / 44 | Tidal Crescent: vx 3.2, lifetime 146, returns on age 57 (about 202 px out) for half damage, dies about 82 px behind; clash strength 4; pierces (destroyOnHit false); no fighter movement |
 | uspecial | 48 | 8-20 | 8 | 80 | 55 / 66 | Geyser: velocity setY -6.5 on f8, then +0.3 drift; helplessAfter |
 | dspecial | 50 | 10-46 multi (4 pull windows of 8f, then a 5f launcher) | 2 x5 | 90 then 60 last | 6 / 10, last 68 / 153 | Whirlpool: pulls in, last hit launches |
 | taunt | 90 | none | | | | small water orb floats above hand |
-| ledgeatk | 40 | 18-24 | 8 | 361 | 20 / 47 | |
+| ledgeatk | 40 | 18-24 | 8 | 361 | 20 / 47 | invulnerable frames 0-21 |
 | getupatk | 34 | 14-20 | 7 | 361 | 22 / 51 | |
 
 The bkb / kbg column was resynced from the KO-calibration pass; `src/characters/aeval/moves.ts` is

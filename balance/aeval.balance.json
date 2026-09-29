@@ -59,22 +59,24 @@
       "bkb": 20,
       "kbg": 40,
       "role": "fast check",
-      "animation": "jab"
+      "animation": "jab",
+      "projectileStrength": 1
     },
     "ftilt": {
       "damage": 8,
-      "startup": 8,
+      "startup": 10,
       "active": [
-        8,
-        12
+        10,
+        14
       ],
-      "total": 26,
-      "iasa": 22,
+      "total": 30,
+      "iasa": 26,
       "angle": 361,
       "bkb": 19,
       "kbg": 51,
       "role": "safe-ish space check",
-      "animation": "ftilt"
+      "animation": "ftilt",
+      "reach": 80
     },
     "utilt": {
       "damage": 7,
@@ -108,32 +110,34 @@
     },
     "dashatk": {
       "damage": 9,
-      "startup": 6,
+      "startup": 8,
       "active": [
-        6,
-        16
+        8,
+        18
       ],
-      "total": 32,
+      "total": 36,
       "angle": 60,
       "bkb": 32,
       "kbg": 50,
       "role": "burst punish",
-      "animation": "dashatk"
+      "animation": "dashatk",
+      "reach": 102
     },
     "fsmash": {
       "damage": 15,
-      "startup": 16,
+      "startup": 18,
       "active": [
-        16,
-        21
+        18,
+        23
       ],
-      "total": 44,
+      "total": 48,
       "angle": 361,
       "bkb": 19,
       "kbg": 46,
       "chargeable": true,
       "role": "hard read kill move",
-      "animation": "fsmash"
+      "animation": "fsmash",
+      "reach": 102
     },
     "usmash": {
       "damage": 14,
@@ -212,13 +216,13 @@
     },
     "uair": {
       "damage": 9,
-      "startup": 6,
+      "startup": 8,
       "active": [
-        6,
-        10
+        8,
+        12
       ],
-      "total": 26,
-      "landingLag": 9,
+      "total": 30,
+      "landingLag": 11,
       "angle": 85,
       "bkb": 26,
       "kbg": 79,
@@ -241,23 +245,55 @@
       "animation": "dair"
     },
     "nspecial": {
-      "damage": 6,
-      "startup": 18,
+      "damage": 4,
+      "startup": 11,
       "projectile": "orb",
       "projectileSpeed": 3.5,
-      "lifetime": 90,
+      "lifetime": 48,
       "role": "slow durable zoning",
-      "animation": "nspecial"
+      "animation": "nspecial",
+      "total": 40,
+      "bkb": 14,
+      "kbg": 30,
+      "radius": 8,
+      "charged": {
+        "startup": 27,
+        "total": 56,
+        "projectileSpeed": 9.5,
+        "lifetime": 34,
+        "damage": 16,
+        "bkb": 40,
+        "kbg": 36,
+        "radius": 12,
+        "strength": 10
+      },
+      "chargeCastFrames": 16,
+      "strength": 2,
+      "burstStrength": {
+        "tap": 2,
+        "full": 10
+      },
+      "power": "always 1 (the charged lerp is the only charge scaling)",
+      "burstSkipsOrbVictim": true,
+      "burstDamage": {
+        "tap": 2,
+        "full": 8
+      }
     },
     "sspecial": {
       "damage": 9,
-      "startup": 12,
+      "startup": 10,
       "projectile": "crescent",
-      "projectileSpeed": 4.25,
-      "lifetime": 82,
+      "projectileSpeed": 3.2,
+      "lifetime": 146,
       "pierces": true,
       "role": "horizontal lane control",
-      "animation": "sspecial"
+      "animation": "sspecial",
+      "returnFrame": 57,
+      "bkb": 24,
+      "kbg": 44,
+      "strength": 4,
+      "fighterMovement": "none (the +2 vx on frame 8 was removed)"
     },
     "uspecial": {
       "damage": 8,

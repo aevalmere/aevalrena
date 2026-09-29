@@ -6,7 +6,7 @@ import { circleRectOverlap, degToRad } from '../core/math';
 import { MAX_PLAYERS } from '../core/types';
 import type { Facing, GameState, HitboxDef, Rect } from '../core/types';
 import { defOf, fighterHurtbox, recordHit, sameTeam, setAction, simFighters, type SimFighter } from './state';
-import { PROJECTILE_DEFS, killProjectile } from './projectiles';
+import { PROJECTILE_DEFS, PROJECTILE_SCALE_MAX, PROJECTILE_SCALE_MIN, chargedStat, killProjectile } from './projectiles';
 import { dodgesHit } from './dodge';
 import { forceGrab } from './grab';
 
@@ -173,9 +173,8 @@ export function chargeMultiplier(charge: number, chargeable: boolean | undefined
 
 /** What a tapped charged projectile keeps of its def damage. A tap is chip, not a hit. */
 const PROJECTILE_POWER_MIN = 0.25;
-/** Hit circle and sprite size at no charge and at full. A tap comes out visibly small. */
-const PROJECTILE_SCALE_MIN = 0.6;
-const PROJECTILE_SCALE_MAX = 1.5;
+// PROJECTILE_SCALE_MIN / MAX (0.6 and 1.5) live in projectiles.ts, which reads a
+// shot's charge back off its scale for the def's `charged` values.
 
 /**
  * MIN * (MAX / MIN) ** t: lands on MIN at no charge and exactly MAX at full, and grows
@@ -188,9 +187,10 @@ function exponentialCharge(t: number, min: number, max: number): number {
 }
 
 /**
- * Damage multiplier for a charged projectile. Full charge still lands on exactly the
- * melee ceiling of 1 + chargeBonus, so a fully charged shot deals what it always did.
- * A move that cannot charge, and a chargeMax of 0, both return exactly 1.
+ * Damage multiplier for a charged projectile whose def has no `charged` block (a def with
+ * one scales through that lerp alone and spawns at power 1). Full charge lands on the
+ * melee ceiling of 1 + chargeBonus. A move that cannot charge, and a chargeMax of 0, both
+ * return exactly 1.
  */
 export function projectileChargePower(charge: number, chargeable: boolean | undefined): number {
   if (chargeable !== true || TUNING.input.chargeMax <= 0) return 1;
@@ -210,24 +210,16 @@ function hitboxDamage(hb: HitboxDef, mul: number): number {
 }
 
 /**
- * How close two projectiles' effective damage must be, as a fraction of the stronger
- * one, for a clash to cancel both instead of letting the stronger plough through.
- * Relative rather than absolute so it reads the same for a 2 percent bead and a 20
- * percent orb, and wide enough (10 percent) that float dust from charge scaling can
- * never flip a mirror match into a one-sided win: a full 40 percent charge bonus is
- * a 29 percent gap, so a real charge still wins, while a flick of charge cancels.
- */
-const CLASH_TOLERANCE = 0.1;
-
-/**
- * Projectile versus projectile. Opposing shots whose hit circles overlap clash: near
- * enough in effective damage and both die and detonate their bursts, otherwise the
- * stronger survives with its power cut by the damage it absorbed and the weaker dies.
+ * Projectile versus projectile. Opposing shots whose hit circles overlap clash, and the
+ * outcome reads each shot's `strength` tier (charge included) and nothing else: damage,
+ * power and knockback play no part. The strictly stronger shot destroys the weaker and
+ * flies on untouched; equal strength destroys both. A destroyed shot goes through
+ * killProjectile, so its burst still detonates.
  *
  * Pairs are visited once (j starts at i + 1) and the outcome is decided purely by the
- * two effective damages, so no result depends on which index comes first. Bursts spawn
- * into freed slots, which may sit anywhere in the array, so anything born during this
- * pass is skipped by id and cannot clash on the frame it appears.
+ * two strengths, so no result depends on which index comes first. Bursts spawn into
+ * freed slots, which may sit anywhere in the array, so anything born during this pass
+ * is skipped by id and cannot clash on the frame it appears.
  */
 function resolveProjectileClashes(state: GameState): void {
   const idCap = state.nextProjectileId;
@@ -245,28 +237,24 @@ function resolveProjectileClashes(state: GameState): void {
 
       const dx = a.x - b.x;
       const dy = a.y - b.y;
-      const reach = adef.r * a.scale + bdef.r * b.scale;
+      const reach = chargedStat(adef, a.scale, 'r') * a.scale + chargedStat(bdef, b.scale, 'r') * b.scale;
       if (dx * dx + dy * dy > reach * reach) continue;
 
-      const ad = adef.damage * a.power;
-      const bd = bdef.damage * b.power;
-      const gap = ad > bd ? ad - bd : bd - ad;
-      const stronger = ad > bd ? ad : bd;
+      const as = chargedStat(adef, a.scale, 'strength');
+      const bs = chargedStat(bdef, b.scale, 'strength');
       const mx = (a.x + b.x) / 2;
       const my = (a.y + b.y) / 2;
-      if (gap <= stronger * CLASH_TOLERANCE) {
+      if (as === bs) {
         state.events.push({ type: 'projectileClash', x: mx, y: my, ownerA: a.owner, ownerB: b.owner, winner: -1 });
         killProjectile(state, a, adef);
         killProjectile(state, b, bdef);
         break;                    // a is gone; nothing else can clash with it
       }
-      if (ad > bd) {
-        a.power *= gap / ad;      // keeps only the damage left after absorbing b
+      if (as > bs) {
         state.events.push({ type: 'projectileClash', x: mx, y: my, ownerA: a.owner, ownerB: b.owner, winner: a.owner });
         killProjectile(state, b, bdef);
-        continue;                 // a survives and may meet another shot this frame
+        continue;                 // a survives untouched and may meet another shot this frame
       }
-      b.power *= gap / bd;
       state.events.push({ type: 'projectileClash', x: mx, y: my, ownerA: a.owner, ownerB: b.owner, winner: b.owner });
       killProjectile(state, a, adef);
       break;
@@ -351,13 +339,14 @@ export function resolveHits(state: GameState): void {
       if ((pr.hitSlots & bit) !== 0 || caughtThisFrame[v]) continue;
       if (!canBeHit(vic)) continue;
       fighterHurtbox(vic, defOf(vic), HURT);
-      if (!circleRectOverlap(pr.x, pr.y, pdef.r * pr.scale, HURT)) continue;
+      if (!circleRectOverlap(pr.x, pr.y, chargedStat(pdef, pr.scale, 'r') * pr.scale, HURT)) continue;
       if (dodgesHit(vic, pr.y, pdef.low, null, true)) continue;
 
       // Charge and the return pass scale what this instance deals, shield damage included.
-      const pdmg = pdef.damage * pr.power;
+      const pdmg = chargedStat(pdef, pr.scale, 'damage') * pr.power;
       applyHit(
-        state, vic, pr.owner, pr.facing, pdmg, pdef.angle, pdef.bkb, pdef.kbg, 1,
+        state, vic, pr.owner, pr.facing, pdmg, pdef.angle,
+        chargedStat(pdef, pr.scale, 'bkb'), chargedStat(pdef, pr.scale, 'kbg'), 1,
         pdmg, pr.x, pr.y,
       );
       const shooter = fighterBySlot(state, pr.owner);

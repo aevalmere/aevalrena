@@ -65,6 +65,7 @@ function landOn(state: GameState, f: SimFighter, def: CharacterDef, top: number,
   f.onGround = true;
   f.fastFalling = false;
   f.jumpsLeft = def.jumps;
+  f.airDodgeUsed = false;
   f.ledgeRegrabs = 0;
   f.ledge = -1;
   state.events.push({ type: 'land', x: f.x, y: f.y, slot: f.slot, hard: impactVy >= def.fastFall });

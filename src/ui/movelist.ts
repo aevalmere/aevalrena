@@ -45,7 +45,8 @@ const ROWS: Row[] = [
   { name: 'Back Throw', input: 'Back while holding', bind: 'bthrow', source: { kind: 'throw', id: 'bthrow' } },
   { name: 'Up Throw', input: 'Up while holding', bind: 'uthrow', source: { kind: 'throw', id: 'uthrow' } },
   { name: 'Down Throw', input: 'Down while holding', bind: 'dthrow', source: { kind: 'throw', id: 'dthrow' } },
-  { name: 'Final Smash', input: 'Full meter + Special', bind: 'finalSmash', source: { kind: 'final' } },
+  // Final Smash is disabled this wave (owner request): no shortcut chord shown.
+  { name: 'Final Smash', input: 'Unavailable', source: { kind: 'final' } },
 ];
 
 const MAX_HITS_SHOWN = 3;

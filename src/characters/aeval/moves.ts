@@ -42,6 +42,35 @@ function javelinColumn(
 const JAVELIN_X = 7;
 const JAVELIN_TIP = -106;
 
+/**
+ * A forward reach: circles of radius `r` every `r` px along y from xFrom out to xTo, and one
+ * more on xTo itself when the step lands short of it, same window and same group so a target
+ * is hit once. Pass xTo = tip - r to make the outer edge of the chain sit on the tip.
+ */
+function forwardChain(
+  firstId: number, start: number, end: number,
+  xFrom: number, xTo: number, y: number, r: number,
+  damage: number, angle: number, bkb: number, kbg: number, group: number,
+): HitboxDef[] {
+  const out: HitboxDef[] = [];
+  let id = firstId;
+  let x = xFrom;
+  for (; x < xTo; x += r) out.push(box(id++, start, end, x, y, r, damage, angle, bkb, kbg, group));
+  out.push(box(id, start, end, xTo, y, r, damage, angle, bkb, kbg, group));
+  return out;
+}
+
+/**
+ * Water reach measured on the crops each anim shows during its active frames, game px from
+ * the heel anchor (ax) to the rightmost opaque pixel, sprite facing right:
+ *   ftilt   ground_spikeMed_2 80, ground_spikeMed_3 62  -> tip 80
+ *   dashatk / fsmash  ground_sweepF_2 102, ground_sweepF_3 92 -> tip 102
+ * Each chain's outer circle edge sits on the tip. Aeval is mid range: the reach is the
+ * point and the extra startup is its price.
+ */
+const FTILT_TIP = 80;
+const SWEEP_TIP = 102;
+
 /** Geyser: one launch on frame 8, then a shrinking rise for the active window. */
 function geyserVelocity(): NonNullable<MoveDef['velocity']> {
   const out: NonNullable<MoveDef['velocity']> = [{ frame: 8, vy: -6.5, setY: true }];
@@ -58,29 +87,56 @@ const orbBurst: ProjectileDef = {
   gravity: 0,
   lifetime: 10,
   r: 17,
-  damage: 8, angle: 50, bkb: 32, kbg: 62,
+  damage: 2, angle: 50, bkb: 32, kbg: 62,
+  // Same tier as the orb that spawned it (2 + 8c, driven by the inherited scale), so a burst
+  // can never out-rank its orb.
+  strength: 2,
+  // Chips for 2 from a tap orb, 8 from a full one, on the inherited scale like its strength.
+  charged: { damage: 8, strength: 10 },
   destroyOnHit: false,
   sprite: 'burst',
   animFps: 14,
 };
 
 /**
- * The orb is a mid-range poke, not a full-stage wall: 48 frames at 3.5 px/frame
- * is 168 px of travel from a spawn 18 px in front of the feet, so it reaches
- * about 186 px out and bursts there. Roughly a third of the stage.
+ * The orb has two lives. The charge position c runs 0 at a tap to 1 at full charge on the
+ * exponential curve (c = (scale - 0.6) / 0.9, scale = 0.6 * 2.5 ** (charge / 60)), so half
+ * a charge is only c 0.39 and three quarters c 0.66: the last quarter matters most. Every
+ * `charged` field is base + (full - base) * c.
  *
- * It leaves her hands on frame 15 so the shot comes out a little sooner, and
- * nspecial runs 52 frames, which leaves a longer recovery behind the shot.
+ * Charging never touches power: a def with `charged` spawns at power 1, so the lerp above is
+ * the only charge scaling of damage, knockback and strength. `scale` (0.6 to 1.5) still sizes
+ * the hit circle and sprite on top of the lerped r.
+ *
+ * Tap: leaves her hands on frame 11 of a 40-frame move. 48 frames at 3.5 px/frame is 168 px
+ * of travel from a spawn 18 px ahead, so it bursts about 186 px out. Damage 4, bkb 14, kbg 30,
+ * r 8 times scale 0.6 = 4.8 px: a slow chip that holds space.
+ *
+ * Full charge: chargeCastFrames 16 adds 16 frames to both, so it fires on frame 27 of a
+ * 56-frame move. 34 frames at 9.5 px/frame is 323 px of travel, a bullet that bursts about
+ * 341 px out. Damage 16, bkb 40, kbg 36 (full-charge KO about 108 percent on Tidegate
+ * calibrate), r 12 times scale 1.5 = 18 px.
+ *
+ * The burst inherits the orb's power (1) and scale, and skips every fighter the orb already
+ * hit, so a direct hit deals the orb's damage alone (4 tap, 16 full) and its launch is never
+ * overridden. The burst's own damage (2 on a tap up to 8 at full, the same lerp) lands only
+ * on fighters the orb missed.
+ *
+ * Clash strength (projectile tiers, compared alone): jabDrop 1, orb 2 + 8c (2 on a tap, 10 at
+ * full), burst the same 2 + 8c as its orb, crescent 4. The orb passes the crescent at c 0.25,
+ * which is about 21 of the 60 charge frames; at 20 or fewer it still loses to one.
  */
 const waterOrb: ProjectileDef = {
   id: 'orb',
-  spawnFrame: 15,
+  spawnFrame: 11,
   x: 18, y: -20,
   vx: 3.5, vy: 0,
   gravity: 0,
   lifetime: 48,
   r: 8,
-  damage: 6, angle: 40, bkb: 24, kbg: 48,
+  damage: 4, angle: 40, bkb: 14, kbg: 30,
+  strength: 2,
+  charged: { vx: 9.5, lifetime: 34, damage: 16, bkb: 40, kbg: 36, r: 12, strength: 10 },
   destroyOnHit: true,
   sprite: 'orb',
   animFps: 12,
@@ -97,31 +153,36 @@ const jabDrop: ProjectileDef = {
   lifetime: 7,
   r: 9,
   damage: 2, angle: SAKURAI, bkb: 14, kbg: 22,
+  strength: 1,
   destroyOnHit: true,
   sprite: 'orb',
   animFps: 16,
 };
 
 /**
- * The crescent flies out, turns around on frame 31 and sweeps back through the
- * thrower for half damage. Out: 20 px spawn offset plus 31 frames at 4.25 px/frame
- * is about 152 px ahead. Back: the remaining 51 frames cover about 217 px, so it
- * crosses the thrower on frame 67 and dies about 65 px behind them. 82 frames at
- * 4.25 px/frame is 348 px of travel, 25% more than the old 56 at 5 (280 px).
+ * The crescent flies out, turns around on frame 57 and sweeps back through the
+ * thrower for half damage. Out: 20 px spawn offset plus 57 frames at 3.2 px/frame
+ * is about 202 px ahead of where she threw it (4/3 of the old 152). Back: the
+ * remaining 89 frames cover about 285 px, so it crosses its launch point on age 121
+ * and dies about 82 px behind it. 146 frames at 3.2 px/frame is 467 px of travel,
+ * 4/3 of the old 82 at 4.25 (348 px). sspecial no longer moves her (the old +2 vx on frame 8 is
+ * gone), so these distances are from where she stands.
  */
 const tidalCrescent: ProjectileDef = {
   id: 'crescent',
   spawnFrame: 10,
   x: 20, y: -18,
-  vx: 4.25, vy: 0,
+  vx: 3.2, vy: 0,
   gravity: 0,
-  lifetime: 82,
+  lifetime: 146,
   r: 13,
-  damage: 9, angle: SAKURAI, bkb: 27, kbg: 48,
+  damage: 9, angle: SAKURAI, bkb: 24, kbg: 44,
+  // 2/5 of a full-charge orb (10): it breaks a tap orb (2), loses to one charged past c 0.25.
+  strength: 4,
   destroyOnHit: false,
   sprite: 'crescent',
   animFps: 10,
-  returnFrame: 31,
+  returnFrame: 57,
 };
 
 /** Whirlpool: four pulling hits in 8-frame windows, then a launching fifth. */
@@ -140,9 +201,10 @@ const moves: Record<MoveId, MoveDef> = {
     hitboxes: [box(1, 4, 6, 15, -18, 9, 3, SAKURAI, 20, 40, 1)],
     projectiles: [jabDrop],
   },
+  // ftilt: circles r 10 from x 12 to 70 at y -18 (edge on the 80 px tip), frames 10 to 14.
   ftilt: {
-    id: 'ftilt', totalFrames: 26, iasa: 22, groundOnly: true,
-    hitboxes: [box(1, 8, 12, 24, -18, 11, 8, SAKURAI, 19, 51, 1)],
+    id: 'ftilt', totalFrames: 30, iasa: 26, groundOnly: true,
+    hitboxes: forwardChain(1, 10, 14, 12, FTILT_TIP - 10, -18, 10, 8, SAKURAI, 19, 51, 1),
   },
   utilt: {
     id: 'utilt', totalFrames: 24, iasa: 20, groundOnly: true,
@@ -152,16 +214,18 @@ const moves: Record<MoveId, MoveDef> = {
     id: 'dtilt', totalFrames: 22, iasa: 18, groundOnly: true,
     hitboxes: [box(1, 5, 9, 10, -4, 9, 6, 80, 34, 95, 1)],
   },
+  // dashatk: circles r 11 from x 14 to 91 at y -16 (edge on the 102 px tip), frames 8 to 18.
   dashatk: {
-    id: 'dashatk', totalFrames: 32, groundOnly: true,
-    hitboxes: [box(1, 6, 16, 20, -16, 12, 9, 60, 32, 50, 1)],
+    id: 'dashatk', totalFrames: 36, groundOnly: true,
+    hitboxes: forwardChain(1, 8, 18, 14, SWEEP_TIP - 11, -16, 11, 9, 60, 32, 50, 1),
     velocity: [{ frame: 4, vx: 3 }],
   },
 
   // Smashes. Slow, chargeable, the reward for a hard read.
+  // fsmash: circles r 13 from x 16 to 89 at y -18 (edge on the 102 px tip), frames 18 to 23.
   fsmash: {
-    id: 'fsmash', totalFrames: 44, chargeable: true, groundOnly: true,
-    hitboxes: [box(1, 16, 21, 26, -18, 16, 15, SAKURAI, 19, 46, 1)],
+    id: 'fsmash', totalFrames: 48, chargeable: true, groundOnly: true,
+    hitboxes: forwardChain(1, 18, 23, 16, SWEEP_TIP - 13, -18, 13, 15, SAKURAI, 19, 46, 1),
   },
   usmash: {
     id: 'usmash', totalFrames: 40, chargeable: true, groundOnly: true,
@@ -188,9 +252,10 @@ const moves: Record<MoveId, MoveDef> = {
     id: 'bair', totalFrames: 28, landingLag: 12, airOnly: true,
     hitboxes: [box(1, 7, 10, -22, -20, 12, 11, SAKURAI, 21, 56, 1)],
   },
+  // uair: slower than the other aerials on purpose, active 8-12, 30 frames, landing lag 11.
   uair: {
-    id: 'uair', totalFrames: 26, landingLag: 9, airOnly: true,
-    hitboxes: [box(1, 6, 10, 2, -44, 12, 9, 85, 26, 79, 1), ...javelinColumn(2, 6, 10, 10, 9, 85, 26, 79, 1)],
+    id: 'uair', totalFrames: 30, landingLag: 11, airOnly: true,
+    hitboxes: [box(1, 8, 12, 2, -44, 12, 9, 85, 26, 79, 1), ...javelinColumn(2, 8, 12, 10, 9, 85, 26, 79, 1)],
   },
   dair: {
     id: 'dair', totalFrames: 36, landingLag: 16, airOnly: true,
@@ -198,18 +263,18 @@ const moves: Record<MoveId, MoveDef> = {
   },
 
   // Specials. Two projectiles, a rising recovery, a multi-hit trap.
-  // Hold special to swell the orb before the throw. 48 frames with no iasa, so a
-  // whiffed orb is a little more punishable than the throw it replaced.
+  // Hold special to swell the orb before the throw. 40 frames with no iasa on a tap;
+  // a full charge adds 16 (chargeCastFrames) to both the throw and the move, 56 in all.
   nspecial: {
-    id: 'nspecial', totalFrames: 52, chargeable: true, chargeButton: 'special',
+    id: 'nspecial', totalFrames: 40, chargeable: true, chargeButton: 'special', chargeCastFrames: 16,
     hitboxes: [],
     projectiles: [waterOrb, orbBurst],
   },
   sspecial: {
     id: 'sspecial', totalFrames: 42,
     hitboxes: [],
+    // Not a movement move: she throws from where she stands.
     projectiles: [tidalCrescent],
-    velocity: [{ frame: 8, vx: 2 }],
   },
   uspecial: {
     id: 'uspecial', totalFrames: 48, helplessAfter: true,
@@ -230,8 +295,9 @@ const moves: Record<MoveId, MoveDef> = {
   taunt: { id: 'taunt', totalFrames: 90, hitboxes: [] },
   taunt2: { id: 'taunt2', totalFrames: 90, hitboxes: [] },
   taunt3: { id: 'taunt3', totalFrames: 90, hitboxes: [] },
+  // Invulnerable for move frames 0-21, so the get-up is covered until 3 frames before the swing.
   ledgeatk: {
-    id: 'ledgeatk', totalFrames: 40, invuln: [0, 17],
+    id: 'ledgeatk', totalFrames: 40, invuln: [0, 21],
     hitboxes: [box(1, 18, 24, 20, -14, 12, 8, SAKURAI, 20, 47, 1)],
   },
   getupatk: {

@@ -1,10 +1,11 @@
 import { CHARACTER_DEFS } from '../characters/registry';
 import { TUNING } from '../core/constants';
 import { MAX_PLAYERS, SIM_HZ } from '../core/types';
-import type { FighterState, GameState, ProjectileDef } from '../core/types';
+import type { FighterState, GameState, MoveDef, ProjectileDef } from '../core/types';
+import { chargeFraction, projectileChargeScale } from '../sim/hits';
 import { getFrame, getFrameAnchor } from './bake';
 import { GLOW, PALE, WHITE } from './colors';
-import type { CharVisual } from './visuals';
+import type { CharVisual, ProjectileAnim } from './visuals';
 import { getCharVisual, getProjectileVisual } from './visuals';
 
 /**
@@ -18,6 +19,9 @@ const SPARK_FPS = 20;
 const SPARK_LIFE = 12;
 const DEFAULT_PROJECTILE_FPS = 12;
 const FALLBACK_PROJECTILE_R = 6;
+/** A projectile this big or bigger draws its `<sprite>Big` anim and a motion trail. */
+const BIG_SCALE = 1.2;
+const TRAIL_ALPHA = 0.5;
 
 /**
  * Charge tell: a ring of water beads gathering around the charge. A hold that
@@ -162,6 +166,133 @@ function frameForAction(
     idx = frames.length - 1;
   }
   return frames[idx];
+}
+
+/**
+ * Frame of a projectile fx anim at `age` sim frames. A loop wraps; a one-shot
+ * longer than the projectile's lifetime is squeezed into it so it plays through
+ * once (the orb burst), and clamps on its last frame after that.
+ */
+function projectileAnimFrame(anim: ProjectileAnim, age: number, lifetime: number): string {
+  let t = age < 0 ? 0 : age;
+  if (anim.loop) {
+    // Past the end a loop returns to loopFrom, so a growth sequence plays once
+    // and then only its last frames cycle.
+    if (t >= anim.total) t = anim.loopStart + ((t - anim.loopStart) % (anim.total - anim.loopStart));
+  } else if (lifetime > 0 && anim.total > lifetime) {
+    t = (t * anim.total) / lifetime;
+  }
+  const holds = anim.holds;
+  let k = 0;
+  while (k < holds.length - 1 && t >= holds[k]) {
+    t -= holds[k];
+    k++;
+  }
+  return anim.frames[k];
+}
+
+/**
+ * The baked dark halo behind an fx frame, drawn at the same point and scale as
+ * the frame. The halo canvas is 1 px bigger on each side, so its anchor is the
+ * frame's anchor plus 1.
+ */
+function drawShadow(
+  ctx: CanvasRenderingContext2D,
+  visual: CharVisual,
+  frameName: string,
+  x: number,
+  y: number,
+  flipped: boolean,
+  scale: number
+): void {
+  const pair = visual.shadows.get(frameName);
+  if (pair === undefined) return;
+  const canvas = pair[flipped ? 1 : 0];
+  const anchor = getFrameAnchor(visual.fxSheetId, frameName, flipped);
+  const ax = (anchor === null ? (canvas.width - 2) / 2 : anchor.ax) + 1;
+  const ay = (anchor === null ? (canvas.height - 2) / 2 : anchor.ay) + 1;
+  if (scale === 1) {
+    ctx.drawImage(canvas, Math.round(x - ax), Math.round(y - ay));
+    return;
+  }
+  const w = Math.max(1, Math.round(canvas.width * scale));
+  const h = Math.max(1, Math.round(canvas.height * scale));
+  ctx.drawImage(canvas, Math.round(x - ax * scale), Math.round(y - ay * scale), w, h);
+}
+
+/**
+ * The orb forming in her hand while nspecial charges: a fuller charge shows a
+ * later, bigger frame (index = floor(charge fraction * (frames - 1))). Drawn on
+ * the projectile's own spawn point so the shot leaves from where the orb sat.
+ */
+function drawOrbCharge(
+  ctx: CanvasRenderingContext2D,
+  visual: CharVisual,
+  x: number,
+  y: number,
+  charge: number,
+  held: ProjectileDef | null,
+  facing: number
+): void {
+  const frames = visual.orbCharge;
+  const max = TUNING.input.chargeMax > 0 ? TUNING.input.chargeMax : 1;
+  let t = charge / max;
+  if (t < 0) t = 0;
+  if (t > 1) t = 1;
+  const idx = Math.floor(t * (frames.length - 1));
+  drawHandOrb(ctx, visual, frames[idx], x, y, held, facing, 1);
+}
+
+function drawHandOrb(
+  ctx: CanvasRenderingContext2D,
+  visual: CharVisual,
+  frameName: string,
+  x: number,
+  y: number,
+  held: ProjectileDef | null,
+  facing: number,
+  scale: number
+): void {
+  const hx = x + (held === null ? BALL_FORWARD : held.x) * facing;
+  const hy = y + (held === null ? CHARGE_Y : held.y);
+  drawShadow(ctx, visual, frameName, hx, hy, facing === -1, scale);
+  drawCentered(ctx, visual.fxSheetId, frameName, hx, hy, facing === -1, scale);
+}
+
+/**
+ * The charge is released but the shot has not left yet: a charged cast spawns
+ * `chargeCastFrames * charge fraction` frames late (same rounding as the sim's
+ * castDelay). Until then the formed orb stays at the hand, at the size the shot
+ * will have.
+ */
+function drawOrbCast(
+  ctx: CanvasRenderingContext2D,
+  visual: CharVisual,
+  fighter: FighterState,
+  x: number,
+  y: number
+): void {
+  const move = currentMove(fighter);
+  if (move === null) return;
+  const projectiles = move.projectiles;
+  if (projectiles === undefined || projectiles.length === 0) return;
+  const held = projectiles[0];
+  const cast =
+    move.chargeCastFrames === undefined
+      ? 0
+      : Math.round(move.chargeCastFrames * chargeFraction(fighter.charge, move.chargeable));
+  if (fighter.actionFrame >= held.spawnFrame + cast) return;
+  const frames = visual.orbCharge;
+  const scale = projectileChargeScale(fighter.charge, move.chargeable);
+  drawHandOrb(ctx, visual, frames[frames.length - 1], x, y, held, fighter.facing, scale);
+}
+
+function currentMove(fighter: FighterState): MoveDef | null {
+  if (fighter.action !== 'attack' || fighter.moveId === null) return null;
+  const def = CHARACTER_DEFS[fighter.charId];
+  if (def === undefined) return null;
+  const move = def.moves[fighter.moveId];
+  return move === undefined ? null : move;
 }
 
 /**
@@ -333,7 +464,23 @@ export function drawFighterFx(
   const count = Math.min(state.fighters.length, posX.length, MAX_PLAYERS);
   for (let i = 0; i < count; i++) {
     const fighter = state.fighters[i];
-    if (fighter.charging) {
+    const orbVisual =
+      fighter.action === 'attack' && fighter.moveId === 'nspecial'
+        ? getCharVisual(fighter.charId)
+        : null;
+    if (orbVisual !== null && orbVisual.orbCharge.length > 0 && !fighter.charging) {
+      drawOrbCast(ctx, orbVisual, fighter, posX[i], posY[i]);
+    } else if (orbVisual !== null && orbVisual.orbCharge.length > 0) {
+      drawOrbCharge(
+        ctx,
+        orbVisual,
+        posX[i],
+        posY[i],
+        fighter.charge,
+        heldProjectile(fighter),
+        fighter.facing
+      );
+    } else if (fighter.charging) {
       // The ring spins off the charge counter itself, so it holds still while
       // the game is paused and never needs a render clock of its own.
       drawChargeRing(
@@ -380,19 +527,43 @@ export function drawProjectiles(
 
     const visual = getProjectileVisual(projectile.defId);
     let drawn = false;
-    if (visual !== null && visual.frames.length > 0) {
-      const fps = visual.def.animFps === undefined ? DEFAULT_PROJECTILE_FPS : visual.def.animFps;
-      let idx = Math.floor((projectile.age * fps) / SIM_HZ);
-      idx = ((idx % visual.frames.length) + visual.frames.length) % visual.frames.length;
-      drawn = drawCentered(
-        ctx,
-        visual.owner.fxSheetId,
-        visual.frames[idx],
-        x,
-        y,
-        projectile.facing === -1,
-        scale
-      );
+    if (visual !== null) {
+      const isBig = scale >= BIG_SCALE;
+      // Charged shots draw the expanded anim when the character has one.
+      const useBig = isBig && visual.big !== null;
+      const anim = useBig ? visual.big : visual.anim;
+      // The Big art already is the expanded shot, so it draws at native size;
+      // only the sim's hit circle grows with scale.
+      const drawScale = useBig ? 1 : scale;
+      let name: string | null = null;
+      if (anim !== null) {
+        name = projectileAnimFrame(anim, projectile.age, visual.def.lifetime);
+      } else if (visual.frames.length > 0) {
+        const fps = visual.def.animFps === undefined ? DEFAULT_PROJECTILE_FPS : visual.def.animFps;
+        let idx = Math.floor((projectile.age * fps) / SIM_HZ);
+        idx = ((idx % visual.frames.length) + visual.frames.length) % visual.frames.length;
+        name = visual.frames[idx];
+      }
+      if (name !== null) {
+        const flipped = projectile.facing === -1;
+        drawShadow(ctx, visual.owner, name, x, y, flipped, drawScale);
+        if (isBig) {
+          // One-frame motion trail: the same frame where it was a sim frame ago.
+          const alpha = ctx.globalAlpha;
+          ctx.globalAlpha = alpha * TRAIL_ALPHA;
+          drawCentered(
+            ctx,
+            visual.owner.fxSheetId,
+            name,
+            x - projectile.vx,
+            y - projectile.vy,
+            flipped,
+            drawScale
+          );
+          ctx.globalAlpha = alpha;
+        }
+        drawn = drawCentered(ctx, visual.owner.fxSheetId, name, x, y, flipped, drawScale);
+      }
     }
 
     if (!drawn) {

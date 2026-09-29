@@ -25,12 +25,10 @@ export interface SlotState {
 /** Menu state shared across screens for the lifetime of the UiController. */
 export interface MenuState {
   stocks: number;
-  /** Final Smash match rule: meters fill and full meters unlock Final Smash. */
+  /** Final Smash match rule. Disabled this wave: false by default, and Mode select forces it off. */
   finalSmash: boolean;
   /** Level 0 CPU rule: wander (walk, jump, never attack) instead of standing still. */
   cpuZeroMoves: boolean;
-  /** Teams match rule: same team colour = one side, no friendly fire. Absent means off. */
-  teams?: boolean;
   slots: SlotState[];
   stageIndex: number;
   /** Where the controls screen returns to: the mode screen, or pause during a match. */
@@ -63,7 +61,7 @@ export function createDefaultMenuState(deps: UiDeps): MenuState {
   ];
   return {
     stocks: 3,
-    finalSmash: true,
+    finalSmash: false,
     cpuZeroMoves: false,
     slots,
     stageIndex: 0,

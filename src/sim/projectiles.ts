@@ -20,6 +20,30 @@ function buildProjectileDefs(): Record<string, ProjectileDef> {
   return out;
 }
 
+/** Hit circle and sprite size of a charged projectile at no charge and at full. A tap comes out visibly small. */
+export const PROJECTILE_SCALE_MIN = 0.6;
+export const PROJECTILE_SCALE_MAX = 1.5;
+
+type ChargedKey = 'vx' | 'lifetime' | 'damage' | 'bkb' | 'kbg' | 'r' | 'strength';
+
+/**
+ * One stat of a projectile instance, charge included. A def with `charged` lerps each listed
+ * field from its base value to the full-charge value by how far along the charge curve the
+ * shot was thrown. That position is read back off the instance's `scale`, which is set once
+ * at spawn by projectileChargeScale (0.6 * 2.5 ** t) and never changed after: (scale - 0.6) / 0.9
+ * is the same exponential normalised to run 0 at a tap to 1 at full charge, so the last
+ * quarter of the charge moves every stat furthest. No per-instance field is needed.
+ */
+export function chargedStat(def: ProjectileDef, scale: number, key: ChargedKey): number {
+  const base = def[key];
+  const full = def.charged === undefined ? undefined : def.charged[key];
+  if (full === undefined) return base;
+  let c = (scale - PROJECTILE_SCALE_MIN) / (PROJECTILE_SCALE_MAX - PROJECTILE_SCALE_MIN);
+  if (c < 0) c = 0;
+  else if (c > 1) c = 1;
+  return base + (full - base) * c;
+}
+
 function freeSlot(state: GameState): ProjectileState {
   for (let i = 0; i < state.projectiles.length; i++) {
     if (!state.projectiles[i].alive) return state.projectiles[i];
@@ -41,7 +65,8 @@ function spawnAt(
   y: number,
   def: ProjectileDef,
   power: number,
-  scale: number
+  scale: number,
+  hitSlots = 0,
 ): void {
   const p = freeSlot(state);
   p.id = state.nextProjectileId++;
@@ -49,11 +74,11 @@ function spawnAt(
   p.defId = def.id;
   p.x = x;
   p.y = y;
-  p.vx = def.vx * facing;
+  p.vx = chargedStat(def, scale, 'vx') * facing;
   p.vy = def.vy;
   p.facing = facing;
   p.age = 0;
-  p.hitSlots = 0;
+  p.hitSlots = hitSlots;
   p.alive = true;
   // A dead slot is handed back with the last projectile's values still on it, so
   // every per-instance field is reset here as well as on a fresh one.
@@ -86,7 +111,10 @@ export function killProjectile(state: GameState, p: ProjectileState, def: Projec
   if (def.burstId === undefined) return;
   const burst = PROJECTILE_DEFS[def.burstId];
   if (burst === undefined) return;
-  spawnAt(state, p.owner, p.facing, p.x, p.y, burst, 1, 1);
+  // The burst is as strong and as big as the shot that carried it, and skips every fighter
+  // that shot already hit: a burst never re-launches (and so never overrides) its orb's hit.
+  // p may be the very slot handed back to the burst, so its fields are read first.
+  spawnAt(state, p.owner, p.facing, p.x, p.y, burst, p.power, p.scale, p.hitSlots);
 }
 
 /** Step 5 of the frame: move, age, die on lifetime or outside the blast zone. */
@@ -117,7 +145,7 @@ export function stepProjectiles(state: GameState): void {
     if (outside) {
       p.alive = false;
       state.events.push({ type: 'projectileDie', x: p.x, y: p.y, defId: p.defId });
-    } else if (p.age >= def.lifetime) {
+    } else if (p.age >= Math.round(chargedStat(def, p.scale, 'lifetime'))) {
       killProjectile(state, p, def);
     }
   }

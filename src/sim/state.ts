@@ -25,6 +25,7 @@ export interface SimFighter extends FighterState {
   prevY: number;           // feet y before this frame's integration
   dropTimer: number;       // frames left ignoring pass-through platforms
   ledgeCooldown: number;   // frames left unable to grab a ledge
+  airDodgeUsed: boolean;   // spent this airborne period; landing, a ledge grab or a respawn gives it back
   kbDirX: number;          // unit launch direction
   kbDirY: number;
   kbSpeed: number;         // remaining launch speed, px/frame
@@ -213,6 +214,7 @@ function makeFighter(
     prevY: y,
     dropTimer: 0,
     ledgeCooldown: 0,
+    airDodgeUsed: false,
     kbDirX: 0,
     kbDirY: 0,
     kbSpeed: 0,
@@ -309,6 +311,7 @@ function cloneFighter(src: SimFighter): SimFighter {
     prevY: src.prevY,
     dropTimer: src.dropTimer,
     ledgeCooldown: src.ledgeCooldown,
+    airDodgeUsed: src.airDodgeUsed,
     kbDirX: src.kbDirX,
     kbDirY: src.kbDirY,
     kbSpeed: src.kbSpeed,

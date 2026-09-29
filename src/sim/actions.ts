@@ -65,8 +65,14 @@ function startDash(state: GameState, f: SimFighter, def: CharacterDef, dir: numb
   state.events.push({ type: 'dash', x: f.x, y: f.y, slot: f.slot, facing: f.facing });
 }
 
-/** `directional` false = the airDodge command: a still air dodge whatever is held. */
-function startAirDodge(f: SimFighter, directional: boolean): void {
+/**
+ * `directional` false = the airDodge command: a still air dodge whatever is held.
+ * One air dodge per airborne period: it is refused (returns false) once spent, until the
+ * fighter lands, grabs a ledge or respawns. Being hit does not give it back. No cooldown.
+ */
+function startAirDodge(f: SimFighter, directional: boolean): boolean {
+  if (f.airDodgeUsed) return false;
+  f.airDodgeUsed = true;
   setAction(f, 'airDodge');
   const dx = directional ? heldDir(f) : 0;
   const dy = !directional ? 0 : heldUp(f) ? -1 : heldDown(f) ? 1 : 0;
@@ -79,6 +85,7 @@ function startAirDodge(f: SimFighter, directional: boolean): void {
     f.vy = 0;
   }
   f.fastFalling = false;
+  return true;
 }
 
 /**
@@ -242,8 +249,7 @@ function tryCommand(state: GameState, f: SimFighter, def: CharacterDef, cmd: Com
     case 'airDodge':
     case 'dirAirDodge':
       if (f.onGround) return false;
-      startAirDodge(f, cmd === 'dirAirDodge');
-      return true;
+      return startAirDodge(f, cmd === 'dirAirDodge');
     case 'taunt2':
     case 'taunt3':
       if (!f.onGround) return false;
@@ -317,7 +323,7 @@ function tryBufferedAction(state: GameState, f: SimFighter, def: CharacterDef): 
   } else {
     // Shield only shields on the ground. In the air it air dodges, drifting toward the held
     // direction, as in Smash. Out of tumble it stays a tech press (stepHitstun).
-    if (takeBuffered(f, Btn.Shield)) { startAirDodge(f, true); return true; }
+    if (takeBuffered(f, Btn.Shield) && startAirDodge(f, true)) return true;
   }
   if (f.onGround && takeBuffered(f, Btn.Taunt)) {
     startMove(state, f, def, tauntFor(f));
@@ -468,7 +474,7 @@ function stepHitstun(f: SimFighter): void {
   // The Dodge press still counted as a tech press in consumeInput. Shield does not dodge.
   const cmd = commandOf(peekBufferedDirect(f));
   const dodge = ((f.inputPressed | f.buffer.btn) & Btn.Dodge) !== 0 || cmd === 'airDodge' || cmd === 'dirAirDodge';
-  if (dodge && !f.onGround) {
+  if (dodge && !f.onGround && !f.airDodgeUsed) {
     clearBuffer(f);
     startAirDodge(f, cmd !== 'airDodge');
     return;
@@ -603,6 +609,7 @@ export function stepAction(state: GameState, f: SimFighter, def: CharacterDef): 
     case 'dead':
       return;
     case 'respawn':
+      f.airDodgeUsed = false;   // a respawn gives the air dodge back
       stepRespawn(f);
       return;
     case 'ledgeGrab':
