@@ -237,11 +237,11 @@ function resolveProjectileClashes(state: GameState): void {
 
       const dx = a.x - b.x;
       const dy = a.y - b.y;
-      const reach = chargedStat(adef, a.scale, 'r') * a.scale + chargedStat(bdef, b.scale, 'r') * b.scale;
+      const reach = chargedStat(adef, a.charge, 'r') * a.scale + chargedStat(bdef, b.charge, 'r') * b.scale;
       if (dx * dx + dy * dy > reach * reach) continue;
 
-      const as = chargedStat(adef, a.scale, 'strength');
-      const bs = chargedStat(bdef, b.scale, 'strength');
+      const as = chargedStat(adef, a.charge, 'strength');
+      const bs = chargedStat(bdef, b.charge, 'strength');
       const mx = (a.x + b.x) / 2;
       const my = (a.y + b.y) / 2;
       if (as === bs) {
@@ -339,14 +339,14 @@ export function resolveHits(state: GameState): void {
       if ((pr.hitSlots & bit) !== 0 || caughtThisFrame[v]) continue;
       if (!canBeHit(vic)) continue;
       fighterHurtbox(vic, defOf(vic), HURT);
-      if (!circleRectOverlap(pr.x, pr.y, chargedStat(pdef, pr.scale, 'r') * pr.scale, HURT)) continue;
+      if (!circleRectOverlap(pr.x, pr.y, chargedStat(pdef, pr.charge, 'r') * pr.scale, HURT)) continue;
       if (dodgesHit(vic, pr.y, pdef.low, null, true)) continue;
 
       // Charge and the return pass scale what this instance deals, shield damage included.
-      const pdmg = chargedStat(pdef, pr.scale, 'damage') * pr.power;
+      const pdmg = chargedStat(pdef, pr.charge, 'damage') * pr.power;
       applyHit(
         state, vic, pr.owner, pr.facing, pdmg, pdef.angle,
-        chargedStat(pdef, pr.scale, 'bkb'), chargedStat(pdef, pr.scale, 'kbg'), 1,
+        chargedStat(pdef, pr.charge, 'bkb'), chargedStat(pdef, pr.charge, 'kbg'), 1,
         pdmg, pr.x, pr.y,
       );
       const shooter = fighterBySlot(state, pr.owner);

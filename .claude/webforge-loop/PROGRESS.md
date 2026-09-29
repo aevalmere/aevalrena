@@ -110,3 +110,36 @@ GATE: build     | CMD: npm run build     | EXIT: 0 | evidence/r0-build.log
 Changed: nothing (ledger only)
 Result: all gates green; 6 defects registered (R1-R6).
 Next: iteration 1 = close R1, R2, R3 (LAN worker) and run the R4 review in parallel.
+
+## Iteration 1 - 2026-09-29
+Goal: close R1 (reload resume), R2 (leaver loses), R3 (stale menu defaults); independent review (R4).
+GATE: typecheck | CMD: npm run typecheck | EXIT: 0 | evidence/r1-typecheck.log
+GATE: sim       | CMD: npm run test:sim  | EXIT: 0 | "85/85 pass" evidence/r1-sim.log
+GATE: ai        | CMD: npx --yes tsx src/ai/aitest.ts | EXIT: 0 | "44/44 pass (1 info)" evidence/r1-ai.log
+GATE: net       | CMD: npm run test:net  | EXIT: 0 | "nettest: PASS" (11 scenarios incl. 2 leave) evidence/r1-net.log
+GATE: discovery | CMD: npm run test:discovery | EXIT: 0 | evidence/r1-discovery.log
+GATE: lobby     | CMD: npm run test:lobby | EXIT: 0 | "lobbytest: PASS" (13 checks) evidence/r1-lobby.log
+GATE: build     | CMD: npm run build     | EXIT: 0 | evidence/r1-build.log
+Test files: nettest.ts and lobbytest.ts gained scenarios, none lost lines; no .skip.
+Changed: src/net/{rollback,protocol,client,inputlog,eliminate,nettest}.ts, server/{lobbyhost,lobbytest}.ts, src/main.ts, src/ui/context.ts, docs/LAN.md, docs/DECISIONS.md; src/sim/_dbg.ts deleted (stray debug script).
+Browser evidence: art/ui/ref/lan3_reload_resumed.png, art/ui/ref/lan3_results_leaver.png.
+Commits: 4a18663 arenas+camera, dd67809 balance/orb/rules, 1c1c63d CPU, 1ad772d LAN, 6631dc6 docs+ledger, plus tracked art.
+Result: R1, R2, R3 FIXED; R4 review done, opened R7-R20.
+Next: iteration 2 = R7-R15, R17, R18 (LAN worker), R16 (sim), R19 (AI), R20 documented.
+
+## Iteration 2 - 2026-09-29
+Goal: close the review findings R7-R20 (three workers on disjoint files: net/server, sim, ai).
+GATE: typecheck | CMD: npm run typecheck | EXIT: 0 | evidence/r2-typecheck.log
+GATE: sim       | CMD: npm run test:sim  | EXIT: 0 | "86/86 pass" evidence/r2-sim.log
+GATE: ai        | CMD: npx --yes tsx src/ai/aitest.ts | EXIT: 0 | "45/45 pass (1 info)" evidence/r2-ai.log
+GATE: net       | CMD: npm run test:net  | EXIT: 0 | "nettest: PASS" (13 scenarios) evidence/r2-net.log
+GATE: discovery | CMD: npm run test:discovery | EXIT: 0 | (4 cases incl. hostile datagrams) evidence/r2-discovery.log
+GATE: lobby     | CMD: npm run test:lobby | EXIT: 0 | "lobbytest: PASS" (18 checks) evidence/r2-lobby.log
+GATE: build     | CMD: npm run build     | EXIT: 0 | evidence/r2-build.log
+Test files: +400/-18 lines across nettest, lobbytest, discoverytest, selftest, aitest; the 18 removed lines are import/signature refactors (checked by diff), no assertion loosened, no .skip.
+Changed: src/net/{snapshot,rollback,inputlog,client,nettest,discoverytest}.ts, src/main.ts, server/{lobbyhost,lan,static,discovery,version,lobbytest}.ts, src/sim/{projectiles,moves,hits,state,selftest}.ts, src/core/types.ts (ProjectileState.charge), src/ai/{profile,aevalmere,aitest}.ts, docs/LAN.md, docs/DECISIONS.md.
+Result: R7-R20 FIXED (14). Open: R5, R6 (MINOR art, owner decision).
+Stop check: (a) clean pass fired: every gate exit 0 and no open MAJOR/BLOCKER.
+
+## Stop - after iteration 2
+Stop condition (a) clean pass. Handoff: R5/R6 art rows for the owner; LAN untested across two physical machines (documented in docs/LAN.md).

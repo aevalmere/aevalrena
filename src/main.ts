@@ -12,7 +12,7 @@ import type {
   Renderer,
   UiController,
 } from './core/types';
-import { CHARACTER_LIST } from './characters/registry';
+import { CHARACTER_DEFS, CHARACTER_LIST } from './characters/registry';
 import { STAGE_LIST } from './stages/registry';
 import { cpuInput, flushAevalmereProfiles, warmAevalmere } from './ai';
 import { createInputSystem, createLocalSession, padStartPressed } from './input';
@@ -593,6 +593,26 @@ function boot(): void {
     if (n === BG_MAX_STEPS) bgAcc = 0;
   }
 
+  /**
+   * A match config from the wire with every stage and character id this build has: an unknown
+   * id (an older agent, a crafted message) falls back to the first stage or character instead of
+   * throwing inside the sim. Every peer runs the same version, so every peer falls back alike.
+   */
+  function knownIds(config: MatchConfig): MatchConfig {
+    if (STAGE_DEFS[config.stageId] === undefined) {
+      const fallback = STAGE_LIST[0]?.id ?? 'tidegate';
+      console.warn(`[lan] unknown stage "${config.stageId}", using ${fallback}`);
+      config.stageId = fallback;
+    }
+    for (const p of config.players) {
+      if (CHARACTER_DEFS[p.charId] !== undefined) continue;
+      const fallback = CHARACTER_LIST[0]?.id ?? 'aeval';
+      console.warn(`[lan] unknown character "${p.charId}" in slot ${p.slot + 1}, using ${fallback}`);
+      p.charId = fallback;
+    }
+    return config;
+  }
+
   /** Start (or, with `history`, rejoin) a LAN match from the lobby agent's start message. */
   function startLanMatch(start: MatchStart, history?: InputHistory, retirements: Retirement[] = []): void {
     if (ui === null) return;
@@ -602,7 +622,7 @@ function boot(): void {
     // Replacing a finished LAN match: the agent already counts us in the new one.
     endMatch(false);
 
-    const config = start.config;
+    const config = knownIds(start.config);
     const peer = me.slot;
     const localIndex = Math.max(0, config.players.findIndex((p) => p.slot === peer && !p.cpu));
     // The local player always plays on Player 1's keys and pad (docs/LAN.md).

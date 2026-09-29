@@ -352,6 +352,7 @@ function cloneProjectile(src: ProjectileState): ProjectileState {
     power: src.power,
     scale: src.scale,
     returned: src.returned,
+    charge: src.charge,
   };
 }
 

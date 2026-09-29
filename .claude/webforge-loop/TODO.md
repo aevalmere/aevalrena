@@ -1,6 +1,6 @@
-- [ ] R1 LAN reload resumes the match
-- [ ] R2 disconnect awards the win to the remaining side
-- [ ] R3 context.ts stale defaults
-- [ ] R4 independent netcode review, then fix findings
-- [ ] Commit the wave in logical chunks once gates pass
+- [x] R1 LAN reload resumes the match
+- [x] R2 disconnect awards the win to the remaining side
+- [x] R3 context.ts stale defaults
+- [x] R4 independent netcode review, then fix findings
+- [x] Commit the wave in logical chunks once gates pass
 - [ ] BLOCKED: R5/R6 art patches (owner decision)

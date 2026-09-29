@@ -1,4 +1,4 @@
-import { cpuInput } from '../ai';
+import { cpuInput, warmAevalmere } from '../ai';
 import { createRng, nextFloat } from '../core/rng';
 import { Btn } from '../core/types';
 import type { GameState, InputFrame, MatchConfig } from '../core/types';
@@ -241,6 +241,8 @@ function runScenario(sc: Scenario): ScenarioResult {
   const cpuRng = createRng(0xc0ffee);
   const rand = (): number => nextFloat(cpuRng);
 
+  /** The config object each peer's session was built with (R10: it must survive every rollback). */
+  const configs: MatchConfig[] = [];
   function options(p: number): RollbackOptions {
     const sources: (LocalSource | null)[] = [];
     for (let i = 0; i < players; i++) {
@@ -249,8 +251,9 @@ function runScenario(sc: Scenario): ScenarioResult {
       else if (cpus.includes(i)) sources.push((_f: number, st: GameState) => cpuInput(st, config.players[idx].slot, config.players[idx].cpuLevel, rand));
       else sources.push((frame: number) => scripted(idx, frame - INPUT_DELAY));
     }
+    configs[p] = JSON.parse(JSON.stringify(config)) as MatchConfig;
     return {
-      config: JSON.parse(JSON.stringify(config)) as MatchConfig,
+      config: configs[p],
       sim: {
         createGameState,
         eliminate: eliminateFighter,
@@ -275,6 +278,8 @@ function runScenario(sc: Scenario): ScenarioResult {
   const heap: number[] = [];
   if (sc.heapEvery !== undefined) heap.push(heapMB());
   let resumed = false;
+  const leaverSlots = new Set<number>();
+  const koSeen: number[] = new Array(sc.peers).fill(0);
   const retirements: Retirement[] = [];
   const left = new Set<number>();
 
@@ -297,6 +302,7 @@ function runScenario(sc: Scenario): ScenarioResult {
       hub.blocked.add(lp);
       left.add(lp);
       const players = sc.owners.map((o, i) => (o === lp ? i : -1)).filter((i) => i >= 0);
+      for (const i of players) leaverSlots.add(config.players[i].slot);
       const frame = Math.min(...players.map((i) => hub.log.last[i])) + 1;
       const from = Math.max(0, frame - 48);
       const tail = { from, inputs: players.map((i) => hub.log.range(i, from, frame - 1)) };
@@ -310,7 +316,10 @@ function runScenario(sc: Scenario): ScenarioResult {
       if (left.has(p)) continue;
       if (clock < sc.startLag[p] || hub.blocked.has(p)) { done = false; continue; }
       s.tickOnce(s.tick < sc.frames);
-      for (const e of s.drainEvents()) if (e.type === 'hit') hits[p]++;
+      for (const e of s.drainEvents()) {
+        if (e.type === 'hit') hits[p]++;
+        if (e.type === 'ko' && leaverSlots.has(e.slot)) koSeen[p]++;
+      }
       if (s.tick < sc.frames || s.confirmedFrame() < sc.frames - 1) done = false;
     }
     if (sc.heapEvery !== undefined && clock > 0 && clock % sc.heapEvery === 0) heap.push(heapMB());
@@ -342,18 +351,24 @@ function runScenario(sc: Scenario): ScenarioResult {
   const allTicked = staying.every((s) => s.tick === sc.frames && s.state.frame === sc.frames);
   let leaveInfo: ScenarioResult['leave'];
   let leaveOk = true;
+  // R10: every session still holds the config object it was built with, after all rollbacks.
+  const configOk = sessions.every((s, p) => left.has(p) || s.state.config === configs[p]);
   if (sc.leave !== undefined) {
+    // R14: every remaining peer drew the leaver's KO.
+    leaveOk = sessions.every((_s, p) => left.has(p) || koSeen[p] > 0);
     const st = staying[0].state;
     const winnerIdx = st.fighters.findIndex((f) => f.slot === st.winner);
     leaveInfo = { frame: retirements[0]?.frame ?? -1, finished: st.finished, winnerSlot: st.winner, winnerTeam: st.winnerTeam ?? -1 };
-    leaveOk = sc.expectWinner === -1 ? !st.finished || st.endFrame > (retirements[0]?.frame ?? 0) + 1 : st.finished && winnerIdx === sc.expectWinner && st.endFrame === (retirements[0]?.frame ?? -1) + 1;
+    leaveOk = leaveOk && (sc.expectWinner === -1 ? !st.finished || st.endFrame > (retirements[0]?.frame ?? 0) + 1 : st.finished && winnerIdx === sc.expectWinner && st.endFrame === (retirements[0]?.frame ?? -1) + 1);
   }
   // A resumed peer re-simulated the history silently, so its effect count restarts there.
   const hitsOk = hits.every((n, p) => left.has(p) || (resumed && p === sc.drop?.peer) || (n >= ref.hits && n <= ref.hits * 1.25 + 5));
   const pass = sc.corruptPeer !== undefined
     ? desyncs > 0
     : allTicked && hashes.every((h) => h === refHash) && desyncs === 0 && compared > 0 && scriptedMatch !== false && hitsOk &&
-      (sc.drop === undefined || resumed) && leaveOk;
+      (sc.drop === undefined || resumed) && leaveOk && configOk;
+  if (!configOk) process.stdout.write('  config identity lost across a rollback\n');
+  if (sc.leave !== undefined) process.stdout.write(`  leaver KO effects seen per peer: ${koSeen.join('/')}\n`);
   if (desyncLog !== '' && sc.corruptPeer === undefined) process.stdout.write(`  desync log:${desyncLog.slice(0, 200)}\n`);
   return {
     name: sc.name, pass,
@@ -394,8 +409,81 @@ const SCENARIOS: Scenario[] = [
   process.stdout.write(`tick cost (4 players, save + step + packet): ${perTick.toFixed(1)} us\n`);
 }
 
+/**
+ * R13: a tab that simulates without rendering (hidden) must not pile up effects. 4 scripted
+ * players, 3600 frames, nothing drained: the pending list stays within EVENT_MAX_AGE frames.
+ */
+function pendingBoundCheck(): { pass: boolean; detail: string } {
+  const s = new RollbackSession({
+    config: makeConfig(4, [], 99), sim: { createGameState, stepGame }, peer: 0, owners: [0, 0, 0, 0],
+    sources: [0, 1, 2, 3].map((i) => (f: number) => scripted(i, f)), transport: { send() {}, poll() {} }, inputDelay: 0,
+  });
+  let maxPending = 0;
+  let total = 0;
+  for (let i = 0; i < 3600; i++) {
+    s.tickOnce(true);
+    total += s.state.events.length;
+    maxPending = Math.max(maxPending, s.pendingEventCount());
+  }
+  const drained = s.drainEvents().length;
+  const pass = total > 0 && maxPending <= 64 && drained <= maxPending;
+  return { pass, detail: `${total} events over 3600 undrawn frames, at most ${maxPending} pending, ${drained} drawn on return` };
+}
+
+/**
+ * R10: a level 10 CPU on the host warms once per match. The AI keys a new match on the config
+ * object, so a rollback that swapped it would re-warm mid-match (a hitch as long as a warm).
+ * The host's slowest tick must stay well under one warm, measured on this machine.
+ */
+function warmOnceCheck(): { pass: boolean; detail: string } {
+  const base = makeConfig(3, [1], 3);
+  base.players[1].cpuLevel = 10;
+  base.teams = false;
+  const owners = [0, 0, 1];
+  const hub = new FakeHub(2, 2, 0.05, 99, owners);
+  const cpuRng = createRng(7);
+  const rand = (): number => nextFloat(cpuRng);
+  const cfg0 = JSON.parse(JSON.stringify(base)) as MatchConfig;
+  warmAevalmere(cfg0);
+  const mk = (p: number, cfg: MatchConfig): RollbackSession => new RollbackSession({
+    config: cfg, sim: { createGameState, stepGame }, peer: p, owners,
+    sources: [0, 1, 2].map((i) => {
+      if (owners[i] !== p) return null;
+      if (i === 1) return (_f: number, st: GameState) => cpuInput(st, 1, 10, rand);
+      return (f: number) => scripted(i, f - INPUT_DELAY);
+    }),
+    transport: hub.transport(p), inputDelay: INPUT_DELAY,
+  });
+  const host = mk(0, cfg0);
+  const guest = mk(1, JSON.parse(JSON.stringify(base)) as MatchConfig);
+  let maxTick = 0;
+  for (let clock = 0; clock < 900; clock++) {
+    hub.now = clock;
+    hub.deliver();
+    const t0 = performance.now();
+    host.tickOnce(true);
+    const dt = performance.now() - t0;
+    if (clock > 30) maxTick = Math.max(maxTick, dt);
+    guest.tickOnce(true);
+  }
+  const tw = performance.now();
+  warmAevalmere(JSON.parse(JSON.stringify(base)) as MatchConfig);
+  const warmMs = performance.now() - tw;
+  const identity = host.state.config === cfg0;
+  const pass = identity && host.stats.rollbacks > 0 && maxTick < warmMs / 2;
+  return {
+    pass,
+    detail: `config kept ${identity} over ${host.stats.rollbacks} rollbacks; slowest host tick ${maxTick.toFixed(1)} ms vs one warm ${warmMs.toFixed(0)} ms`,
+  };
+}
+
 let ok = true;
 const results: ScenarioResult[] = [];
+for (const [name, check] of [['R13 pending effects stay bounded while hidden', pendingBoundCheck], ['R10 level 10 CPU warms once per match', warmOnceCheck]] as const) {
+  const r = check();
+  ok = ok && r.pass;
+  process.stdout.write(`${r.pass ? 'PASS' : 'FAIL'} ${name}: ${r.detail}\n`);
+}
 for (const sc of SCENARIOS) {
   const r = runScenario(sc);
   results.push(r);

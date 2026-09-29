@@ -64,6 +64,8 @@ export const STATE_RING = 32;
 /** Frames a remote player may be predicted ahead of its last confirmed input before we stall. */
 export const MAX_PREDICTION = 12;
 export const HASH_INTERVAL = 60;
+/** Remote input further than this past its confirmed frame is dropped (< INPUT_RING). */
+const MAX_ACCEPT_AHEAD = 100;
 /** Most input frames repeated per packet. */
 const MAX_SEND = 24;
 /** Fewest recent frames repeated per packet even when acked, for loss tolerance. */
@@ -73,6 +75,11 @@ const SYNC_WINDOW = 32;
 const EVENT_RING = 64;
 /** Fields that may shift when a frame is re-simulated with corrected inputs; left out of an event's identity. */
 const EVENT_LOOSE_FIELDS = new Set(['x', 'y', 'kb', 'angle', 'damage']);
+/**
+ * Pending effects older than this many frames are dropped instead of drawn: a tab that was
+ * hidden (the Worker keeps simulating, nothing renders) must not replay minutes of sparks.
+ */
+const EVENT_MAX_AGE = 8;
 
 /** Identity of a sim event for de-duplication across re-simulations: its type and participants. */
 export function eventSignature(e: SimEvent): string {
@@ -155,6 +162,10 @@ export class RollbackSession {
   private readonly evSeen = new Map<string, number>();
   private pendingEvents: SimEvent[] = [];
   private spareEvents: SimEvent[] = [];
+  /** Frame of each pending event, parallel to pendingEvents. */
+  private pendingFrames: number[] = [];
+  private spareFrames: number[] = [];
+  private readonly koScratch: SimEvent[] = [];
   private collectEvents = true;
   /** Per fighter index: frame from which the player is retired, or MAX when playing. */
   private readonly retiredFrom: number[] = [];
@@ -253,13 +264,25 @@ export class RollbackSession {
     this.rings[i].inputFor(frame, out);
   }
 
-  private applyRetirements(frame: number): void {
+  /**
+   * Eliminates players retiring at `frame`. Returns the events that produced (the KO), taken
+   * out of state.events because stepGame clears them first thing; stepFrame puts them back
+   * after the step so the frame's effects include the leaver's KO.
+   */
+  private applyRetirements(frame: number): SimEvent[] {
+    const out = this.koScratch;
+    out.length = 0;
     const eliminate = this.opts.sim.eliminate;
-    if (eliminate === undefined) return;
+    if (eliminate === undefined) return out;
+    const events = this.state.events;
     for (const r of this.retirements) {
       if (r.frame !== frame) continue;
+      const before = events.length;
       for (const p of r.players) eliminate(this.state, p);
+      for (let e = before; e < events.length; e++) out.push(events[e]);
+      events.length = before;
     }
+    return out;
   }
 
   private loadHistory(history: InputHistory): void {
@@ -316,11 +339,31 @@ export class RollbackSession {
    * timeline), so a resim never repeats a spark and a corrected hit still shows.
    */
   drainEvents(): SimEvent[] {
+    this.pruneEvents(this.tick - EVENT_MAX_AGE);
     const out = this.pendingEvents;
     this.pendingEvents = this.spareEvents;
     this.pendingEvents.length = 0;
     this.spareEvents = out;
+    const frames = this.pendingFrames;
+    this.pendingFrames = this.spareFrames;
+    this.pendingFrames.length = 0;
+    this.spareFrames = frames;
     return out;
+  }
+
+  /** Effects waiting to be drawn (bounded by EVENT_MAX_AGE frames of play). */
+  pendingEventCount(): number {
+    return this.pendingEvents.length;
+  }
+
+  /** Drop pending effects from frames before `oldest`. */
+  private pruneEvents(oldest: number): void {
+    const frames = this.pendingFrames;
+    let cut = 0;
+    while (cut < frames.length && frames[cut] < oldest) cut++;
+    if (cut === 0) return;
+    this.pendingEvents.splice(0, cut);
+    frames.splice(0, cut);
   }
 
   private recordEvents(frame: number): void {
@@ -341,8 +384,10 @@ export class RollbackSession {
       if (n > (counts.get(sig) ?? 0)) {
         counts.set(sig, n);
         this.pendingEvents.push(events[e]);
+        this.pendingFrames.push(frame);
       }
     }
+    if (this.pendingFrames[0] < frame - EVENT_MAX_AGE) this.pruneEvents(frame - EVENT_MAX_AGE);
   }
 
   get inputDelay(): number {
@@ -420,6 +465,9 @@ export class RollbackSession {
   /** Store a confirmed input; if that frame was simulated with something else, roll back to it. */
   private accept(idx: number, frame: number, held: number, pressed: number, released: number, direct: number): void {
     const ring = this.rings[idx];
+    // The input ring holds INPUT_RING frames; a frame that far past what is confirmed would
+    // overwrite live entries. An honest peer never sends more than MAX_SEND past our ack.
+    if (frame > ring.lastConfirmed + MAX_ACCEPT_AHEAD) return;
     if (!ring.put(frame, held, pressed, released, direct)) return;
     if (frame >= this.tick) return;
     ring.read(frame, this.scratch);
@@ -459,8 +507,9 @@ export class RollbackSession {
       this.inputAt(i, frame, out);
       this.used[i].set(frame, out.held, out.pressed, out.released, out.direct ?? 0);
     }
-    this.applyRetirements(frame);
+    const ko = this.applyRetirements(frame);
     this.opts.sim.stepGame(this.state, this.frameInputs);
+    for (let e = 0; e < ko.length; e++) this.state.events.push(ko[e]);
     if (this.collectEvents) this.recordEvents(frame);
   }
 

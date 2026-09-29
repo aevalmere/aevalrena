@@ -6,6 +6,14 @@ import type { InputHistory } from './protocol';
  * (and by nettest's fake hub). A member that reconnects gets it and re-simulates to the present.
  * Grows by 16 bytes per player per frame: a 10 minute 4 player match is about 2.3 MB.
  */
+/**
+ * How far past a player's confirmed frame a logged input may be. An honest client runs at most
+ * the prediction window plus the input delay ahead of what others confirmed; anything far past
+ * this is garbage or an attack (one packet with a huge first frame would otherwise grow the
+ * log by hundreds of megabytes).
+ */
+export const LOG_MAX_AHEAD = 600;
+
 export class InputLog {
   private readonly data: Int32Array[] = [];
   private readonly known: Uint8Array[] = [];
@@ -22,7 +30,7 @@ export class InputLog {
   }
 
   put(player: number, frame: number, held: number, pressed: number, released: number, direct: number): void {
-    if (player < 0 || player >= this.players || frame < 0 || frame > 1 << 22) return;
+    if (player < 0 || player >= this.players || frame < 0 || frame > this.last[player] + LOG_MAX_AHEAD) return;
     let k = this.known[player];
     if (frame >= k.length) {
       let size = k.length;

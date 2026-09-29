@@ -498,7 +498,9 @@ export class LanClient {
 
 function parse(data: string): ServerMsg | null {
   try {
-    return JSON.parse(data) as ServerMsg;
+    const v: unknown = JSON.parse(data);
+    if (typeof v !== 'object' || v === null || typeof (v as { t?: unknown }).t !== 'string') return null;
+    return v as ServerMsg;
   } catch {
     return null;
   }

@@ -5,10 +5,12 @@
  */
 import crypto from 'node:crypto';
 import { WebSocket, type RawData } from 'ws';
-import { InputLog } from '../src/net/inputlog';
+import { createPacket, decodePacket, MAX_PEERS } from '../src/net/codec';
+import { InputLog, LOG_MAX_AHEAD } from '../src/net/inputlog';
 import {
   buildMatchStart, LOBBY_MAX, NAME_MAX, RECONNECT_MS, sanitizeSettings, uniqueName,
-  type Announce, type ClientMsg, type LobbyInfo, type LobbyListing, type LobbyMember, type MatchStart, type Retirement, type ServerMsg,
+  type Announce, type ClientMsg, type LobbyInfo, type LobbyListing, type LobbyMember, type LobbySettings, type MatchStart, type Retirement,
+  type ServerMsg,
 } from '../src/net/protocol';
 
 /**
@@ -53,12 +55,31 @@ export interface LobbyHostOptions {
   hostName: string;
   version: string;
   fallbackStage: string;
+  /** Stage and character ids this build knows (STAGE_DEFS, CHARACTER_DEFS); others are replaced. */
+  stages: string[];
+  characters: string[];
   /** Lobbies discovered on other agents, for the merged list. */
   remoteListings(): LobbyListing[];
   log(line: string): void;
 }
 
+/** Largest WebSocket message the agent accepts; an input packet is under 2 KiB. */
+export const MAX_PAYLOAD = 64 * 1024;
+
+const MESSAGE_TYPES = new Set<string>([
+  'hello', 'list', 'create', 'join', 'leave', 'member', 'settings', 'assign', 'start', 'backToLobby',
+  'rematch', 'leaveMatch', 'resume', 'ping',
+]);
+
+/** A parsed text frame, if it is an object with a known string `t`. */
+function asClientMsg(value: unknown): ClientMsg | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const t = (value as { t?: unknown }).t;
+  return typeof t === 'string' && MESSAGE_TYPES.has(t) ? (value as ClientMsg) : null;
+}
+
 export class LobbyHost {
+  private readonly packet = createPacket();
   private nextClientId = 1;
   private nextLobbyId = 1;
   private readonly clients = new Set<Client>();
@@ -85,21 +106,37 @@ export class LobbyHost {
     sock?.setNoDelay?.(true); // an input packet must leave now, not with the next one
     ws.on('pong', () => { c.missed = 0; });
     ws.on('message', (data: RawData, isBinary: boolean) => {
-      c.missed = 0;
-      if (isBinary) {
-        this.relay(c, toBuffer(data));
-        return;
-      }
-      let msg: ClientMsg;
       try {
-        msg = JSON.parse(toBuffer(data).toString('utf8')) as ClientMsg;
-      } catch {
-        this.send(c, { t: 'error', message: 'Bad message' });
-        return;
+        c.missed = 0;
+        if (isBinary) {
+          this.relay(c, toBuffer(data));
+          return;
+        }
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(toBuffer(data).toString('utf8'));
+        } catch {
+          parsed = null;
+        }
+        const msg = asClientMsg(parsed);
+        if (msg === null) {
+          this.send(c, { t: 'error', message: 'Bad message' });
+          return;
+        }
+        this.handle(c, msg);
+      } catch (err) {
+        // One bad client must never take the agent (and every lobby on it) down.
+        this.opts.log(`[lan] dropped ${c.name} (#${c.id}) after an error handling its message: ${(err as Error).message}`);
+        c.ws.terminate();
       }
-      this.handle(c, msg);
     });
-    ws.on('close', (code: number) => this.onClose(c, code));
+    ws.on('close', (code: number) => {
+      try {
+        this.onClose(c, code);
+      } catch (err) {
+        this.opts.log(`[lan] error closing ${c.name} (#${c.id}): ${(err as Error).message}`);
+      }
+    });
     ws.on('error', () => { /* 'close' follows */ });
     this.send(c, { t: 'welcome', id: c.id, version: this.opts.version, agentId: this.opts.agentId, hostName: this.opts.hostName });
   }
@@ -288,7 +325,7 @@ export class LobbyHost {
     l.clients.add(c);
     l.tokens.set(c.id, token);
     l.info.members.push({
-      id: c.id, name, slot, charId: charId.slice(0, 32) || 'aeval', team: slot,
+      id: c.id, name, slot, charId: this.character(charId), team: slot,
       ready: false, rematch: false, ping: -1, connected: true,
     });
     l.info.members.sort((a, b) => a.slot - b.slot);
@@ -323,21 +360,61 @@ export class LobbyHost {
     if (err !== '') for (const c of l.clients) this.send(c, { t: 'error', message: err });
   }
 
+  /** Packets refused by the relay (malformed, foreign players, frames out of range). */
+  rejectedPackets = 0;
+
+  /**
+   * Relay an input packet to the other members, after checking it: it must decode, carry only
+   * fighters the sender owns, and stay within LOG_MAX_AHEAD of what is confirmed. The peer id
+   * byte is stamped with the sender's real slot, so nobody can speak for another peer.
+   */
   private relay(c: Client, data: Buffer): void {
     const l = c.lobby;
-    if (l === null || !l.info.inMatch || l.start === null) return;
+    if (l === null || !l.info.inMatch || l.start === null || l.log === null) return;
     const m = this.member(l, c.memberId);
     if (m === undefined) return;
     const owners = l.start.owners;
-    l.log?.record(new Uint8Array(data.buffer, data.byteOffset, data.byteLength), (idx) => owners[idx] === m.slot);
+    const log = l.log;
+    const bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    const pk = this.packet;
+    let ok = decodePacket(bytes, pk) && m.slot < MAX_PEERS && pk.firstFrame >= 0;
+    for (let k = 0; ok && k < pk.players.length; k++) {
+      const idx = pk.players[k];
+      if (owners[idx] !== m.slot || pk.firstFrame + pk.frames - 1 > log.last[idx] + LOG_MAX_AHEAD) ok = false;
+    }
+    if (!ok) {
+      this.rejectedPackets++;
+      return;
+    }
+    const stamped = Buffer.from(bytes);
+    stamped[1] = m.slot;
+    log.record(stamped, (idx) => owners[idx] === m.slot);
     const out = (): void => {
       for (const o of l.clients) {
-        if (o !== c && o.ws.readyState === WebSocket.OPEN) o.ws.send(data, { binary: true });
+        if (o !== c && o.ws.readyState === WebSocket.OPEN) o.ws.send(stamped, { binary: true });
       }
     };
     const latency = l.info.settings.simLatencyMs;
     if (latency > 0) setTimeout(out, latency);
     else out();
+  }
+
+  /** Clamped settings whose stage exists in this build. */
+  private settings(raw: unknown): LobbySettings {
+    const s = sanitizeSettings(typeof raw === 'object' && raw !== null ? raw as Partial<LobbySettings> : {}, this.opts.fallbackStage);
+    if (!this.opts.stages.includes(s.stageId)) {
+      this.opts.log(`[lan] unknown stage "${s.stageId}", using ${this.opts.fallbackStage}`);
+      s.stageId = this.opts.fallbackStage;
+    }
+    return s;
+  }
+
+  /** A character id this build has, else the first one. */
+  private character(id: unknown): string {
+    const fallback = this.opts.characters[0] ?? 'aeval';
+    if (typeof id === 'string' && this.opts.characters.includes(id)) return id;
+    this.opts.log(`[lan] unknown character "${String(id).slice(0, 32)}", using ${fallback}`);
+    return fallback;
   }
 
   // ---------------- messages ----------------
@@ -366,7 +443,7 @@ export class LobbyHost {
       case 'create': {
         if (c.version !== this.opts.version) return this.send(c, { t: 'error', message: 'Different game version' });
         const lobby: Lobby = {
-          info: { id: this.nextLobbyId++, hostId: c.id, settings: sanitizeSettings(msg.settings ?? {}, this.opts.fallbackStage), members: [], inMatch: false },
+          info: { id: this.nextLobbyId++, hostId: c.id, settings: this.settings(msg.settings), members: [], inMatch: false },
           clients: new Set(), playing: new Set(), start: null, log: null, tokens: new Map(), dropTimers: new Map(),
           retirements: [], closing: '',
         };
@@ -393,7 +470,7 @@ export class LobbyHost {
         if (l === null || l.info.inMatch) return;
         const m = this.member(l, c.memberId);
         if (m === undefined) return;
-        if (typeof msg.charId === 'string' && msg.charId !== '') m.charId = msg.charId.slice(0, 32);
+        if (typeof msg.charId === 'string' && msg.charId !== '') m.charId = this.character(msg.charId);
         if (typeof msg.team === 'number' && msg.team >= 0 && msg.team < LOBBY_MAX) m.team = Math.floor(msg.team);
         if (typeof msg.ready === 'boolean') {
           m.ready = msg.ready;
@@ -408,7 +485,7 @@ export class LobbyHost {
       }
       case 'settings':
         if (l === null || l.info.hostId !== c.memberId || l.info.inMatch) return;
-        l.info.settings = sanitizeSettings(msg.settings ?? {}, this.opts.fallbackStage);
+        l.info.settings = this.settings(msg.settings);
         for (const m of l.info.members) if (m.id !== c.memberId) { m.ready = false; m.rematch = false; }
         this.broadcastLobby(l);
         this.pushList();

@@ -50,9 +50,26 @@ function copyInto(dst: object, src: object): void {
   for (const k in s) d[k] = copyValue(d[k], s[k]);
 }
 
+/**
+ * Top-level GameState fields shared by reference, never copied: `config` is immutable for the
+ * whole match, and code outside the sim keys on its identity (the level 10 AI treats a new
+ * config object as a new match and re-warms, a 400-frame hitch). Keeping the one object through
+ * every save and restore also saves copying it 60 times a second.
+ */
+const SHARED_KEYS = new Set(['config']);
+
+function copyState(dst: GameState, src: GameState): void {
+  const d = dst as unknown as Obj;
+  const s = src as unknown as Obj;
+  for (const k in d) {
+    if (!(k in s)) delete d[k];
+  }
+  for (const k in s) d[k] = SHARED_KEYS.has(k) ? s[k] : copyValue(d[k], s[k]);
+}
+
 /** Deep copy `src` into `dst` (which must come from `newSnapshot` or an earlier copy). */
 export function copyStateInto(dst: GameState, src: GameState): void {
-  copyInto(dst, src);
+  copyState(dst, src);
 }
 
 /** A new owned, empty snapshot to copy into. */
@@ -68,7 +85,7 @@ export function newSnapshot(): GameState {
  * replaced, owned ones are reused.
  */
 export function restoreInto(live: GameState, snap: GameState): void {
-  copyInto(live, snap);
+  copyState(live, snap);
 }
 
 /** Ring of pooled snapshots indexed by frame. */

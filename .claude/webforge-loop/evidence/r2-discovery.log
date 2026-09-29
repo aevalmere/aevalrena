@@ -1,0 +1,10 @@
+
+> aevalrena@0.0.1 test:discovery
+> npx --yes tsx src/net/discoverytest.ts
+
+PASS R9 hostile datagrams: validator: 18 bad refused (0 slipped through), good accepted true; live: 19 datagrams rejected, 0 listed after the bad ones, then [good] after a good one
+PASS multicast + broadcast: A saw B in 51 ms (at 192.168.86.250:5181), B saw A in 1051 ms, B expired from A's list 3995 ms after it stopped
+PASS multicast: A saw B in 51 ms (at 192.168.86.250:5181), B saw A in 1051 ms, B expired from A's list 3994 ms after it stopped
+PASS broadcast: A saw B in 54 ms (at 192.168.86.250:5181), B saw A in 1055 ms, B expired from A's list 3999 ms after it stopped
+{"pass":true,"results":[{"paths":"multicast + broadcast","seenAB":51,"seenBA":1051,"addressAB":"192.168.86.250:5181","expire":3995,"pass":true},{"paths":"multicast","seenAB":51,"seenBA":1051,"addressAB":"192.168.86.250:5181","expire":3994,"pass":true},{"paths":"broadcast","seenAB":54,"seenBA":1055,"addressAB":"192.168.86.250:5181","expire":3999,"pass":true}]}
+discoverytest: PASS

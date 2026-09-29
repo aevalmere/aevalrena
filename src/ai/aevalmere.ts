@@ -239,7 +239,7 @@ function copyProjectileInto(s: ProjectileState, d: ProjectileState): void {
   d.id = s.id; d.owner = s.owner; d.defId = s.defId;
   d.x = s.x; d.y = s.y; d.vx = s.vx; d.vy = s.vy;
   d.facing = s.facing; d.age = s.age; d.hitSlots = s.hitSlots; d.alive = s.alive;
-  d.power = s.power; d.scale = s.scale; d.returned = s.returned;
+  d.power = s.power; d.scale = s.scale; d.returned = s.returned; d.charge = s.charge ?? 0;
 }
 
 /**
@@ -280,7 +280,7 @@ export function copyGameStateInto(src: GameState, dst: GameState): void {
     if (i >= dp.length) {
       dp.push({
         id: 0, owner: 0, defId: '', x: 0, y: 0, vx: 0, vy: 0, facing: 1, age: 0, hitSlots: 0,
-        alive: false, power: 1, scale: 1, returned: false,
+        alive: false, power: 1, scale: 1, returned: false, charge: 0,
       });
     }
     copyProjectileInto(sp[i], dp[i]);

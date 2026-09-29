@@ -1,22 +1,97 @@
 {
   "task": "Refinement loop after the 2026-09-28/29 wave: keep every gate green, close the open defect rows (LAN reload resume, disconnect winner, stale menu default, review findings), then commit the wave in logical chunks.",
-  "scope": ["src/**", "server/**", "docs/**", "balance/**", "README.md", "package.json", "package-lock.json", "tsconfig.json", "tsconfig.server.json", "tools/**", "art/aeval/sheetmap.json", "art/stages/*/masks.json"],
-  "non_goals": ["new features", "new characters or stages", "WebRTC transport", "changing move numbers except to close a logged defect", "repainting art"],
-  "iteration": 0,
+  "scope": [
+    "src/**",
+    "server/**",
+    "docs/**",
+    "balance/**",
+    "README.md",
+    "package.json",
+    "package-lock.json",
+    "tsconfig.json",
+    "tsconfig.server.json",
+    "tools/**",
+    "art/aeval/sheetmap.json",
+    "art/stages/*/masks.json"
+  ],
+  "non_goals": [
+    "new features",
+    "new characters or stages",
+    "WebRTC transport",
+    "changing move numbers except to close a logged defect",
+    "repainting art"
+  ],
+  "iteration": 2,
   "max_iterations": 12,
   "started_at": "2026-09-29T00:00:00Z",
   "gates": {
-    "typecheck": {"cmd": "npm run typecheck", "last_exit": 0, "last_run_iteration": 0},
-    "sim": {"cmd": "npm run test:sim", "last_exit": 0, "last_run_iteration": 0, "tests": "85/85"},
-    "ai": {"cmd": "npx --yes tsx src/ai/aitest.ts", "last_exit": 0, "last_run_iteration": 0, "tests": "44/44 (1 info)"},
-    "net": {"cmd": "npm run test:net", "last_exit": 0, "last_run_iteration": 0},
-    "discovery": {"cmd": "npm run test:discovery", "last_exit": 0, "last_run_iteration": 0},
-    "lobby": {"cmd": "npm run test:lobby", "last_exit": 0, "last_run_iteration": 0},
-    "build": {"cmd": "npm run build", "last_exit": 0, "last_run_iteration": 0}
+    "typecheck": {
+      "cmd": "npm run typecheck",
+      "last_exit": 0,
+      "last_run_iteration": 2
+    },
+    "sim": {
+      "cmd": "npm run test:sim",
+      "last_exit": 0,
+      "last_run_iteration": 2,
+      "tests": "86/86"
+    },
+    "ai": {
+      "cmd": "npx --yes tsx src/ai/aitest.ts",
+      "last_exit": 0,
+      "last_run_iteration": 2,
+      "tests": "45/45 (1 info)"
+    },
+    "net": {
+      "cmd": "npm run test:net",
+      "last_exit": 0,
+      "last_run_iteration": 2
+    },
+    "discovery": {
+      "cmd": "npm run test:discovery",
+      "last_exit": 0,
+      "last_run_iteration": 2
+    },
+    "lobby": {
+      "cmd": "npm run test:lobby",
+      "last_exit": 0,
+      "last_run_iteration": 2
+    },
+    "build": {
+      "cmd": "npm run build",
+      "last_exit": 0,
+      "last_run_iteration": 2
+    }
   },
   "progress_history": [
-    {"iteration": 0, "gates_newly_passing": ["typecheck", "sim", "ai", "net", "discovery", "lobby", "build"], "defects_closed": 0, "defects_opened": 6}, {"iteration": 1, "gates_newly_passing": [], "defects_closed": 0, "defects_opened": 14, "note": "review R4 produced R7-R20; R1-R3 fixes pending report"}
+    {
+      "iteration": 1,
+      "gates_newly_passing": [
+        "typecheck",
+        "sim",
+        "ai",
+        "net",
+        "discovery",
+        "lobby",
+        "build"
+      ],
+      "defects_closed": 0,
+      "defects_opened": 6
+    },
+    {
+      "iteration": 1,
+      "gates_newly_passing": [],
+      "defects_closed": 4,
+      "defects_opened": 14,
+      "note": "R1-R4 closed; review opened R7-R20"
+    },
+    {
+      "iteration": 2,
+      "gates_newly_passing": [],
+      "defects_closed": 14,
+      "defects_opened": 0
+    }
   ],
   "no_progress_streak": 0,
-  "status": "running"
+  "status": "stopped: clean pass"
 }

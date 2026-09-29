@@ -28,19 +28,20 @@ type ChargedKey = 'vx' | 'lifetime' | 'damage' | 'bkb' | 'kbg' | 'r' | 'strength
 
 /**
  * One stat of a projectile instance, charge included. A def with `charged` lerps each listed
- * field from its base value to the full-charge value by how far along the charge curve the
- * shot was thrown. That position is read back off the instance's `scale`, which is set once
- * at spawn by projectileChargeScale (0.6 * 2.5 ** t) and never changed after: (scale - 0.6) / 0.9
- * is the same exponential normalised to run 0 at a tap to 1 at full charge, so the last
- * quarter of the charge moves every stat furthest. No per-instance field is needed.
+ * field from its base value to the full-charge value by `charge`, the instance's stored charge
+ * fraction t (0..1, 0 for any move that cannot charge), mapped onto the exponential curve
+ * c = (0.6 * 2.5 ** t - 0.6) / 0.9: the scale curve normalised to run 0 at a tap to 1 at full,
+ * so the last quarter of the charge moves every stat furthest.
  */
-export function chargedStat(def: ProjectileDef, scale: number, key: ChargedKey): number {
+export function chargedStat(def: ProjectileDef, charge: number | undefined, key: ChargedKey): number {
   const base = def[key];
   const full = def.charged === undefined ? undefined : def.charged[key];
   if (full === undefined) return base;
-  let c = (scale - PROJECTILE_SCALE_MIN) / (PROJECTILE_SCALE_MAX - PROJECTILE_SCALE_MIN);
-  if (c < 0) c = 0;
-  else if (c > 1) c = 1;
+  let t = charge === undefined ? 0 : charge;
+  if (t <= 0) return base;
+  if (t > 1) t = 1;
+  const scaled = PROJECTILE_SCALE_MIN * Math.pow(PROJECTILE_SCALE_MAX / PROJECTILE_SCALE_MIN, t);
+  const c = (scaled - PROJECTILE_SCALE_MIN) / (PROJECTILE_SCALE_MAX - PROJECTILE_SCALE_MIN);
   return base + (full - base) * c;
 }
 
@@ -66,6 +67,7 @@ function spawnAt(
   def: ProjectileDef,
   power: number,
   scale: number,
+  charge: number,
   hitSlots = 0,
 ): void {
   const p = freeSlot(state);
@@ -74,7 +76,7 @@ function spawnAt(
   p.defId = def.id;
   p.x = x;
   p.y = y;
-  p.vx = chargedStat(def, scale, 'vx') * facing;
+  p.vx = chargedStat(def, charge, 'vx') * facing;
   p.vy = def.vy;
   p.facing = facing;
   p.age = 0;
@@ -84,20 +86,21 @@ function spawnAt(
   // every per-instance field is reset here as well as on a fresh one.
   p.power = power;
   p.scale = scale;
+  p.charge = charge;
   p.returned = false;
   state.events.push({ type: 'projectileSpawn', x: p.x, y: p.y, slot: owner, defId: def.id });
 }
 
 /**
  * Spawns from a move's projectile def, in fighter-local space mirrored by facing.
- * `power` scales the damage it deals and `scale` its hit circle and sprite, both 1
- * by default so an ordinary spawn is exactly the def's own numbers; a charged
- * nspecial passes them up.
+ * `power` scales the damage it deals, `scale` its hit circle and sprite, and `charge`
+ * (fraction 0..1) drives the def's `charged` lerp. Defaults 1, 1, 0 so an ordinary spawn
+ * is exactly the def's own numbers; a charged nspecial passes them up.
  */
 export function spawnProjectile(
-  state: GameState, f: SimFighter, def: ProjectileDef, power = 1, scale = 1,
+  state: GameState, f: SimFighter, def: ProjectileDef, power = 1, scale = 1, charge = 0,
 ): void {
-  spawnAt(state, f.slot, f.facing, f.x + def.x * f.facing, f.y + def.y, def, power, scale);
+  spawnAt(state, f.slot, f.facing, f.x + def.x * f.facing, f.y + def.y, def, power, scale, charge);
 }
 
 /**
@@ -114,7 +117,7 @@ export function killProjectile(state: GameState, p: ProjectileState, def: Projec
   // The burst is as strong and as big as the shot that carried it, and skips every fighter
   // that shot already hit: a burst never re-launches (and so never overrides) its orb's hit.
   // p may be the very slot handed back to the burst, so its fields are read first.
-  spawnAt(state, p.owner, p.facing, p.x, p.y, burst, p.power, p.scale, p.hitSlots);
+  spawnAt(state, p.owner, p.facing, p.x, p.y, burst, p.power, p.scale, p.charge ?? 0, p.hitSlots);
 }
 
 /** Step 5 of the frame: move, age, die on lifetime or outside the blast zone. */
@@ -145,7 +148,7 @@ export function stepProjectiles(state: GameState): void {
     if (outside) {
       p.alive = false;
       state.events.push({ type: 'projectileDie', x: p.x, y: p.y, defId: p.defId });
-    } else if (p.age >= Math.round(chargedStat(def, p.scale, 'lifetime'))) {
+    } else if (p.age >= Math.round(chargedStat(def, p.charge, 'lifetime'))) {
       killProjectile(state, p, def);
     }
   }

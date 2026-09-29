@@ -3,21 +3,30 @@
  * Covers create/join, the full-lobby and in-match refusals, the version guard, duplicate names,
  * a guest leaving (slot reopens), a dropped player resuming with the input history, a dropped
  * player timing out (peerGone after RECONNECT_MS), and the host leaving (lobby closes).
+ * Hardening (review R7-R18): malformed text frames, forged and out-of-range input packets,
+ * oversize messages, unknown stage and character ids, and bad static-file paths must all be
+ * refused without crashing the agent.
  *
  *   npx --yes tsx server/lobbytest.ts
  */
+import fs from 'node:fs';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
 import { WebSocket, WebSocketServer } from 'ws';
 import { createPacket, encodePacket } from '../src/net/codec';
 import { defaultSettings, LAN_PATH, RECONNECT_MS, type ClientMsg, type ServerMsg } from '../src/net/protocol';
-import { LobbyHost } from './lobbyhost';
+import { LobbyHost, MAX_PAYLOAD } from './lobbyhost';
+import { serveStatic } from './static';
 
 const VERSION = 'test-version';
 
 interface Peer {
   ws: WebSocket;
   inbox: ServerMsg[];
+  /** Binary frames received (relayed input packets). */
+  binaries: Buffer[];
   send(msg: ClientMsg): void;
   next(t: ServerMsg['t'], ms?: number, pred?: (m: ServerMsg) => boolean): Promise<ServerMsg>;
 }
@@ -25,15 +34,19 @@ interface Peer {
 async function connect(port: number, name: string, version = VERSION): Promise<Peer> {
   const ws = new WebSocket(`ws://127.0.0.1:${port}${LAN_PATH}`);
   const inbox: ServerMsg[] = [];
+  const binaries: Buffer[] = [];
   const waiters: (() => void)[] = [];
   ws.on('message', (data, isBinary) => {
-    if (isBinary) return;
+    if (isBinary) {
+      binaries.push(Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer));
+      return;
+    }
     inbox.push(JSON.parse(data.toString()) as ServerMsg);
     for (const w of waiters.splice(0)) w();
   });
   await new Promise<void>((r) => ws.once('open', () => r()));
   const peer: Peer = {
-    ws, inbox,
+    ws, inbox, binaries,
     send: (msg) => ws.send(JSON.stringify(msg)),
     next: (t, ms = 2000, pred = () => true) => new Promise((resolve, reject) => {
       const deadline = setTimeout(() => reject(new Error(`${name}: no '${t}' within ${ms} ms`)), ms);
@@ -69,9 +82,10 @@ function lobbyOf(m: ServerMsg): Extract<ServerMsg, { t: 'lobby' }>['lobby'] {
 async function main(): Promise<void> {
   const host = new LobbyHost({
     agentId: 'test', hostName: 'test', version: VERSION, fallbackStage: 'tidegate', remoteListings: () => [], log: () => {},
+    stages: ['tidegate', 'hearthmoor'], characters: ['aeval'],
   });
   const server = http.createServer();
-  const wss = new WebSocketServer({ server, path: LAN_PATH });
+  const wss = new WebSocketServer({ server, path: LAN_PATH, maxPayload: MAX_PAYLOAD });
   wss.on('connection', (ws) => host.attach(ws));
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
   const port = (server.address() as AddressInfo).port;
@@ -282,6 +296,131 @@ async function main(): Promise<void> {
     other.ws.close(1000);
     g2.ws.close(1000);
     return `guest saw peerGone(${gone.t === 'peerGone' ? gone.retirement.players.join() : ''}) and kept playing; after results: "${closed.t === 'lobbyClosed' ? closed.message : ''}"`;
+  });
+
+  // ---- Hardening (review R7, R8, R11, R12, R15, R18) ----
+  const pong = async (p: Peer): Promise<boolean> => {
+    p.send({ t: 'ping', ts: 1, rtt: -1 });
+    return (await p.next('pong', 1500)).t === 'pong';
+  };
+
+  await check('R7: malformed text frames are refused and the agent keeps serving', async () => {
+    const x = await connect(port, 'FUZZ');
+    await x.next('lobbies');
+    const frames = ['null', '42', '"text"', '[]', '{}', '{"t":5}', '{"t":"nope"}', '{"t":"join"}',
+      '{"t":"create","settings":null,"charId":7}', '{"t":"assign"}', '{"t":"resume"}', 'not json', '{"t":"member","team":"x"}'];
+    for (const f of frames) x.ws.send(f);
+    await new Promise((r) => setTimeout(r, 300));
+    const errors = x.inbox.filter((m) => m.t === 'error').length;
+    const alive = await pong(x);
+    const fresh = await connect(port, 'AFTER');
+    const freshOk = (await fresh.next('welcome', 1500)).t === 'welcome';
+    fresh.ws.close(1000);
+    x.ws.close(1000);
+    if (!alive || !freshOk || errors < 8) throw new Error(`alive ${alive}, fresh ${freshOk}, errors ${errors}`);
+    return `${frames.length} bad frames, ${errors} error replies, same socket still answers ping, new sockets still accepted`;
+  });
+
+  await check('R15: unknown stage and character ids fall back to known ones', async () => {
+    const a2 = await connect(port, 'IDS');
+    a2.send({ t: 'create', settings: { ...defaultSettings('tidegate'), stageId: 'no-such-stage' }, charId: 'ghost' });
+    await a2.next('joined');
+    const l = lobbyOf(await a2.next('lobby'));
+    a2.send({ t: 'member', charId: 'also-ghost' });
+    const l2 = lobbyOf(await a2.next('lobby'));
+    a2.ws.close(1000);
+    const stage = l?.settings.stageId;
+    const chars = [l?.members[0]?.charId, l2?.members[0]?.charId];
+    if (stage !== 'tidegate' || chars.some((c) => c !== 'aeval')) throw new Error(`${stage} ${chars.join()}`);
+    return `stage "no-such-stage" became ${stage}; characters "ghost", "also-ghost" became ${chars.join(', ')}`;
+  });
+
+  // A two-player match for the relay checks.
+  const p0 = await connect(port, 'P0');
+  p0.send({ t: 'create', settings: { ...defaultSettings('tidegate'), name: 'RELAY' }, charId: 'aeval' });
+  const p0j = await p0.next('joined');
+  const relayLobby = p0j.t === 'joined' ? p0j.lobbyId : -1;
+  const p1 = await connect(port, 'P1');
+  p1.send({ t: 'join', lobbyId: relayLobby, charId: 'aeval' });
+  await p1.next('joined');
+  p1.send({ t: 'member', ready: true });
+  await p0.next('lobby', 2000, (m) => lobbyOf(m)?.members.find((x) => x.name === 'P1')?.ready === true);
+  p0.send({ t: 'start' });
+  await p0.next('start');
+  await p1.next('start');
+  const packet = (peer: number, players: number[], firstFrame: number, frames: number): Uint8Array => {
+    const pk = createPacket();
+    pk.peer = peer;
+    pk.players = players;
+    pk.firstFrame = firstFrame;
+    pk.frames = frames;
+    pk.inputs = new Int32Array(frames * players.length * 4);
+    return encodePacket(pk);
+  };
+  const quiet = async (p: Peer, ms: number): Promise<number> => {
+    const before = p.binaries.length;
+    await new Promise((r) => setTimeout(r, ms));
+    return p.binaries.length - before;
+  };
+
+  await check('R11: a packet for a fighter the sender does not own is dropped; the peer byte is stamped', async () => {
+    const rejected0 = host.rejectedPackets;
+    p1.ws.send(packet(0, [0], 0, 5)); // P1 (slot 2) speaking for P0's fighter
+    const leaked = await quiet(p0, 300);
+    p1.ws.send(packet(3, [1], 0, 5)); // its own fighter, but claiming peer 3
+    await quiet(p0, 300);
+    const got = p0.binaries[p0.binaries.length - 1];
+    if (leaked !== 0 || host.rejectedPackets !== rejected0 + 1 || got === undefined || got[1] !== 1) {
+      throw new Error(`leaked ${leaked}, rejected +${host.rejectedPackets - rejected0}, relayed peer byte ${got?.[1]}`);
+    }
+    return 'forged fighter: not relayed and counted as rejected; claimed peer 3 relayed as peer 1 (the sender\'s slot)';
+  });
+
+  await check('R12: frames far past the confirmed ones and oversize messages are refused', async () => {
+    const rejected0 = host.rejectedPackets;
+    p1.ws.send(packet(1, [1], 10_000_000, 4));
+    const leaked = await quiet(p0, 300);
+    if (leaked !== 0 || host.rejectedPackets !== rejected0 + 1) throw new Error(`leaked ${leaked}, rejected +${host.rejectedPackets - rejected0}`);
+    const big = await connect(port, 'BIG');
+    const code = await new Promise<number>((resolve) => {
+      big.ws.once('close', (c: number) => resolve(c));
+      big.ws.send(Buffer.alloc(MAX_PAYLOAD + 1024));
+    });
+    const alive = await pong(p0);
+    if (code !== 1009 || !alive) throw new Error(`close code ${code}, agent alive ${alive}`);
+    return `first frame 10,000,000 dropped (not relayed, not logged); a ${Math.round((MAX_PAYLOAD + 1024) / 1024)} KiB message closed that socket with 1009; agent still answers`;
+  });
+  p0.ws.close(1000);
+  p1.ws.close(1000);
+
+  await check('R8 + R18: bad escapes get 400, and paths may not leave the static root', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'aev-static-'));
+    const root = path.join(tmp, 'site');
+    fs.mkdirSync(root);
+    fs.mkdirSync(path.join(tmp, 'site-x'));
+    fs.writeFileSync(path.join(root, 'index.html'), '<p>ok</p>');
+    fs.writeFileSync(path.join(tmp, 'site-x', 'secret.txt'), 'secret');
+    const srv = http.createServer((req, res) => serveStatic(root, req, res));
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));
+    const sp = (srv.address() as AddressInfo).port;
+    const get = (p: string): Promise<{ status: number; body: string }> => new Promise((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port: sp, path: p, method: 'GET' }, (res) => {
+        let body = '';
+        res.on('data', (d: Buffer) => { body += d.toString(); });
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    const bad = await get('/%');
+    const sibling = await get('/%2e%2e/site-x/secret.txt');
+    const ok = await get('/index.html');
+    srv.close();
+    fs.rmSync(tmp, { recursive: true, force: true });
+    if (bad.status !== 400 || sibling.status !== 403 || sibling.body.includes('secret') || ok.status !== 200) {
+      throw new Error(`/% ${bad.status}, sibling ${sibling.status}, index ${ok.status}`);
+    }
+    return `GET /% -> 400, GET /../site-x/secret.txt -> 403, GET /index.html -> 200`;
   });
 
   host.dispose();

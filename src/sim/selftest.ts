@@ -390,6 +390,7 @@ function throwOrb(holdFrames: number): { power: number; scale: number; damage: n
   // Release and run until the orb reaches its spawn frame.
   let power = 0;
   let scale = 0;
+  let fraction = 0;
   let frame = -1;
   for (let i = 0; i < 40 && power === 0; i++) {
     step(state, NONE, NONE);
@@ -398,12 +399,13 @@ function throwOrb(holdFrames: number): { power: number; scale: number; damage: n
       if (pr.alive && pr.defId === 'orb') {
         power = pr.power;
         scale = pr.scale;
+        fraction = pr.charge ?? 0;
         frame = i;
       }
     }
   }
   // What this orb deals: the charged lerp of its def damage times its power.
-  const damage = chargedStat(PROJECTILE_DEFS['orb'], scale, 'damage') * power;
+  const damage = chargedStat(PROJECTILE_DEFS['orb'], fraction, 'damage') * power;
   return { power, scale, damage, charge, frame };
 }
 
@@ -2742,7 +2744,7 @@ function aevalClash(leftCharge: number | null, rightCharge: number | null): {
     const def = charge === null ? PROJECTILE_DEFS['crescent'] : PROJECTILE_DEFS['orb'];
     const power = 1;   // both defs spawn at power 1: the orb scales through its charged lerp
     const scale = charge === null ? 1 : projectileChargeScale(charge, true);
-    spawnProjectile(state, f, def, power, scale);
+    spawnProjectile(state, f, def, power, scale, charge === null ? 0 : charge / TUNING.input.chargeMax);
     return state.nextProjectileId - 1;
   };
   const leftId = shoot(left, leftCharge);
@@ -2773,7 +2775,7 @@ function testStrengthTiers(): SelfTestResult {
   const tapOrb = aevalClash(null, 0);
   const crescents = aevalClash(null, null);
   const midCharge = 20;
-  const midStrength = chargedStat(PROJECTILE_DEFS['orb'], projectileChargeScale(midCharge, true), 'strength');
+  const midStrength = chargedStat(PROJECTILE_DEFS['orb'], midCharge / TUNING.input.chargeMax, 'strength');
   const midOrb = aevalClash(midCharge, null);
   const fullOk = fullOrb.winner === 0 && fullOrb.leftAlive && !fullOrb.rightAlive && fullOrb.powersKept;
   const tapOk = tapOrb.winner === 0 && tapOrb.leftAlive && !tapOrb.rightAlive;
@@ -2824,14 +2826,73 @@ function testBurstSkipsOrbVictim(): SelfTestResult {
   const full = orbHitTotal(60);
   // What the burst deals to a fighter the orb missed: 2 from a tap orb, 8 from a full one.
   const burstDef = PROJECTILE_DEFS['orbBurst'];
-  const tapBurst = chargedStat(burstDef, projectileChargeScale(0, true), 'damage');
-  const fullBurst = chargedStat(burstDef, projectileChargeScale(60, true), 'damage');
+  const tapBurst = chargedStat(burstDef, 0, 'damage');
+  const fullBurst = chargedStat(burstDef, 1, 'damage');
   const burstOk = Math.abs(tapBurst - 2) < 1e-9 && Math.abs(fullBurst - 8) < 1e-9;
   return {
     name: 'cc. an orb that hits bursts, the burst skips its victim (tap 4, full 16), and a burst chips 2 to 8',
     pass: tap.burst && full.burst && Math.abs(tap.percent - 4) < 1e-9 && Math.abs(full.percent - 16) < 1e-9 && burstOk,
     detail: `tap: ${tap.percent.toFixed(2)} percent, burst ${tap.burst} | full: ${full.percent.toFixed(2)} percent, burst ${full.burst} | `
       + `burst damage tap ${tapBurst.toFixed(2)} full ${fullBurst.toFixed(2)}`,
+  };
+}
+
+
+/**
+ * R16: a def with `charged` spawned from a move that cannot charge must use its base values.
+ * The charge fraction is stored on the instance (0 here), not read back off `scale`, so a
+ * scale-1 spawn no longer reads as 44 percent charge. Also checks the burst inherits it.
+ */
+function testUnchargeableUsesBase(): SelfTestResult {
+  const probe: ProjectileDef = {
+    id: 'selftestChargedProbe',
+    spawnFrame: 0,
+    x: 0, y: -20,
+    vx: 2, vy: 0,
+    gravity: 0,
+    lifetime: 30,
+    r: 6,
+    damage: 3, angle: 0, bkb: 0, kbg: 0,
+    strength: 1,
+    charged: { vx: 10, lifetime: 5, damage: 30, r: 20, strength: 9 },
+    destroyOnHit: false,
+    sprite: 'orb',
+  };
+  PROJECTILE_DEFS[probe.id] = probe;
+  const state = fresh(1, 60);
+  const me = simFighters(state)[0];
+  state.fighters[1].x = 300;
+  me.x = -100;
+  me.facing = 1;
+  // spawnProjectile's defaults are what an unchargeable move passes: power 1, scale 1, charge 0.
+  spawnProjectile(state, me, probe);
+  const p = state.projectiles[state.projectiles.length - 1];
+  const vxOk = p.vx === 2 && (p.charge ?? -1) === 0;
+  let life = 0;
+  for (let i = 0; i < 60 && p.alive; i++) {
+    step(state, NONE, NONE);
+    life++;
+  }
+  const statsOk = chargedStat(probe, p.charge, 'damage') === 3 && chargedStat(probe, p.charge, 'r') === 6
+    && chargedStat(probe, p.charge, 'strength') === 1;
+  // A real unchargeable move: the jab bead (no `charged`) and the move's own fraction of 0.
+  const jabState = fresh(1, 60);
+  step(jabState, inp(Btn.Attack, Btn.Attack), NONE);
+  let jabCharge = -1;
+  for (let i = 0; i < 10; i++) {
+    step(jabState, NONE, NONE);
+    for (let k = 0; k < jabState.projectiles.length; k++) {
+      const q = jabState.projectiles[k];
+      if (q.defId === 'jabDrop' && jabCharge < 0) jabCharge = q.charge ?? -1;
+    }
+  }
+  const cloneOk = cloneGameState(state).projectiles[state.projectiles.length - 1].charge === p.charge;
+  return {
+    name: 'cd. a def with charged, spawned from a move that cannot charge, uses its base values',
+    pass: vxOk && life === 30 && statsOk && jabCharge === 0 && cloneOk,
+    detail: `vx ${p.vx} charge ${p.charge}, lived ${life} frames (want 30), damage ${chargedStat(probe, p.charge, 'damage')} `
+      + `r ${chargedStat(probe, p.charge, 'r')} strength ${chargedStat(probe, p.charge, 'strength')} | `
+      + `jab bead charge ${jabCharge} | clone keeps charge ${cloneOk}`,
   };
 }
 
@@ -2923,6 +2984,7 @@ export function runSimSelfTest(): SelfTestResult[] {
     testOneAirDodge(),
     testStrengthTiers(),
     testBurstSkipsOrbVictim(),
+    testUnchargeableUsesBase(),
   ];
 }
 

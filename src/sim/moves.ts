@@ -48,12 +48,14 @@ function applyMoveFrame(state: GameState, f: SimFighter, mv: MoveDef, frame: num
     // still rides projectileChargePower. An unchargeable move spawns at exactly 1 and 1.
     const power = projectileChargePower(f.charge, mv.chargeable);
     const scale = projectileChargeScale(f.charge, mv.chargeable);
+    // 0 for a move that cannot charge, so its `charged` defs keep their base values.
+    const charge = chargeFraction(f.charge, mv.chargeable);
     const delay = castDelay(f, mv);
     for (let i = 0; i < shots.length; i++) {
       const at = shots[i].spawnFrame;
       // A burst-only def (spawnFrame -1) never fires from the timeline, delay or not.
       if (at >= 0 && at + delay === frame) {
-        spawnProjectile(state, f, shots[i], shots[i].charged === undefined ? power : 1, scale);
+        spawnProjectile(state, f, shots[i], shots[i].charged === undefined ? power : 1, scale, charge);
       }
     }
   }

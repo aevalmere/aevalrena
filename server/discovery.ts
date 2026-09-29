@@ -71,6 +71,51 @@ export function pickAddress(ips: string[], source: string, local: Iface[]): stri
   return source;
 }
 
+/** Largest announce accepted; a full one (32 lobbies) is well under this. */
+const MAX_DATAGRAM = 16 * 1024;
+const MAX_IPS = 16;
+const MAX_LOBBIES = 32;
+const IPV4 = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
+
+function str(v: unknown, max: number, allowEmpty = true): v is string {
+  return typeof v === 'string' && v.length <= max && (allowEmpty || v.length > 0);
+}
+
+function int(v: unknown, lo: number, hi: number): v is number {
+  return typeof v === 'number' && Number.isInteger(v) && v >= lo && v <= hi;
+}
+
+/**
+ * A validated announce, or null. Every field is checked (type, length, range) and arrays are
+ * capped, so a crafted datagram can neither throw later nor bloat the list.
+ */
+export function parseAnnounce(text: string): Announce | null {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
+  const a = raw as Record<string, unknown>;
+  if (a.k !== 'aevalrena-lan' || !int(a.p, 0, 1000) || !str(a.agentId, 64, false) || !str(a.hostName, 64)) return null;
+  if (!int(a.port, 1, 65535) || !str(a.version, 64)) return null;
+  if (!Array.isArray(a.ips) || a.ips.length > MAX_IPS || !a.ips.every((ip) => typeof ip === 'string' && IPV4.test(ip))) return null;
+  if (!Array.isArray(a.lobbies) || a.lobbies.length > MAX_LOBBIES) return null;
+  const lobbies: Announce['lobbies'] = [];
+  for (const l of a.lobbies as unknown[]) {
+    if (typeof l !== 'object' || l === null) return null;
+    const o = l as Record<string, unknown>;
+    if (!int(o.lobbyId, 0, 2 ** 31) || !str(o.name, 40) || !str(o.hostName, 24) || !str(o.stageId, 32)) return null;
+    if (!int(o.players, 0, 4) || (o.state !== 'open' && o.state !== 'in-match')) return null;
+    lobbies.push({ lobbyId: o.lobbyId, name: o.name, hostName: o.hostName, stageId: o.stageId, players: o.players, state: o.state });
+  }
+  return {
+    k: 'aevalrena-lan', p: a.p, agentId: a.agentId, hostName: a.hostName, ips: a.ips as string[],
+    port: a.port, version: a.version, lobbies,
+  };
+}
+
 export interface DiscoveryOptions {
   agentId: string;
   build(): Announce;
@@ -162,15 +207,26 @@ export class Discovery {
     }
   }
 
+  /** Datagrams dropped as malformed (bad JSON, wrong shape, out-of-range fields). */
+  rejected = 0;
+
   private onMessage(msg: Buffer, rinfo: dgram.RemoteInfo): void {
-    let a: Announce;
     try {
-      a = JSON.parse(msg.toString('utf8')) as Announce;
-    } catch {
-      return;
+      const a = msg.length <= MAX_DATAGRAM ? parseAnnounce(msg.toString('utf8')) : null;
+      if (a === null) {
+        this.rejected++;
+        return;
+      }
+      if (a.agentId === this.opts.agentId) return;
+      this.accept(a, rinfo);
+    } catch (err) {
+      // A datagram must never take the agent down.
+      this.rejected++;
+      this.opts.log?.(`[discovery] dropped a datagram: ${(err as Error).message}`);
     }
-    if (a === null || a.k !== 'aevalrena-lan' || typeof a.agentId !== 'string' || a.agentId === this.opts.agentId) return;
-    if (!Array.isArray(a.lobbies) || !Array.isArray(a.ips) || typeof a.port !== 'number') return;
+  }
+
+  private accept(a: Announce, rinfo: dgram.RemoteInfo): void {
     // One agent is heard once per interface and path; keep the first address while it stays valid
     // so the list does not flip between a Wi-Fi and a virtual adapter address every second.
     const prev = this.agents.get(a.agentId);

@@ -428,6 +428,12 @@ export interface ProjectileState {
   scale: number;
   /** True once the projectile has turned around, so it only ever turns once. */
   returned: boolean;
+  /**
+   * Charge fraction it was thrown with, 0 (a tap, or any move that cannot charge) to 1 (full),
+   * set at spawn and inherited by its burst. A def's `charged` values lerp on this. Optional
+   * only so older pooled copies type-check; the sim always writes it and reads a missing one as 0.
+   */
+  charge?: number;
 }
 
 export type SimEvent =

@@ -73,10 +73,15 @@ other.
   of the agent's advertised IPs on a subnet we share. Otherwise use the first advertised IP on a
   shared subnet, otherwise the source address. Keep the first choice while it stays advertised, so
   the list does not flip between the Wi-Fi and a virtual adapter.
-- **Version guard.** `version` is `p<PROTOCOL_VERSION>-<fnv>`. The hash covers every file that
-  decides the sim: `src/sim`, `src/core`, character and stage data (art excluded), `src/net`, and
-  `balance/`, with line endings ignored. Lobbies with a different version show "Different version"
-  and cannot be picked. The holding agent also refuses a join or resume from another version.
+- **Version guard.** `version` is `p<PROTOCOL_VERSION>-<fnv>`. The hash covers every git-tracked
+  file that decides the sim: `src/sim`, `src/core`, character and stage data (art excluded),
+  `src/net`, and `balance/`, with line endings ignored (`git ls-files`; without git, a directory
+  walk that skips `_*` scratch files and tests). An untracked local file never splits the version.
+  Lobbies with a different version show "Different version" and cannot be picked. The holding
+  agent also refuses a join or resume from another version.
+- **Hostile input.** Every announce is validated field by field before use (strings with length
+  caps, integers in range, IPv4 addresses, at most 16 addresses and 32 lobbies, 16 KiB per
+  datagram); anything else is counted and dropped (`parseAnnounce`).
 - **Test result** (`src/net/discoverytest.ts`, one Windows 11 machine, Wi-Fi + 2 Hyper-V adapters):
   multicast alone, broadcast alone and both together each find the other agent in about 50 ms
   (the second agent within one announce period, about 1.05 s), and expire it about 4.0 s after it
@@ -233,7 +238,35 @@ The netcode reads the game only through `createGameState`, `stepGame`, `MatchCon
    path changes, check the two leave scenarios in `npm run test:net`.
 8. A wire change bumps `PROTOCOL_VERSION`. Sim changes bump the version hash on their own.
 
-## 9. Known limits
+## 9. Hardening (review R7-R18)
+
+- **Agent never dies from one client.** Text frames must parse to an object with a known string
+  `t`; anything else gets "Bad message". Every WebSocket, UDP and HTTP handler body is wrapped:
+  an exception logs and drops only the offending socket or datagram. `uncaughtException` and
+  `unhandledRejection` are logged and the agent keeps serving.
+- **Relay trust.** The relay decodes every input packet. It drops a packet that carries a fighter
+  the sender does not own, or frames more than `LOG_MAX_AHEAD` (600) past what is confirmed, and
+  stamps the peer byte with the sender's real slot before forwarding. The input log applies the
+  same 600-frame cap, and browsers ignore input more than 100 frames past what they confirmed
+  (the input ring holds 128).
+- **Sizes.** WebSocket `maxPayload` is 64 KiB (a larger message closes that socket with 1009).
+- **Ids.** Stage and character ids are checked against `STAGE_DEFS` and `CHARACTER_DEFS` by the
+  agent (settings, joins, member updates) and again by every browser before it builds the match;
+  an unknown id falls back to the first known one with a log line.
+- **Static files.** A bad percent escape answers 400. A path must resolve inside the build
+  directory (`root + path.sep`), so a sibling directory with a longer name is refused (403).
+- **Rollback internals.** `GameState.config` is shared by reference through every snapshot and
+  restore, so its identity never changes during a match (the level 10 AI treats a new config
+  object as a new match and would re-warm and forget what it learned). Pending effects older
+  than 8 frames are dropped, so a hidden tab does not replay minutes of sparks when it returns.
+  A retired player's KO event is put back after the step, so every peer shows the KO burst.
+
+## 10. Known limits
+
+- **Use the same browser engine on every machine.** The sim uses `Math.sin` and `**` with
+  fractional exponents (the charge curves), whose last bits are not specified by JavaScript and
+  can differ between Chrome, Firefox and Safari. Chrome against Edge (both Chromium) is safe; a
+  Chrome against Firefox match may desync. The desync banner will say so if it happens.
 
 - Every machine needs the repo, Node.js and `npm install`. The agent builds the game at start,
   which takes about 10 s.

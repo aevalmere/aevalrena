@@ -17,7 +17,9 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { LAN_PATH, LAN_PORT, PROTOCOL_VERSION, type Announce, type LobbyListing } from '../src/net/protocol';
 import { Discovery, DISCOVERY_GROUP, DISCOVERY_PORT, lanInterfaces } from './discovery';
-import { LobbyHost } from './lobbyhost';
+import { CHARACTER_DEFS } from '../src/characters/registry';
+import { STAGE_DEFS } from '../src/stages/registry';
+import { LobbyHost, MAX_PAYLOAD } from './lobbyhost';
 import { gameVersion } from './version';
 import { serveStatic } from './static';
 
@@ -56,16 +58,28 @@ async function main(): Promise<void> {
     }
     return out;
   };
-  const host = new LobbyHost({ agentId, hostName, version, fallbackStage: FALLBACK_STAGE, remoteListings, log });
+  const host = new LobbyHost({
+    agentId, hostName, version, fallbackStage: FALLBACK_STAGE, remoteListings, log,
+    stages: Object.keys(STAGE_DEFS), characters: Object.keys(CHARACTER_DEFS),
+  });
 
   // A production build of the current sources, per port so two agents on one machine never race.
   const outDir = path.join(repoRoot, 'node_modules', '.cache', `aevalrena-lan-${args.port}`);
   console.log('Building the game for LAN play...');
   const { build } = await import('vite');
   await build({ root: repoRoot, logLevel: 'error', build: { outDir, emptyOutDir: true } });
-  const httpServer = http.createServer((req, res) => serveStatic(outDir, req, res));
+  const httpServer = http.createServer((req, res) => {
+    try {
+      serveStatic(outDir, req, res);
+    } catch (err) {
+      log(`[lan] http error on ${String(req.url).slice(0, 80)}: ${(err as Error).message}`);
+      if (!res.headersSent) res.statusCode = 500;
+      res.end();
+    }
+  });
 
-  const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
+  // maxPayload: a bigger message closes that socket (1009) instead of buffering it.
+  const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: MAX_PAYLOAD });
   httpServer.on('upgrade', (req, socket, head) => {
     if ((req.url ?? '').split('?')[0] !== LAN_PATH) {
       socket.destroy();
@@ -117,6 +131,14 @@ async function main(): Promise<void> {
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 }
+
+// Last line of defence: log and keep serving. A crash here would end every lobby on this agent.
+process.on('uncaughtException', (err: Error) => {
+  console.error(`[lan] uncaught exception, agent keeps running: ${err.stack ?? err.message}`);
+});
+process.on('unhandledRejection', (reason: unknown) => {
+  console.error(`[lan] unhandled rejection, agent keeps running: ${String(reason)}`);
+});
 
 main().catch((err: unknown) => {
   console.error(err);

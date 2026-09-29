@@ -14,7 +14,7 @@ import {
   aevalmereComboSummary, aevalmereKillConfirms, aevalmerePredictorStats, aevalmereStats, flushAevalmereProfiles,
   setAevalmereProfileStore, warmAevalmere,
 } from './aevalmere';
-import { MemoryProfileStore, PROFILE_PREFIX, type ProfileStore } from './profile';
+import { CappedProfileStore, MemoryProfileStore, PROFILE_CAP, PROFILE_INDEX_KEY, PROFILE_PREFIX, type ProfileStore } from './profile';
 
 declare const process: {
   argv: string[];
@@ -2982,6 +2982,43 @@ function testDeterminismWithStore(): TestResult {
 }
 
 /** The wave 2 level 10 gates alone (am to as), for a quick run while tuning. */
+/**
+ * at. The profile store is capped (review R19): saving 20 names through CappedProfileStore on an
+ * in-memory backend keeps PROFILE_CAP profiles, the newest ones, and the index lists exactly those.
+ * A backend whose next write throws (a full quota) evicts the oldest profile and retries once.
+ */
+function testProfileCap(): TestResult {
+  const mem = new MemoryProfileStore();
+  const store = new CappedProfileStore(mem);
+  const N = 20;
+  for (let i = 0; i < N; i++) store.save(`${PROFILE_PREFIX}p${i}`, `{"n":${i}}`);
+  const kept = mem.keys().filter((k) => k.startsWith(PROFILE_PREFIX));
+  let newestKept = true;
+  for (let i = N - PROFILE_CAP; i < N; i++) if (mem.load(`${PROFILE_PREFIX}p${i}`) === null) newestKept = false;
+  const indexed = store.indexedKeys();
+  const indexOk = indexed.length === PROFILE_CAP && mem.load(PROFILE_INDEX_KEY) !== null &&
+    indexed[0] === `${PROFILE_PREFIX}p${N - PROFILE_CAP}` && indexed[PROFILE_CAP - 1] === `${PROFILE_PREFIX}p${N - 1}`;
+  // Quota: the next write of a profile throws once; the oldest is evicted and the retry lands.
+  let failNext = true;
+  const flaky = new MemoryProfileStore();
+  const quota = new CappedProfileStore({
+    load: (k) => flaky.load(k),
+    save: (k, v) => {
+      if (failNext && k !== PROFILE_INDEX_KEY && k.endsWith('late')) { failNext = false; throw new Error('QuotaExceededError'); }
+      flaky.save(k, v);
+    },
+    remove: (k) => flaky.remove(k),
+  });
+  quota.save(`${PROFILE_PREFIX}early`, '{}');
+  quota.save(`${PROFILE_PREFIX}late`, '{}');
+  const retryOk = flaky.load(`${PROFILE_PREFIX}late`) !== null && flaky.load(`${PROFILE_PREFIX}early`) === null;
+  return {
+    name: `at. the profile store keeps at most ${PROFILE_CAP} profiles (the newest), indexed under ${PROFILE_INDEX_KEY}, and a quota error evicts the oldest and retries once`,
+    pass: kept.length === PROFILE_CAP && newestKept && indexOk && retryOk,
+    detail: `saved ${N}, kept ${kept.length}, newest ${PROFILE_CAP} kept ${newestKept}, index ok ${indexOk}, quota retry ${retryOk}`,
+  };
+}
+
 export function runAevalmereWave2Tests(which: string[]): TestResult[] {
   const all: Record<string, () => TestResult> = {
     am: testL10StrictBothStages, an: testArchetypesNoLoss, ao: testArchetypePrediction, ap: testProfilePersistence,
@@ -3040,8 +3077,9 @@ export function runAiSelfTest(): TestResult[] {
   const aq = testKillRouting();
   const ar = testE6Budget();
   const as = testDeterminismWithStore();
+  const at = testProfileCap();
   return [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v, w, x, y, z, aa, ab, ac, ad, ae, af, ag, ah, ai, aj, ak, al,
-    am, an, ao, ap, aq, ar, as];
+    am, an, ao, ap, aq, ar, as, at];
 }
 
 if (typeof process !== 'undefined' && process.argv[1] && process.argv[1].endsWith('aitest.ts')) {

@@ -21,10 +21,24 @@ const TYPES: Record<string, string> = {
 };
 
 export function serveStatic(root: string, req: http.IncomingMessage, res: http.ServerResponse): void {
-  let rel = decodeURIComponent((req.url ?? '/').split('?')[0]);
+  let rel: string;
+  try {
+    rel = decodeURIComponent((req.url ?? '/').split('?')[0]);
+  } catch {
+    res.statusCode = 400;
+    res.end('bad request');
+    return;
+  }
+  if (rel.includes('\0')) {
+    res.statusCode = 400;
+    res.end('bad request');
+    return;
+  }
   if (rel.endsWith('/')) rel += 'index.html';
-  const file = path.normalize(path.join(root, rel));
-  if (!file.startsWith(path.normalize(root))) {
+  const base = path.resolve(root);
+  const file = path.resolve(path.join(base, rel));
+  // Inside the root only: a bare startsWith(root) would also accept a sibling like root + "-x".
+  if (file !== base && !file.startsWith(base + path.sep)) {
     res.statusCode = 403;
     res.end();
     return;
