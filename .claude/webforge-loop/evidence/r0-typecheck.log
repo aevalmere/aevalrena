@@ -1,0 +1,4 @@
+
+> aevalrena@0.0.1 typecheck
+> tsc --noEmit && tsc --noEmit -p tsconfig.server.json
+

@@ -1,0 +1,9 @@
+
+> aevalrena@0.0.1 test:discovery
+> npx --yes tsx src/net/discoverytest.ts
+
+PASS multicast + broadcast: A saw B in 53 ms (at 192.168.86.250:5181), B saw A in 1052 ms, B expired from A's list 3967 ms after it stopped
+PASS multicast: A saw B in 52 ms (at 192.168.86.250:5181), B saw A in 1049 ms, B expired from A's list 3972 ms after it stopped
+PASS broadcast: A saw B in 52 ms (at 192.168.86.250:5181), B saw A in 1051 ms, B expired from A's list 3994 ms after it stopped
+{"pass":true,"results":[{"paths":"multicast + broadcast","seenAB":53,"seenBA":1052,"addressAB":"192.168.86.250:5181","expire":3967,"pass":true},{"paths":"multicast","seenAB":52,"seenBA":1049,"addressAB":"192.168.86.250:5181","expire":3972,"pass":true},{"paths":"broadcast","seenAB":52,"seenBA":1051,"addressAB":"192.168.86.250:5181","expire":3994,"pass":true}]}
+discoverytest: PASS

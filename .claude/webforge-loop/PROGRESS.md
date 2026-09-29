@@ -95,3 +95,18 @@ Result: D6 FIXED.
 
 ## Stop - after iteration 6
 Stop condition fired: (a) clean pass. Iteration 6 ran every registered gate with exit 0 (typecheck, sim 77/77, ai 38/38, build, browser) plus the clean worktree build (exit 0). D1..D6 all FIXED; no open defect.
+
+# Loop 2: refinement after the arena/balance/CPU/LAN wave (2026-09-29)
+
+## Iteration 0 - 2026-09-29
+Goal: baseline every gate on the merged tree; register defects from the worker reports.
+GATE: typecheck | CMD: npm run typecheck | EXIT: 0 | evidence/r0-typecheck.log
+GATE: sim       | CMD: npm run test:sim  | EXIT: 0 | "85/85 pass" evidence/r0-sim.log
+GATE: ai        | CMD: npx --yes tsx src/ai/aitest.ts | EXIT: 0 | "44/44 pass (1 info)" evidence/r0-ai.log
+GATE: net       | CMD: npm run test:net  | EXIT: 0 | "nettest: PASS" evidence/r0-net.log
+GATE: discovery | CMD: npm run test:discovery | EXIT: 0 | "discoverytest: PASS" evidence/r0-discovery.log
+GATE: lobby     | CMD: npm run test:lobby | EXIT: 0 | "lobbytest: PASS" evidence/r0-lobby.log
+GATE: build     | CMD: npm run build     | EXIT: 0 | evidence/r0-build.log
+Changed: nothing (ledger only)
+Result: all gates green; 6 defects registered (R1-R6).
+Next: iteration 1 = close R1, R2, R3 (LAN worker) and run the R4 review in parallel.

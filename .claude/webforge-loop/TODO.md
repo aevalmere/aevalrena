@@ -1,3 +1,6 @@
-
-- [x] D3, D4, D5, D6 closed (iterations 3 to 6)
-- [ ] Owner: decide whether art/ and tools/ (sheetcut, spritemaker, stagecut, uicut) get committed; the build does not need them.
+- [ ] R1 LAN reload resumes the match
+- [ ] R2 disconnect awards the win to the remaining side
+- [ ] R3 context.ts stale defaults
+- [ ] R4 independent netcode review, then fix findings
+- [ ] Commit the wave in logical chunks once gates pass
+- [ ] BLOCKED: R5/R6 art patches (owner decision)

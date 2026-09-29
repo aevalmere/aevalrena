@@ -1,0 +1,15 @@
+
+> aevalrena@0.0.1 test:lobby
+> npx --yes tsx server/lobbytest.ts
+
+PASS create a lobby: lobby 1
+PASS duplicate name gets a suffix: ALICE, ALICE 2
+PASS different version is refused: Different game version: update both machines to the same build
+PASS fifth player is refused (full): TEST is full (4/4)
+PASS guest leaving reopens the slot: members ALICE@1, ALICE 2@2, CARL@4
+PASS start needs everyone ready, then starts: first refusal: "Waiting for ALICE 2, CARL to ready up"
+PASS in-match lobby refuses a new join: TEST is in a match. Try again when it ends
+PASS relay logs inputs and a dropped player resumes with the history: dropped "ALICE 2", resumed with 10 logged frames, host saw peerResumed
+PASS a dropped player who never returns is gone after 10 s: peerGone (timeout) after 10012 ms
+PASS host leaving closes the lobby for everyone: ALICE closed the lobby
+lobbytest: PASS

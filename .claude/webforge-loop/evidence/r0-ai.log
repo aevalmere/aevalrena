@@ -1,0 +1,139 @@
+difficulty matrix (5 seeds x both sides, 2 stocks):
+  L9 vs L1: L9 wins 10/10 (100%) stocks 19-0 sd 0/0 avg 4420f finished 10/10
+  L9 vs L5: L9 wins 10/10 (100%) stocks 13-0 sd 0/0 avg 5998f finished 10/10
+  L5 vs L1: L5 wins 10/10 (100%) stocks 18-0 sd 0/0 avg 5776f finished 10/10
+  L9 vs L9: L9 wins 5/10 (50%) stocks 7-7 sd 0/0 avg 5206f finished 10/10
+  L1 vs L1: L1 wins 5/10 (50%) stocks 6-6 sd 0/0 avg 12857f finished 10/10
+  L7 vs L3: L7 wins 10/10 (100%) stocks 18-0 sd 0/0 avg 5892f finished 10/10
+  L2 vs L2: L2 wins 5/10 (50%) stocks 5-5 sd 0/0 avg 12397f finished 10/10
+
+stacked-opponent scenarios (5 seeds x both slots x dy 60/90/120/140 x dx 0/10/-10):
+  opponent above: hit in 120/120, avg 14.0f, slowest 15f, longest no-progress run 14f
+  opponent below: hit in 120/120, avg 15.5f, slowest 19f, longest no-progress run 18f
+
+projectile spammer (level 9 CPU vs scripted spam, 2 stocks):
+  seed 5 cpu=slot0: winner=CPU stocks 2-0 volleys 11 shieldHp low 55.71/60 sub-18 run 0f broken=false 2901f
+  seed 5 cpu=slot1: winner=CPU stocks 2-0 volleys 11 shieldHp low 55.71/60 sub-18 run 0f broken=false 3465f
+  seed 17 cpu=slot0: winner=CPU stocks 2-0 volleys 11 shieldHp low 59.04/60 sub-18 run 0f broken=false 3652f
+  seed 17 cpu=slot1: winner=CPU stocks 2-0 volleys 12 shieldHp low 60.00/60 sub-18 run 0f broken=false 3911f
+  seed 23 cpu=slot0: winner=CPU stocks 2-0 volleys 17 shieldHp low 56.63/60 sub-18 run 0f broken=false 4141f
+  seed 23 cpu=slot1: winner=CPU stocks 2-0 volleys 11 shieldHp low 56.00/60 sub-18 run 0f broken=false 3553f
+
+defensive option usage (whole matrix sweep):
+  level 9:   spotDodge=48 roll=52 airDodge=218 bair=293 over 208303f | spotDodge=0.23 roll=0.25 airDodge=1.05 bair=1.41 per 1k frames
+  level 1-2: spotDodge=0 roll=0 airDodge=0 bair=8 over 607030f | spotDodge=0.00 roll=0.00 airDodge=0.00 bair=0.01 per 1k frames
+
+kit coverage, uses (per 1k frames) over the whole matrix sweep:
+  level 9   moves: jab=2116(10.16) ftilt=330(1.58) utilt=207(0.99) dtilt=462(2.22) dashatk=61(0.29) fsmash=244(1.17) usmash=41(0.20) dsmash=33(0.16) nair=16(0.08) fair=148(0.71) bair=321(1.54) uair=262(1.26) dair=166(0.80) nspecial=23(0.11) sspecial=159(0.76) uspecial=21(0.10) dspecial=25(0.12) ledgeatk=16(0.08) taunt=0 taunt2=0 taunt3=0 getupatk=0
+  level 9   movement: shortHop=249(1.20) fullHop=288 fastFall=511 dropThrough=113 smashes=318 charged=252 techs=11 techRolls=6 downed=7 footstools=31
+  level 1-2 moves: jab=802(1.32) ftilt=1681(2.77) utilt=0(0.00) dtilt=2(0.00) dashatk=7(0.01) fsmash=964(1.59) usmash=0(0.00) dsmash=0(0.00) nair=493(0.81) fair=349(0.57) bair=12(0.02) uair=0(0.00) dair=66(0.11) nspecial=1799(2.96) sspecial=49(0.08) uspecial=72(0.12) dspecial=0(0.00) ledgeatk=0(0.00) taunt=0 taunt2=0 taunt3=0 getupatk=10
+  level 1-2 movement: shortHop=4(0.01) fullHop=796 fastFall=522 dropThrough=52 smashes=964 charged=73 techs=7 techRolls=0 downed=95 footstools=2
+
+level 10 (Aevalmere), 5 seeds x both sides, 2 stocks:
+  L10 vs L9: L10 wins 10/10 (100%) stocks lost/match 0.00 sd 0 longest combo avg 3.90 3+ combos/match 1.90 early shields 0 safe alternates 1.6% avg 3059f unfinished 0
+  L10 vs L5: L10 wins 10/10 (100%) stocks lost/match 0.00 sd 0 longest combo avg 3.90 3+ combos/match 1.40 early shields 0 safe alternates 2.2% avg 2488f unfinished 0
+  L10 vs L1: L10 wins 10/10 (100%) stocks lost/match 0.00 sd 0 longest combo avg 2.80 3+ combos/match 1.20 early shields 0 safe alternates 2.0% avg 2169f unfinished 0
+  L10 vs L10: L10 wins 8/10 (80%) stocks lost/match 1.20 sd 0 longest combo avg 3.00 3+ combos/match 1.40 early shields 0 safe alternates 2.1% avg 4675f unfinished 0
+  budget: 0.069 ms per level 10 cpuInput call
+  kill speed against a level 0 (3 stocks):
+  standing seed 5: KOs 537f (8.9s, bottom, ~51%) 1367f (22.8s, top, ~101%) 2764f (46.1s, right, ~178%) | 2764f, 7.2%/s | by move: dashatk 77, sspecial 68, fsmash 46, uspecial 32, projectile 27, nair 19, uair 18, dtilt 12, dair 12, bthrow 9, utilt 7, nspecial 4
+  standing seed 17: KOs 861f (14.3s, right, ~131%) 1879f (31.3s, bottom, ~106%) 2629f (43.8s, top, ~87%) | 2629f, 7.4%/s | by move: fsmash 81, dashatk 41, sspecial 36, nspecial 34, uspecial 32, usmash 29, dair 24, uair 18, dsmash 12, bair 11, nair 7
+  standing seed 23: KOs 421f (7.0s, bottom, ~35%) 1537f (25.6s, bottom, ~97%) 2365f (39.4s, top, ~101%) | 2365f, 5.9%/s | by move: uair 45, uspecial 40, dashatk 36, fair 30, dair 24, fsmash 16, bair 11, sspecial 9, ftilt 8, uthrow 7, utilt 7
+  wandering seed 5: KOs 1749f (29.1s, right, ~170%) 3409f (56.8s, top, ~161%) | 3600f, 5.5%/s | by move: dashatk 77, fsmash 74, sspecial 50, projectile 36, fair 20, uair 18, bthrow 18, usmash 14, fthrow 8, ftilt 8, nspecial 5, dair 5
+  wandering seed 17: KOs 611f (10.2s, bottom, ~91%) 1440f (24.0s, top, ~124%) 2245f (37.4s, top, ~103%) | 2245f, 8.5%/s | by move: fsmash 65, dashatk 63, sspecial 50, nspecial 20, bthrow 18, projectile 18, uair 18, uspecial 16, usmash 14, dair 12, fair 10, ftilt 8, dtilt 6
+  wandering seed 23: KOs 789f (13.2s, top, ~95%) 2241f (37.4s, bottom, ~143%) | 3600f, 6.0%/s | by move: dashatk 104, nspecial 84, sspecial 54, fsmash 31, uair 27, uspecial 24, utilt 14, projectile 9, ftilt 8, dtilt 6
+  combo table: 125 starter entries, 97 open 3+ hit chains, 89 open 4-hit chains, 57 end in a KO; e.g. ftilt at 120% -> ftilt (chain 4 hits, 25%)
+  tidegate combo table: 125 entries, 97 3+ hit, 89 4-hit, 57 KO chains
+  tidegate kill confirms (lowest bracket): dtilt mid 45% ledge 45% off 15%, utilt mid 45% ledge 45% off 15%, nair mid - ledge - off -, fthrow mid - ledge - off -, bthrow mid - ledge - off 120%, uthrow mid 45% ledge 45% off 15%, dthrow mid 80% ledge 80% off 80%, dair mid 45% ledge 45% off 45%, orbFull mid - ledge - off 120%
+  hearthmoor combo table: 125 entries, 95 3+ hit, 87 4-hit, 54 KO chains
+  hearthmoor kill confirms (lowest bracket): dtilt mid 45% ledge 45% off 15%, utilt mid 45% ledge 45% off 15%, nair mid - ledge - off -, fthrow mid - ledge - off -, bthrow mid - ledge 120% off 120%, uthrow mid 45% ledge 45% off 15%, dthrow mid 80% ledge 80% off 80%, dair mid 45% ledge 45% off 45%, orbFull mid - ledge - off 120%
+
+level 10 vs level 9, strict, both stages:
+  tidegate: won 10/10 stocks lost 0 sd 0 avg 3059f
+  hearthmoor: won 10/10 stocks lost 0 sd 0 avg 2759f
+
+level 10 vs scripted archetypes (3 seeds, 2 stocks, fresh profile store each):
+  tidegate rushdown: wins 3/3 stocks lost 0 first KO 791f/566f/881f accuracy at 30 s mean 63% worst 53% (whole match 62%, 40 obs)
+  tidegate turtle: wins 3/3 stocks lost 0 first KO 1019f/2161f/1179f accuracy at 30 s mean 69% worst 60% (whole match 66%, 94 obs)
+  tidegate camper: wins 3/3 stocks lost 0 first KO 998f/1028f/1722f accuracy at 30 s mean 52% worst 50% (whole match 51%, 76 obs)
+  tidegate roller: wins 3/3 stocks lost 0 first KO 617f/1325f/1053f accuracy at 30 s mean 54% worst 43% (whole match 45%, 64 obs)
+  tidegate ledge: wins 3/3 stocks lost 0 first KO 1990f/1534f/1276f accuracy at 30 s mean 73% worst 67% (whole match 67%, 137 obs)
+  tidegate jumper: wins 3/3 stocks lost 0 first KO 528f/1463f/791f accuracy at 30 s mean 53% worst 43% (whole match 51%, 55 obs)
+  hearthmoor rushdown: wins 3/3 stocks lost 0 first KO 624f/819f/658f accuracy at 30 s mean 69% worst 63% (whole match 67%, 42 obs)
+  hearthmoor turtle: wins 3/3 stocks lost 0 first KO 1387f/1351f/1936f accuracy at 30 s mean 78% worst 73% (whole match 66%, 105 obs)
+  hearthmoor camper: wins 3/3 stocks lost 0 first KO 1133f/654f/1543f accuracy at 30 s mean 56% worst 50% (whole match 51%, 87 obs)
+  hearthmoor roller: wins 3/3 stocks lost 0 first KO 1199f/930f/1380f accuracy at 30 s mean 62% worst 50% (whole match 50%, 67 obs)
+  hearthmoor ledge: wins 3/3 stocks lost 0 first KO 1416f/2471f/1239f accuracy at 30 s mean 60% worst 57% (whole match 63%, 148 obs)
+  hearthmoor jumper: wins 3/3 stocks lost 0 first KO 1028f/843f/784f accuracy at 30 s mean 56% worst 47% (whole match 54%, 58 obs)
+
+profile transfer (predictor accuracy over the first 15 s, empty store -> saved profile):
+  rushdown: 53->82 50->64 76->82 48->75 75->82 69->68
+  turtle: 70->72 71->88 64->70 62->76 63->77 68->70
+  camper: 40->67 43->60 55->61 44->55 43->71 31->78
+  roller: 32->62 48->84 30->77 50->58 30->73 30->55
+  ledge: 67->74 63->77 58->75 52->80 52->67 50->71
+  jumper: 42->63 50->55 48->61 55->62 51->51 55->65
+
+kill routing vs the archetypes: 72 KOs: chain 31, spike 0, edgeguard 3, single hit on stage 38, no hit 0
+kill speed vs a standing dummy:
+  tidegate seed 5: KOs 537/1367/2764
+  tidegate seed 17: KOs 861/1879/2629
+  tidegate seed 23: KOs 421/1537/2365
+  tidegate seed 41: KOs 545/1426/2429
+  tidegate seed 97: KOs 585/1384/2154
+  hearthmoor seed 5: KOs 704/1579/2552
+  hearthmoor seed 17: KOs 596/1470/2574
+  hearthmoor seed 23: KOs 706/1617/2575
+  hearthmoor seed 41: KOs 570/1554/2441
+  hearthmoor seed 97: KOs 602/1488/2623
+
+budget with a host warm-up:
+  tidegate: mean 0.064 ms, p99 2.04 ms, first call 0.40 ms, 3000 calls
+  hearthmoor: mean 0.073 ms, p99 1.96 ms, first call 0.39 ms, 3000 calls
+
+PASS a. level 1 vs level 1 finishes with a KO: finished=true frames=6668 kos=1
+PASS b. every matrix matchup finishes inside the frame cap: 7 matchups x 10 matches, unfinished=0
+PASS c. higher level beats lower level on both sides of every matchup: L9>L1 100% +19, L9>L5 100% +13, L5>L1 100% +18, L7>L3 100% +18
+PASS d. level 2 CPU hits a ledge-hanging opponent: p2 max percent=23.3 cpuDied=false
+PASS e. no two aerials from the same slot start within 45 frames: l1v1: 13 aerial starts, all >= 45 frames apart | matrix: 2008 aerial starts, all spaced
+PASS f. no self-destructs anywhere: every level, every scripted scenario: zero self-destructs across 317 runs
+PASS g. level 9 CPU hits an opponent parked directly above it: 120/120 resolved, avg 14.0f, slowest 15f, cap 180f
+PASS h. airborne level 9 CPU hits an opponent directly below it: 120/120 resolved, avg 15.5f, slowest 19f, cap 180f
+PASS i. CPU never idles 120+ frames without moving or hitting, stacked: 240 scenarios, longest no-progress run 18f (below slot0 dy=140 dx=0 seed=5), cap 120f
+PASS j. level 9 CPU beats the scripted projectile spammer on both sides: won 6/6, stocks 12-0, 73 volleys thrown, unfinished 0
+PASS k. spam never breaks the level 9 shield, nor pins it under 18 for 60f: breaks=0/6, shieldHp low-water 55.71/60, longest sub-18 run 0f
+PASS l. level 9 uses spotDodge, roll, airDodge and bair at least 10x each: L9 spotDodge=48 roll=52 airDodge=218 bair=293
+PASS m. level 1-2 use each option at least 3x less often than level 9: L9 spotDodge=0.23 roll=0.25 airDodge=1.05 bair=1.41 per 1k frames | L1-2 spotDodge=0.00 roll=0.00 airDodge=0.00 bair=0.01 per 1k frames
+PASS n. identical seeds and levels replay byte-identically: 3 replayed pairs identical (6226f, 5106f, 3934f)
+PASS o. level 9 uses every move in the kit at least 3x (taunt excepted): variety 18/18 moves over 208303f
+PASS p. no CPU taunts while a live opponent could punish it: zero neutral taunts at every level
+PASS q. level 9 short hops, fast falls and drops through platforms (10x each): shortHop=249(1.20) fullHop=288 fastFall=511 dropThrough=113 smashes=318 charged=252 techs=11 techRolls=6 downed=7 footstools=31 over 208303f
+PASS r. level 9 short hops at least 3x as often as level 1-2: L9 249 (1.20/1k frames) vs L1-2 4 (0.01/1k frames)
+PASS s. level 9 charges at least 5% of its smashes past 6 frames: 252/318 smashes charged (79.2%), floor 3 and 5%
+PASS t. level 9 kit variety beats level 1-2, raw and at 1.5x per 1k frames: L9 18/18 distinct (0.086/1k frames over 208303f) vs L1-2 12/18 distinct (0.020/1k frames over 607030f)
+PASS u. level 5 CPUs never double tap into a roll they did not ask for (slack 2): seed 5 slot 0 rolls=0 intended=0, seed 5 slot 1 rolls=0 intended=0, seed 17 slot 0 rolls=0 intended=0, seed 17 slot 1 rolls=0 intended=0
+PASS v. level 9 CPU grabs a dummy parked in shield within 600 frames on every seed: seed 5 grab at 16f, seed 17 grab at 16f, seed 23 grab at 168f
+PASS w. a level 9 CPU mashes out of a grab faster than a level 1 CPU: seed 5 L9 12f vs L1 32f, seed 17 L9 12f vs L1 44f, seed 23 L9 12f vs L1 28f
+PASS x. level 9 CPU shoots down at least 25% of pinned spam, level 1 almost never: L9 shot down 46/73 (63.0%, 85 clash events), damage taken 81.5 vs 436.0 with projBlock 0 (13 clash events) | L1 shot down 1, 4 clash events over 123 shots
+PASS y. level 9 techs at least 60% of tumble landings, level 1 at most 25%: L9 teched 27/36 (75%, 17 rolls, 9 downed, 36 trials) | L1 teched 3/36 (8%, 0 rolls, 33 downed, 36 trials)
+PASS z. with the rule on a level 9 CPU starts its Final Smash within 120 frames and it connects; off, never: seed 5 rule on: start 1f caught=true launched=true | rule off: starts 0; seed 17 rule on: start 1f caught=true launched=true | rule off: starts 0; seed 23 rule on: start 1f caught=true launched=true | rule off: starts 0
+PASS aa. with the rule off no CPU ever starts a Final Smash, even with a forced full meter: matrix starts 0, highest meter 0 | forced full meter, rule false: L1 0, L5 0, L9 0
+PASS ab. a level 0 CPU never attacks, shields or dodges, even next to a level 9: 10800 frames checked over 3 seeds, no forbidden button, no direct code
+PASS ac. a level 0 stands still by default and wanders at least 40px under the rule, never self-destructing: rule off: x fixed at -165.00, action idle throughout | seed 1 travelled 329.9px jumps 10 air 479f stocks 3-3 | seed 2 travelled 469.1px jumps 20 air 969f stocks 3-3 | seed 3 travelled 386.9px jumps 9 air 450f stocks 3-3
+PASS ad. a wandering level 0 stands back up after a knockdown: seed 1: longest downed streak 1f, seed 2: longest downed streak 1f
+PASS ae. level 10 beats level 9 in at least 90% of matches, losing under 0.5 stocks per match: won 10/10 (100%), stocks lost per match 0.00
+PASS af. level 10 lands a 3+ hit true combo on level 9 at least 1x per match on average: 19 combos of 3+ hits over 10 matches (1.90/match), longest per match avg 3.90
+PASS ag. level 10 never self-destructs, and every level 10 match finishes, across the sweep: 40 matches: vs L9 sd 0, vs L5 sd 0, vs L1 sd 0, vs L10 sd 0, unfinished 0
+PASS ah. level 10: the same seed twice gives an identical final state: L10vL9 seed 23 identical (4711f), L10vL10 seed 41 identical (3935f)
+PASS ai. a level 10 cpuInput call costs under 1.5 ms on average over a 3000-frame match: 0.069 ms per call over 3000 calls (3000f), 212 decisions
+PASS aj. level 10 never presses shield with 0 or 1 frames of an opponent startup elapsed: 0 early shield presses over 40 matches
+PASS ak. Teams: L10 + L9 on team 0 beat an L9 on team 1 every match, never hitting or swinging at each other: team 0 won 5/5, teammate hits 0, attacks at a teammate with every enemy past 200px 0 | seed 5 winner team 0 2526f mate attacks 0, seed 17 winner team 0 1379f mate attacks 0, seed 23 winner team 0 2266f mate attacks 0, seed 41 winner team 0 2798f mate attacks 0, seed 97 winner team 0 2198f mate attacks 0
+PASS al. level 10 kills a level 0 fast: standing, first KO by 1200f and 3 stocks by 3600f; wandering, first KO by 1800f: standing 5 first 537f all 2764f, standing 17 first 861f all 2629f, standing 23 first 421f all 2365f, wandering 5 first 1749f, wandering 17 first 611f, wandering 23 first 789f
+PASS am. level 10 beats level 9 in every match with 0 stocks lost and 0 SDs, on tidegate and hearthmoor: tidegate won 10/10 stocks lost 0 sd 0 avg 3059f | hearthmoor won 10/10 stocks lost 0 sd 0 avg 2759f
+PASS an. level 10 loses no stock to any scripted archetype (rushdown, turtle, camper, roller, ledge, jumper), 3 seeds each, both stages: 36 matches, stocks lost 0, sd 0
+INFO ao. predictor top-guess accuracy, cumulative over the first 30 s, both stages pooled (reference: mean of 6 matches 50%, every match 40%): mean/worst: rushdown 64%/50%, turtle 69%/62%, camper 49%/45% (below reference), roller 47%/35% (below reference), ledge 62%/55%, jumper 53%/47%
+PASS ap. a saved profile raises the predictor's first-15 s accuracy by >= 8 points on the mean (overall and on each stage's 18 pairs), never lower by more than 5 in any pair: mean gain 17.2 points over 36 pairs (tidegate 17.5, hearthmoor 16.9), worst pair -1.0 (hearthmoor rushdown seed 23 69->68); per archetype rushdown +14, turtle +9, camper +23, roller +31, ledge +17, jumper +9; one key per player under aevalrena.aevalmere.profile.v1.<name>: yes
+PASS aq. against the archetypes at least 40% of KOs come from a 2+ hit true combo, a spike or an edgeguard hit; against a standing dummy the median first KO is under 12 s (both stages): routed 47% (72 KOs: chain 31, spike 0, edgeguard 3, single hit on stage 38, no hit 0) | standing dummy median first KO 596f (9.9s): tidegate 5 537f, tidegate 17 861f, tidegate 23 421f, tidegate 41 545f, tidegate 97 585f, hearthmoor 5 704f, hearthmoor 17 596f, hearthmoor 23 706f, hearthmoor 41 570f, hearthmoor 97 602f
+PASS ar. level 10 cpuInput: mean under 0.3 ms, p99 under 4 ms, first call after a host warm-up under 40 ms, both stages: tidegate mean 0.064 ms p99 2.04 ms first 0.40 ms over 3000 calls | hearthmoor mean 0.073 ms p99 1.96 ms first 0.39 ms over 3000 calls
+PASS as. level 10 against a human slot: the same seed gives an identical final state, with an empty store and with a fixed profile: empty store identical (2475f), fixed profile identical (3013f, profile 189521 chars)
+44/44 pass (1 info)
