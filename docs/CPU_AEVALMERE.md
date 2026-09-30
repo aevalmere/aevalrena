@@ -1,22 +1,299 @@
-# Aevalmere: the level 10 CPU
+# CPU brains: what ships, and Aevalmere (the Aeval god)
 
-Code: `src/ai/aevalmere.ts`. Level 10 is routed there by `cpuInput` in `src/ai/index.ts`.
-Tests: `src/ai/aitest.ts`, cases `ae` to `as` (`npx --yes tsx src/ai/aitest.ts`). The wave 2 gates
-(`am` to `as`) run on both arenas, `tidegate` and `hearthmoor`. The opponent profile store lives in
-`src/ai/profile.ts`.
+Entry point: `cpuInput(state, slot, level, rand)` in `src/ai/index.ts`. It is the only function the
+game (`src/main.ts`), the LAN host (`src/net/lobbycore.ts` through `main.ts`) and the harness
+(`src/ai/eval/runner.ts`) call for a CPU frame. It routes each CPU slot to one of three brains.
+The plan behind the engine is `docs/CPU_PLAN.md`; the god-strength loop is
+`docs/CPU_STRENGTH_LEDGER.md`. Appendix A keeps the design notes, research and measurements of
+Aevalmere, which still ships as the Aeval god.
 
-Levels 1 to 9 are rule tables: a profile of weights feeding hand-written situations. Aevalmere
-does not use them. It searches. The sim is deterministic and cheap: one `stepGame` of a two-fighter
-match costs about 1.5 microseconds on the dev machine. That makes the FightingICE recipe practical
-here: copy the state, play each candidate forward against a few opponent replies, and keep the best.
-The rest of this file covers what the research said, how the brain works, and what it measured.
+## 1. What ships
 
-## 1. Research
+| UI level | Character | Brain | Code |
+|---|---|---|---|
+| 0 (Dummy) | any | training dummy: never attacks; stands still, or wanders under the `cpuZeroMoves` rule | `dummyInput` in `src/ai/index.ts` |
+| 1 to 9 | any | the search engine at `specForUiLevel(level)` (balanced archetype) | `src/ai/brain.ts` |
+| 10 (Aevalmere) | Aeval | the legacy Aevalmere search brain, opponent chosen by the shared TeamTargeter | `src/ai/aevalmere.ts` |
+| 10 (Aevalmere) | any other (Trekmore) | the search engine at the god spec | `src/ai/brain.ts` |
+
+Why two brains at level 10: the search engine is deterministic, team-aware, inside its budget and
+the only brain that plays every character, but its god is weaker than Aevalmere. Measured on the
+god-tier 1v3 seeds (one god against three teamed UI 4 CPUs, 3 stocks, 73 matches): Aevalmere 55,
+the engine's god 37; head to head, 22 matches, the engine's god won 3 (ledger, loop 0 and final
+state). The old rule brain that ran levels 1 to 9 is deleted; `cpuInput` keeps its signature.
+
+## 2. Level mapping
+
+Every UI level is balanced; the UI has no style picker (plan decision O1). `specForUiLevel` in
+`src/ai/levels.ts` places odd levels on calibrated points of the skill scalar `s` and even levels
+on the midpoint of their neighbours.
+
+| UI | Name | Guide level | s |
+|---|---|---|---|
+| 1 | Rookie | L1 casual | 0.000 |
+| 2 | Novice | L1 | 0.125 |
+| 3 | Steady | L2 intermediate | 0.250 |
+| 4 | Sharp | L2 | 0.375 |
+| 5 | Skilled | L3 advanced | 0.500 |
+| 6 | Expert | L3 | 0.625 |
+| 7 | Ruthless | L3 (top player row) | 0.750 |
+| 8 | Merciless | L3 | 0.875 |
+| 9 | CRACKED | L4 world's best | 1.000 |
+| 10 | Aevalmere | L5 god | god vector |
+
+`cpuInput` keeps one spec object per UI level, so the engine sees the same object every frame.
+The engine ignores `rand`; its randomness comes from `src/ai/rng.ts` keyed on the match seed,
+slot and frame. Aevalmere and the dummy draw from `rand` (the sim's seeded RNG in `main.ts`).
+
+## 3. The switch
+
+`CPU_ENGINE` in `src/ai/index.ts`:
+
+| Value | Levels 1 to 9 | Level 10, Aeval | Level 10, other characters |
+|---|---|---|---|
+| `auto` (default) | engine | Aevalmere with the TeamTargeter and the teammate guard | engine god |
+| `new` | engine | engine god | engine god |
+| `legacy` | engine | Aevalmere exactly as it shipped before this wave (nearest opponent, no guard) | engine god |
+
+It is read once at load: `?cpu=auto|new|legacy` in the browser URL, the `CPU_ENGINE` environment
+variable in node (for example `CPU_ENGINE=new npx --yes tsx src/ai/aitest.ts`). `setCpuEngine(e)`
+changes it at run time (nettest uses it per scenario); `cpuBrainName(level, charId)` says which
+brain a slot runs. With the rule brain deleted, `legacy` cannot bring back levels 1 to 9.
+
+The harness keeps its two factories: `newBrain(spec)` calls the engine directly, and
+`legacyBrain(level)` calls `cpuInput`, so `--engine legacy` in `src/ai/eval/main.ts` now measures
+the shipped routing (levels 1 to 9 on the engine, level 10 as `CPU_ENGINE` says), and the default
+`--engine new` measures the engine alone, its god included.
+
+## 4. The Aeval god and the shared targeter
+
+Aevalmere keeps its own per-frame code (perception, 115 plans, rollouts, reflexes; Appendix A).
+Two things changed, both only in matches of three or more fighters:
+
+- Opponent choice (`pickOpp` in `aevalmere.ts`). With 2 fighters it is the nearest opponent, as
+  before, so every 1v1 plays bit for bit as it did (aitest `al`, `an`, `ap`, `aq`, `as` reproduce
+  their earlier numbers exactly). With 3 or more it asks a per-slot `TeamTargeter`
+  (`src/ai/targets.ts`, the engine's): teammates are never targets, exposed or punishable
+  opponents within 150 px come first, then opponents in kill range, then the nearest; an opponent a
+  teammate is already on is avoided unless it is one hit from a KO (then teammates converge); 30
+  frames of hysteresis. As in the engine, an opponent inside 120 px (|dx| + |dy|) overrides the
+  pick, and the nearest opponent is the fallback when the targeter has none.
+- Teammate guard. `cpuInput` runs the engine's guard (`guardTeammateSwing` in `brain.ts`) on
+  Aevalmere's output: a fresh attack press or move code that could only reach a teammate is dropped
+  (there is no friendly fire, so it is a wasted swing), and `pressed`/`released` are re-derived from
+  what was really sent. A no-op without a live teammate.
+
+Cost of the targeter, measured on the 1v3 against three teamed UI 4 CPUs (73 matches, 3 stocks,
+two seed sets; there are no teammates there, so only the tier order and the contact rule act):
+
+| Opponent choice | gate seeds (team.1v3.l4) | second set (diag1v3) | pooled | Wilson lb |
+|---|---|---|---|---|
+| nearest (`CPU_ENGINE=legacy`) | 57/73 | 55/73 | 112/146 | 0.69 |
+| TeamTargeter without the contact rule | 45/73 | | | 0.50 |
+| TeamTargeter with the contact rule (shipped) | 51/73 | 53/73 | 104/146 | 0.63 |
+
+The shipped choice gives up about 8 wins in 146 against three opponents (about 1.5 standard
+deviations of the difference) for the team terms. The teammate guard fixed the one teammate swing
+the Aeval god made in `team.mate` (routed: 0/521 swings over the full tier's 10 matches; before,
+1/101 in the fast tier) and aitest `ak`.
+
+### Retune for the 2026-09-30 Aeval pass
+
+The second Aeval move pass (BALANCE_GUIDE.md, 2026-09-30) broke the god-only cases `al`, `an`,
+`ap` and `aq`. Changes, all in `aevalmere.ts`:
+
+- Dive dair. `diveAllowed` gates every dair press, in every plan and rollout: over solid footing
+  (12 px inside a corner, at the x the startup drift will carry us to) always; over the void only
+  onto an airborne opponent already off the stage, lined up under the spike, still below us when
+  the 6-frame startup ends and falling slower than the dive; never onto a hanger from the void (a
+  climb makes it intangible and the dive falls past the lip). `egDair`, `dairSpike`,
+  `ledgeDropDair` and the second half of `egFairDair`/`egBairDair` now drift over the target and
+  dive once it is lined up (`aimDive`) instead of pressing on a fixed frame. `ledgeTrapDair` hops
+  from 14 px inward (was 3), inside that margin.
+- Combo table. A downward launch of a victim over the stage now stops at the floor in
+  `launchKills`. The stronger dair made nearly every chain that could end in it read as a kill
+  chain (worth 400 in a rollout), which sent the god into up throw and up smash juggles on
+  Tidegate's tall ceiling instead of toward the ledge.
+- Routed KOs. A KO (seen, or projected from the launch) whose last hit landed in the victim's
+  hitstun or off the stage scores 80 more than one off a raw kill move.
+- Passive kill. With in-match passivity above 0.5 (`matchPassivity`: this match's neutral row
+  only, so a loaded profile does not change the style), an opponent near a ledge is worth up to
+  60 at the corner, and 72 hanging or off the stage; one sent more than 40 px over the stage costs
+  up to half that. A standing dummy is now thrown or smashed to the ledge and ledge-trapped.
+- Respawn. While the opponent sits on its respawn platform (100 frames, invulnerable for 120) the
+  only plan is `respawnSpot`: stand 36 px to our side of it, grounded, until it drops.
+- Shields. Shots are not offered against a shield (every projectile breaks on one) or a hanger;
+  an opponent that has held its shield 45 frames is run at and grabbed (`runGrab`, forced
+  without a search, turning first so the grab reaches). A shield break already in place is no
+  longer scored, so the god punishes it instead of waiting next to it.
+- Crescent lock. No side special candidate while our crescent is alive (`moveLocked`: the press
+  does nothing). The ledge traps are offered against a hanger up to 420 px away (was 260).
+- Recovery. Off the stage at or below the ledge with no jump left, only recovery plans are
+  candidates (combo follow-ups included), which removed a self-destruct against UI 9.
+
+The tap orb (frame 3), the whirlpool heal and uair startup 14 needed no table edit: the rollouts
+read `moves.ts`, and percent healed already scores like damage taken (the orb drain rule).
+
+Measured after the retune (aitest, same thresholds): `al` standing first KOs 401/386/416 f, all
+three stocks by 1,690/1,911/1,828 f, wandering first 1,406/846/1,375 f; `an` 36 matches, 0 stocks
+lost, 0 SDs; `ap` mean gain 14.2 points, worst pair -1.7; `aq` 53% routed, standing median first KO
+493 f; `am` 20/20 won, 2 stocks lost (was 19/20, 6); `ag` 0 SDs. Harness under
+`--engine legacy` (the shipped Aeval god): `ba` median 3 stocks 2,071 f, first KO 412 f (was
+2,595 and 907); `bf` shield-only first engagement 37 f (was 497), longest gap 257 f, jump-only gap
+304 f. Under the default `--engine new`, `ba` and `bf` measure the engine's god, which this retune
+does not touch (1,838 f and 162 f).
+
+## 5. Warm-up and memory
+
+- `warmAevalmere(config)` (the name `main.ts` and `nettest.ts` already call) warms every CPU slot of
+  the config for the brain it routes to: `warmBrain` for engine slots (profiles, matchups, the
+  opening bracket of each combo table), and Aevalmere's pools, combo table and 400 throwaway frames
+  when a slot routes there. Idempotent per config object. `cpuInput` warms lazily on a slot's first
+  frame otherwise. `main.ts` only calls it when a level 10 is present, so a match with only levels 1
+  to 9 pays its warm-up on frame 0 (measured first calls: 1.5 to 35 ms, `perf`).
+- `resetCpu()` clears the dummy, the warm-up marks and the engine's per-slot memory; in node it also
+  gives the engine a fresh in-memory profile store, which keeps harness matches independent.
+- `flushAevalmereProfiles()` saves both brains' opponent profiles (the host calls it when the
+  results screen opens or a match is abandoned).
+- `cpuIntendedRolls(slot)` counts rolls a slot asked for on purpose on the input any brain sent
+  (a grounded Dodge press with a direction, or a `rollForward`/`rollBack` code); aitest `u` reads it.
+  `setCpuProjBlockOverrideForTest` is a no-op kept for its name (the rule brain's projectile-counter
+  switch; the engine has none).
+- Import order: `index.ts` imports `brain.ts`, which registers itself with the harness runner, and
+  the runner imports `index.ts`. When the runner is loaded first the registration waits one
+  microtask (`registerEngine` in `brain.ts`).
+
+## 6. Running the checks
+
+| What | Command |
+|---|---|
+| Harness, per commit | `npm run test:ai` (fast tier; `--engine legacy` for the shipped routing) |
+| Ladder, teams, determinism, cost | `npm run test:ai:ladder` (`--only mono,at,au,bb,bb.order,perf,team.mate,ffa.focus`) |
+| Harness, before a merge / god gates | `npm run test:ai:full`, `npm run test:ai:god` |
+| Legacy suite (46 cases, about 10 minutes) | `npm run test:ai:legacy` (`npx --yes tsx src/ai/aitest.ts`) |
+| God-strength diagnostic | `npm run diag:cpu` (`npx --yes tsx src/ai/eval/diag/strength.ts [--h2h 22] [--v3 20] [--gate]`); it plays the engine's god, so it measures `CPU_ENGINE=new` |
+| Unit files | `npx --yes tsx src/ai/eval/unit/<file>.ts` for each file but `fixtures.ts` |
+| Net parity | `npm run test:net` (CPU fill scenarios run the routed brains on the host, both engines) |
+
+## 7. Measured (2026-09-30)
+
+### Ladder
+
+Levels 1 to 9 play identically under both harness modes (checked: UI 9 over UI 7 is 31/40 in both),
+so only the level 10 rows differ. 2 stocks, frame cap 7,200 (a timeout scores half), paired seeds
+of the `mono` case with side swap, 40 matches per pair:
+
+| Pair | Score | Timeouts | Stocks lost, higher / lower |
+|---|---|---|---|
+| UI2 > UI1 | 22/40 | 36 | 0 / 42 |
+| UI3 > UI2 | 20/40 | 40 | 25 / 20 |
+| UI4 > UI3 | 20/40 | 38 | 23 / 31 |
+| UI3 > UI1 | 27.5/40 | 25 | 2 / 54 |
+| UI4 > UI2 | 20.5/40 | 39 | 13 / 30 |
+| UI5 > UI3 | 31/40 | 16 | 7 / 63 |
+| UI6 > UI4 | 36.5/40 | 7 | 5 / 73 |
+| UI7 > UI5 | 37.5/40 | 5 | 16 / 74 |
+| UI8 > UI6 | 32.5/40 | 7 | 33 / 68 |
+| UI9 > UI7 | 31/40 | 4 | 33 / 69 |
+| god (engine) > UI8 | 39/40 | 0 | 16 / 79 |
+| god (engine) > UI9 | 38/40 | 0 | 22 / 77 |
+| god (Aevalmere, shipped) > UI8 | 39.5/40 | 0 | |
+| god (Aevalmere, shipped) > UI9 | 38/40 | 0 | |
+
+Every level scores over half against the one two below it, and takes fewer stocks' loss in every
+two-step pair, but UI 4 over UI 2 is 20.5/40 with 39 timeouts: UI 1 to 4 rarely finish a 2-stock
+match inside 7,200 frames, so their order shows in stocks, not wins, and UI 3 loses more stocks to
+UI 2 than it takes. The fast tier's `mono` (2 matches per pair, adjacent only) reports its Elo order
+as info-fail for the same reason.
+
+Fast tier, `--only mono,at,au,bb,bb.order,perf,team.mate,ffa.focus` (engine mode new): `bb`,
+`bb.order`, `perf` (god p99 7.4 and 9.1 ms, UI 7 p99 5.5 and 4.9 ms), `perf.4p` (sum of p99 30.6
+and 29.3 ms, gate 36) and `team.mate` pass; `at` info-fail (UI 3 over UI 1 in guide terms: balanced
+L2 over L1 17/24, lb 0.51, SPRT undecided; L3 over L2 passes); `mono` info-fail (above); `au` runs
+0 matches in the fast tier; `ffa.focus` info-fail (one of four UI 7 in a free-for-all put 0.92 of
+its contested openings on its top victim, cap 0.7). Wall 120 s.
+
+### Legacy suite (aitest)
+
+`npx --yes tsx src/ai/aitest.ts`: 27 of 44 gated cases pass, 2 informational (`ao`, and `ar`,
+which is wall-clock timing and now always informational), 9.5 minutes. Before this wave (rule
+brain at 1 to 9) the same tree passed 40 of 45. Every case now runs the routed brains: levels 1 to
+9 on the engine, level 10 on the Aeval god. Test ids and thresholds are unchanged; two
+expectations changed:
+
+- `u`: the intended-roll counter now counts the `rollForward`/`rollBack` codes the engine sends,
+  not only Dodge plus a direction (it read 0 intended against 5 to 8 real rolls before the fix).
+- `x`: the comparison against the rule brain's projectile counter switched off is gone (the engine
+  has no such switch); the shoot-down share (L9 33%, floor 25%) and the L1 cap (0 of 211) stay.
+
+Failing, by cause:
+
+| Case | Measured | Threshold |
+|---|---|---|
+| `a` L1 vs L1 ends with a KO | no KO in 20,000 frames | a KO |
+| `b` matrix finishes | 2 of 10 L1 vs L1 unfinished at 24,000 frames | 0 |
+| `d` L2 hits a ledge hanger | 0% dealt | above 0 |
+| `e` aerial spacing | L9 aerials 39 frames apart | 45 (the rule brain's cooldown) |
+| `g` L9 hits an opponent above | 91/120 | 120/120 |
+| `h` L9 hits an opponent below | 82/120 | 120/120 |
+| `i` no idle stack | 132-frame stall | 120 |
+| `o` L9 uses the whole kit | ledge attack 2 | 3 |
+| `r` short hops scale | L9 2.42 vs L1-2 1.96 per 1k frames | 3x |
+| `v` L9 grabs a shielding dummy | no grab on seed 23 | every seed within 600 frames |
+| `y` techs | L9 8% | 60% |
+| `ag` god never SDs | 1 SD against the new L1 | 0 |
+| `am` god vs L9, 0 stocks lost | 19/20 won, 6 stocks lost | 20/20, 0 |
+
+All but the last two are the engine's play at levels 1 to 9 (not reachable from the routing, which
+cannot change the engine). `ag` and `am` are the Aeval god against the engine's (stronger) level 9
+and different level 1; its code path is unchanged in a 1v1. `al`, `an`, `ap` and `aq` fail with
+exactly the numbers they had before this wave (the god in a 1v1 plays bit for bit as before):
+standing dummy first KO 1,539 frames on seed 5 (gate 1,200), 3 stocks lost to the archetypes over
+36 matches (gate 0), worst profile pair -12.7 points (gate -5), 33% routed KOs (gate 40%).
+Passing, among others: `c` (every ordered pair 10/10), `f` (0 SDs in 317 runs), `j`, `k`, `n`
+(determinism), `w`, `x`, `ae`, `af`, `ah`, `ak` (0 teammate swings after the guard), `as`.
+
+After the 2026-09-30 move pass and the god retune for it (section 4): 41 of 44 gated cases pass
+(2 informational). `ag`, `al`, `an`, `ap` and `aq` pass; still failing are `h` and `o` (the
+engine at level 9) and `am` (20/20 won, 2 stocks lost, 0 SDs). The god cases above describe the
+tree before that pass.
+
+### Net
+
+`npm run test:net`: all 32 scenarios pass. The CPU fill scenarios run the routed brains on the host
+under `auto` and `new`: levels 3 and 10 (Aeval) in a 2v2, and a Trekmore level 10 with an Aeval
+level 5 over 3 peers, each over WebSocket-like and WebRTC-like links: 0 desyncs, identical final
+hashes on every peer and the relay-log replay, and each CPU called exactly once per frame played
+(1,800 calls in 1,800 frames).
+
+## 8. Known gaps
+
+- God-tier 1v3 gate (Wilson lower bound 0.90 at 73 matches against three teamed UI 4 CPUs) is not
+  met by any brain: shipped Aeval god 51/73 (lb 0.59), Aevalmere with nearest-opponent choice 57/73
+  (0.67), the engine's god 37/73 (0.40). Trekmore's god is the engine's.
+- The Aeval god gives up about 8 wins in 146 in the 1v3 for the targeter (section 4).
+- Levels 1 to 4 are a flat band (section 7); UI 1 vs UI 1 does not finish a stock inside 20,000
+  frames on seed 5 (aitest `a`).
+- aitest cases the engine fails at levels 1 to 9 (section 7): `a`, `b`, `d`, `e`, `g`, `h`, `i`,
+  `o`, `r`, `v`, `y`. Their thresholds are unchanged and none is proven unreachable; they are the
+  engine's (and its calibration's) to close, and the rule brain passed all of them.
+- `main.ts` warms only when a level 10 is present, so a levels 1 to 9 match pays the engine's
+  warm-up on its first frame. Changing the condition in `main.ts` to any CPU level would move it
+  before frame 0.
+- The browser bundle now carries `src/ai/eval/runner.ts` (the engine registers itself there).
+
+## Appendix A: Aevalmere internals
+
+The Aeval god (UI 10) is Aevalmere. This appendix is its design record from waves 1 and 2, kept as
+written; "levels 1 to 9" and "level 9" in it mean the rule brain those waves measured against,
+which is deleted. Test ids refer to `src/ai/aitest.ts`.
+
+### A.1 Research
 
 About 30 sources were read (fetched pages, or search snippets where a page was blocked). They are
 grouped by topic below, with the technique each one contributed.
 
-### SmashBot (Melee, altf4 / libmelee)
+#### SmashBot (Melee, altf4 / libmelee)
 - Four layers, each re-run every frame: Goals, then Strategies (e.g. bait), then Tactics (Defend,
   Edgeguard, Recover, Punish, Juggle, KeepDistance, Mitigate and others), then Chains (button
   sequences such as Wavedash, JC up smash, Powershield, DashDance, EdgeStall). Its only edge over a
@@ -33,7 +310,7 @@ grouped by topic below, with the technique each one contributed.
   to the ledge)? It ledge-stalls while its own invincibility outlasts their time to the ledge.
   https://github.com/altf4/SmashBot/blob/master/Tactics/edgeguard.py
 
-### Frame data, true combos, DI
+#### Frame data, true combos, DI
 - Hitstun is 0.4 x knockback in Melee; Ultimate uses the same minus 1 frame. A true combo holds when
   the attacker's remaining lag plus the next move's startup fits inside the victim's remaining
   hitstun. https://www.ssbwiki.com/Hitstun
@@ -43,7 +320,7 @@ grouped by topic below, with the technique each one contributed.
   directions, which is where DI mixups come from. SDI shifts the fighter during hitlag.
   https://www.ssbwiki.com/Directional_influence , https://www.ssbwiki.com/Smash_directional_influence
 
-### Smash Ultimate level 9 and amiibo
+#### Smash Ultimate level 9 and amiibo
 - The level 9 CPU has a 1-frame reaction; it does not read inputs. Level scales both reaction speed
   and follow-through. Players call it cheating because it perfect-shields and dodges on the first
   visible frame. https://www.ssbwiki.com/Artificial_intelligence , https://www.ssbwiki.com/Perfect_shield
@@ -51,7 +328,7 @@ grouped by topic below, with the technique each one contributed.
   moves that get avoided get rarer, so an amiibo copies its trainer's style.
   https://exionvault.com/2021/04/30/ssbu-amiibo-general/ , https://goozamiibo.com/blog/training-smash-amiibo-figure-players/
 
-### Utility scoring
+#### Utility scoring
 - The Infinite Axis Utility System: normalised considerations through response curves, multiplied,
   with a compensation factor. https://en.wikipedia.org/wiki/Utility_system
 - Dual utility (Dill, Game AI Pro 2): rank tiers as vetoes and priorities, then a weighted pick among
@@ -60,7 +337,7 @@ grouped by topic below, with the technique each one contributed.
   and the whiff-punish risk of your own end lag.
   https://www.ice.ci.ritsumei.ac.jp/~ruck/PAP/ieeeToG-ishii21.pdf
 
-### Rollout search (FightingICE)
+#### Rollout search (FightingICE)
 - Competitors get 16.67 ms per frame and see the state 15 frames late (the human-reaction model). A
   forward-model simulator is supplied, which is why MCTS bots have won since 2016. Typical settings:
   UCB1 with C = 1, 60-frame rollouts, 16.5 ms budget. The final pick is the best mean value.
@@ -72,14 +349,14 @@ grouped by topic below, with the technique each one contributed.
   Rolling-horizon evolution with an opponent model trained between rounds is the alternative.
   https://arxiv.org/pdf/2003.13949 , https://ieeexplore.ieee.org/document/8080432/
 
-### Movement and ledge tech
+#### Movement and ledge tech
 - Dash dance to bait and punish whiffs; wavedash; empty hops; shield drop (removed in Ultimate); ledge
   trump; the 2-frame punish on a ledge catch; tech chasing on reaction (about 15 frames is the human
   limit). https://www.ssbwiki.com/Dash-dancing , https://www.ssbwiki.com/Wavedash , https://www.ssbwiki.com/Shield_dropping ,
   https://www.ssbwiki.com/Edge , https://www.ssbwiki.com/Edge-hog , https://supersmashbros.fandom.com/wiki/Two_Frame_Punish ,
   https://smashboards.com/threads/tech-chasing-like-a-man-complete-breakdown.382475/
 
-### Humanizing a perfect bot
+#### Humanizing a perfect bot
 - Reacting to one known stimulus takes about 265 ms (16 frames); reactions under about 200 ms are not
   human. https://ki.infil.net/reaction.html
 - Phillip (deep RL Melee) beat pros with a 2-frame reaction. With 2 to 4 frames of added delay it
@@ -91,7 +368,7 @@ grouped by topic below, with the technique each one contributed.
 - Superhuman speed is what makes players call an AI unfair (AlphaStar's APM caps).
   https://arxiv.org/pdf/2503.15514
 
-### Wave 2 sources: learning the player (2026-09-29)
+#### Wave 2 sources: learning the player (2026-09-29)
 - N-gram player prediction: keep the last n actions, count what followed each window, predict the
   likeliest next one; the chapter notes this is what makes fighting-game AIs "very nearly
   unbeatable" when they read a human. https://www.gameaipro.com/GameAIPro/GameAIPro_Chapter48_Implementing_N-Grams_for_Player_Prediction_Proceedural_Generation_and_Stylized_AI.pdf ,
@@ -118,7 +395,7 @@ grouped by topic below, with the technique each one contributed.
 - SmashBot's punish gate (above) is still the basis of the kill confirms: a chain only counts when
   frames needed fit in hitstun left.
 
-### What was taken from this
+#### What was taken from this
 1. Rollout search on a copied state against a small set of opponent reply models, following
    FightingICE and the Thunder bots. Aevalrena's sim makes this cheap.
 2. Plan on a delayed observation rolled forward to now (FightingICE), with a 4-frame floor instead
@@ -137,7 +414,7 @@ grouped by topic below, with the technique each one contributed.
 9. (Wave 2) A CVaR-style tail weight in the objective and a hard veto on any candidate that loses a
    stock in a reply the model rates above 5%.
 
-## 2. Design: what Aevalmere does each frame
+### A.2 Design: what Aevalmere does each frame
 
 1. **Match check.** A new config, or the frame counter jumping back, resets the slot's memory (the
    pooled states are kept).
@@ -213,7 +490,7 @@ grouped by topic below, with the technique each one contributed.
     out as direct codes (the same shortcut keys a player can bind), so a smash is never misread as a
     tilt and the smash tap window never comes into play.
 
-### Wave 2 additions (E1 to E5)
+#### Wave 2 additions (E1 to E5)
 
 **Stage awareness (E1).** `stageInfo` (aevalmere) and `getGround` (levels 1 to 9) re-read the live
 `StageDef` every call into one cached object per stage, so nothing assumes Tidegate. The stage's
@@ -311,7 +588,7 @@ every rollout is now a copier generated from the learned field list (monomorphic
 it was 10% of all run time and is now off the profile's top list. Where a content security policy
 forbids `new Function`, the generic loop is used.
 
-### Combo table
+#### Combo table
 It is built once per stage and knockback tuning, from Aeval's move data. The key is every starter
 (the strongest hitbox of each of 14 moves, plus the 4 throws), crossed with the victim percent
 bracket (0-30, 30-60, 60-100, 100+) and the victim spot (mid-stage, near a ledge, airborne above).
@@ -328,7 +605,7 @@ the chain is re-planned at every hit.
 Current table: 69 starter entries with a follow-up. 55 of them open 3-hit chains, 46 open 4-hit
 chains, and 39 end in a KO. Example: utilt at 15% leads into uair (a 4-hit chain, 30%).
 
-### DI
+#### DI
 Aevalrena's sim has no launch-angle DI and no SDI: `knockbackDecay` sets the velocity outright while
 hitstun lasts. "Survival DI" therefore means choosing what happens when hitstun ends:
 - tumble exits: jump home, air dodge home, drift, fast fall, nair, or stay in tumble;
@@ -337,9 +614,9 @@ hitstun lasts. "Survival DI" therefore means choosing what happens when hitstun 
 
 All of these are chosen by rollouts against the blast rect and the edgeguarder's reply.
 
-## 3. Measured
+### A.3 Measured
 
-### Wave 2 (2026-09-29, both arenas, after both balance batches)
+#### Wave 2 (2026-09-29, both arenas, after both balance batches)
 From `npx --yes tsx src/ai/aitest.ts` (44 hard cases, all pass; `ao` is informational, see section 4).
 
 Level 10 vs level 9, 5 seeds x both sides, 2 stocks:
@@ -401,7 +678,7 @@ Budget, with a host warm-up before frame 0, 3000 frames against level 9:
 Determinism: the same seed gives an identical final state against a human slot with an empty store
 and with a fixed profile (tests `ah`, `as`).
 
-### Wave 1 measurements (kept for comparison)
+#### Wave 1 measurements (kept for comparison)
 
 The harness uses 5 seeds x both sides and 2 stocks for each matchup (`npx --yes tsx src/ai/aitest.ts`).
 
@@ -431,7 +708,7 @@ The harness uses 5 seeds x both sides and 2 stocks for each matchup (`npx --yes 
 - **Move starts:** sspecial 108, fair 32, nspecial 27, nair 25, dashatk 24, dair 20, uspecial 17,
   uair 14, usmash 12, bair 11, utilt 8, dtilt 6, jab 6, fsmash 5, ftilt 4, dsmash 1.
 
-### Start-of-match cost (warm-up and budget ramp)
+#### Start-of-match cost (warm-up and budget ramp)
 - `warmAevalmere(config)` allocates the pooled states, builds the combo table for the current tuning,
   and plays 400 throwaway frames of Aevalmere against itself on a scratch match that has its own
   config and its own random. The search code is compiled before frame 0, and no real outcome changes:
@@ -452,7 +729,7 @@ The harness uses 5 seeds x both sides and 2 stocks for each matchup (`npx --yes 
 - A dodge now goes stale like an attack. Without that, the budget ramp let one mirror seed lock
   into a mutual spot-dodge loop.
 
-### Kill speed (test al)
+#### Kill speed (test al)
 The owner saw a human who pressed nothing sit at 100% after 95 s with no KO. The harness reproduced
 it on some seeds against a level 0 dummy: after a KO the brain parked on a side platform above the
 dummy and shielded, spot dodged or waited for the rest of the stock (about 1% per second).
@@ -489,7 +766,7 @@ stalls. Damage runs at about 6% per second; with the raised ceiling the moves th
 about 100% (bthrow at the ledge) to 140% (usmash), so the floor on a stock is set by the move data.
 Against level 9: still 10/10, 0 SDs, 0 early shields, 0.09 ms per call.
 
-### Retune for the 2026-09-29 balance and ledge wave
+#### Retune for the 2026-09-29 balance and ledge wave
 The move pass (BALANCE_GUIDE.md) and the ledge rules (SPEC 4.5) broke five cases: `d`, `j`, `al`,
 `ap` and `aq`. The common cause was the ledge. A fighter falling past a ledge with no input now
 grabs it, and a hanger is out of reach of every melee hitbox except dtilt, dsmash and dair
@@ -527,7 +804,7 @@ Measured after the retune (same harness): `d` 36% on the hanger, `j` 6/6 against
 on p99 alone inside the full harness (about 5 ms); run on its own the same match measures 0.12 ms
 mean and 2.7 ms p99. It failed the same way before this retune. No threshold was changed.
 
-## 4. Known limits
+### A.4 Known limits
 - What the wave 2 gates mean (coordinator decision, 2026-09-29): the substantive gates are 0 stocks
   lost to the six archetypes (36/36 matches won, 0 stocks, 0 SDs) and the profile transfer (+17
   points of first-15 s accuracy over 36 pairs). The accuracy check `ao` is informational only: a

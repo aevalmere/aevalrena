@@ -1,7 +1,8 @@
 /**
  * Aevalmere, the level 10 CPU. Research notes and the design live in docs/CPU_AEVALMERE.md.
  *
- * Levels 1 to 9 (src/ai/index.ts) are hand-written rules with weights. Aevalmere is a search:
+ * Levels 1 to 9 run the search engine in src/ai/brain.ts (src/ai/index.ts routes). Aevalmere is
+ * the Aeval god, kept because it measured stronger than that engine's god. It is a search:
  * every decision forward-simulates its best candidate options with the real sim (a pooled copy
  * of the game state and stepGame) against a small set of opponent reply models, scores each
  * future, and commits to the option with the best blend of worst case and expected case.
@@ -26,12 +27,15 @@ import { CHARACTER_DEFS } from '../characters/registry';
 import { grabKitOf } from '../characters/common/grabkit';
 import { STAGE_DEFS } from '../stages/registry';
 import { cloneGameState, createGameState, stepGame } from '../sim';
+import { moveLocked } from '../sim/actions';
 import { canFinalSmash } from '../sim/finalsmash';
 import { projectileChargePower } from '../sim/hits';
 import { isLedgeAction } from '../sim/ledge';
 import { castDelay } from '../sim/moves';
 import { sameTeam, type SimFighter } from '../sim/state';
 import { defaultProfileStore, profileKeyFor, type ProfileStore } from './profile';
+import { profileFor } from './affordances';
+import { createTargeter, type TeamTargeter } from './targets';
 
 // ---------------------------------------------------------------------------
 // Tuning of the brain itself
@@ -752,6 +756,10 @@ const P_FS = defPlan('finalSmash', 2, 0, 24);
 const P_LT_DTILT = defPlan('ledgeTrapDtilt', 1, F_ATTACK | F_INTR, 60);
 const P_LT_DSMASH = defPlan('ledgeTrapDsmash', 1, F_ATTACK | F_INTR, 64);
 const P_LT_DAIR = defPlan('ledgeTrapDair', 1, F_ATTACK | F_INTR | F_TAIL, 64);
+/** Run at the opponent and grab once in reach: the answer to a shield from outside grab range. */
+const P_RUN_GRAB = defPlan('runGrab', 4, F_ATTACK, 50);
+/** The opponent sits on its respawn platform: stand under it on our side, grounded, and wait for the drop. */
+const P_RESPAWN_SPOT = defPlan('respawnSpot', 1, F_INTR | F_MOVE, 16);
 const PLAN_COUNT = PLAN_NAME.length;
 
 /** Debug name of a plan id, for the harness and the docs. */
@@ -769,6 +777,12 @@ let sDirect = 0;
 let cFrame = 0;         // sim frame of the step being scripted (real or rollout)
 let cEdgeX = 0;         // ledge trap: the corner the opponent hangs from, fixed when the plan was chosen
 let cFireAt = 0;        // ledge trap: first sim frame a hit can land (the hanger's invincibility ends)
+/**
+ * The opponent as the scripts see it: the rollout's copy inside a rollout, the perceived one
+ * (REACT frames old) on the real fighter. Only the dive aim reads it.
+ */
+let cOpp: FighterState | null = null;
+let cStageId = '';
 
 /** A fresh press of `bit` if it is not held already this frame; nothing otherwise. */
 function press(bit: number): number { return (cPrev & bit) === 0 ? bit : 0; }
@@ -822,14 +836,24 @@ function recoverStep(f: FighterState, variant: number): void {
   }
 }
 
+/** Frames an opponent holds its shield before the run-in grab is forced without a search. */
+const SHIELD_CAMP = 45;
+/** Distance (centre to centre) at which runGrab presses Grab out of its run, px. */
+const RUN_GRAB_REACH = 38;
+/** Where to wait for an opponent on its respawn platform: this far to our side of its x, px. */
+const RESPAWN_SPOT = 36;
+
 /** Ledge trap spots, px inward of the corner, and the startups the swing is timed with. */
 const LT_DTILT_SPOT = 16;
 const LT_DSMASH_SPOT = 24;
-const LT_DAIR_SPOT = 3;
+/** dair: inside DIVE_EDGE, so a hanger that climbs or rolls away leaves us landing on the stage. */
+const LT_DAIR_SPOT = 14;
 const LT_DTILT_STARTUP = 5;
 const LT_DSMASH_STARTUP = 12;
 /** dair: jump squat, a short hop's rise and the dair startup, frames from the jump press to the hit. */
 const LT_DAIR_LEAD = 18;
+/** A hanger this far away (or nearer) is worth the run to a ledge trap spot: most of either stage, px. */
+const LT_RANGE = 420;
 /** Past this many px beyond the spot the approach runs instead of walking. */
 const LT_RUN_MARGIN = 50;
 
@@ -872,6 +896,90 @@ function jumpAerial(t: number, f: FighterState, code: number, drift: number): vo
   if (t === 0) sHeld |= press(J) | drift;
   else sHeld |= drift;
   if (t === 3 && code !== 0 && f.action === 'air') sDirect = code;
+}
+
+/** Dive dair (moves.ts DAIR_DIVE): frames of startup before the drop, and the drop speed, px/frame. */
+const DIVE_STARTUP = 6;
+const DIVE_VY = 7;
+/** Horizontal slack between the dive's spike and the target's body centre that still connects, px. */
+const DIVE_AIM = 16;
+/**
+ * A dive "lands" only this far inside the stage's corners: a body under the lip (a hanger that
+ * climbs, a recovering fighter) pushes the diver outward, and the dive cannot drift back.
+ */
+const DIVE_EDGE = 12;
+
+/** Where the dive will drop from: the startup frames still carry the current drift. */
+function diveX(f: FighterState): number {
+  return f.x + f.vx * DIVE_STARTUP;
+}
+
+/**
+ * True when a dair pressed now drops onto solid footing: the main stage or a soft platform under
+ * us. The dive has no drift and no ledge grab, so anything else is a drop into the blast zone
+ * unless it meets a fighter first.
+ */
+function diveLands(f: FighterState): boolean {
+  const si = cSi;
+  const x = diveX(f);
+  if (x >= si.minX + DIVE_EDGE && x <= si.maxX - DIVE_EDGE && f.y <= si.topY + 2) return true;
+  const st = STAGE_DEFS[cStageId];
+  if (st === undefined) return false;
+  for (let i = 0; i < st.platforms.length; i++) {
+    const p = st.platforms[i];
+    if (x >= p.x + DIVE_EDGE && x <= p.x + p.w - DIVE_EDGE && f.y <= p.y + 1) return true;
+  }
+  return false;
+}
+
+/**
+ * True when the opponent is under us and a dair pressed now meets its body: its x projected over
+ * the startup and the drop is within DIVE_AIM of the spike, it is below our feet, and it can be
+ * hit by the time the dive gets there (a hanger counts: dair reaches the ledge).
+ */
+function diveOnTarget(f: FighterState): boolean {
+  const o = cOpp;
+  if (o === null || o.action === 'dead' || o.action === 'respawn' || o.stocks <= 0) return false;
+  const below = o.y - f.y;
+  if (below < 4 || below > 260) return false;
+  // Still under us when the startup ends: a body rising past us (a ledge jump, a double jump) is not.
+  const hang0 = isLedgeAction(o.action);
+  if (!hang0 && (o.y + o.vy * DIVE_STARTUP) - (f.y + f.vy * DIVE_STARTUP) < 12) return false;
+  const k = DIVE_STARTUP + below / DIVE_VY;
+  if (o.invuln > k) return false;
+  const hang = o.action === 'ledgeHang';
+  const tx = hang ? o.x : o.x + o.vx * k;
+  return Math.abs(tx - (diveX(f) + 4 * f.facing)) < DIVE_AIM;
+}
+
+/**
+ * Whether a dair may be sent now. Over solid footing (inside DIVE_EDGE) always: a miss is 20
+ * frames of landing lag. Over the void only onto an airborne body lined up under us; never onto
+ * a hanger from there (a climb or roll makes it intangible and the dive falls past the lip).
+ */
+function diveAllowed(f: FighterState): boolean {
+  if (diveLands(f)) return true;
+  const o = cOpp;
+  if (o === null || o.onGround || isLedgeAction(o.action)) return false;
+  // Only a body already off the stage and falling slower than the dive can be caught: one still on
+  // the lip, or dropping faster (a strong launch, a fast fall), leaves the dive falling alone.
+  if (!offstage(o, cSi) || o.vy > DIVE_VY - 1.5 || o.vy < -1.5) return false;
+  return diveOnTarget(f);
+}
+
+/**
+ * Dive aim: from frame `from` of the plan, drift over the opponent and send the dair once it is
+ * lined up under us. Never sent over the void without a target (the guard in planStep too).
+ */
+function aimDive(t: number, f: FighterState, from: number): void {
+  const o = cOpp;
+  if (o === null) return;
+  const dx = o.x - f.x;
+  if (Math.abs(dx) > 4) sHeld = (sHeld & ~(L | R)) | (dx > 0 ? R : L);
+  if (t >= from && f.action === 'air' && diveOnTarget(f) && diveAllowed(f)) {
+    sDirect = C_DAIR;
+    sHeld &= ~(L | R);
+  }
 }
 
 /**
@@ -946,12 +1054,17 @@ function planStep(pid: number, t: number, f: FighterState): void {
       if (f.onGround && t < 2) sHeld = press(J) | T;
       else sHeld = back ? B : T;
       if (t === 6) sDirect = back ? C_BAIR : C_FAIR;
-      else if (t >= 37 && t <= 40 && f.action === 'air') sDirect = C_DAIR;
+      else if (t >= 30) aimDive(t, f, 30);
       break;
     }
-    case P_EG_BAIR: case P_EG_FAIR: case P_EG_DAIR: case P_EG_NAIR: {
+    case P_EG_DAIR:
+      // Hop off toward the recovering opponent, drift over it, and dive once it is under us.
+      if (f.onGround && t < 2) sHeld = press(J) | T;
+      else { sHeld = T; aimDive(t, f, 3); }
+      break;
+    case P_EG_BAIR: case P_EG_FAIR: case P_EG_NAIR: {
       // Hop off toward the recovering opponent and meet them with the aerial on frame 8.
-      const code = pid === P_EG_BAIR ? C_BAIR : pid === P_EG_FAIR ? C_FAIR : pid === P_EG_DAIR ? C_DAIR : C_NAIR;
+      const code = pid === P_EG_BAIR ? C_BAIR : pid === P_EG_FAIR ? C_FAIR : C_NAIR;
       if (f.onGround && t < 2) sHeld = press(J) | T;
       else sHeld = pid === P_EG_BAIR ? B : T;
       if (t === 8) sDirect = code;
@@ -992,7 +1105,7 @@ function planStep(pid: number, t: number, f: FighterState): void {
     case P_A_USPEC: if (t === 0) sDirect = C_USPEC; sHeld = offstage(f, cSi) ? H : T; break;
     case P_A_NSPEC: if (t === 0) sDirect = C_NSPEC; break;
     case P_A_SSPEC: if (t === 0) { sDirect = C_SSPEC; sHeld = T; } break;
-    case P_A_DAIR_SPIKE: if (t === 0) sDirect = C_DAIR; if (t < 16) sHeld = T; break;
+    case P_A_DAIR_SPIKE: aimDive(t, f, 0); break;
     case P_REC_EARLY: recoverStep(f, 0); break;
     case P_REC_MID: recoverStep(f, 1); break;
     case P_REC_LATE: recoverStep(f, 2); break;
@@ -1016,7 +1129,7 @@ function planStep(pid: number, t: number, f: FighterState): void {
       // Let go of the ledge and dair straight down onto whoever is recovering under it.
       const away = f.facing === 1 ? L : R;
       if (t === 0) sHeld = press(away);
-      else if (t === 3) sDirect = C_DAIR;
+      else aimDive(t, f, 2);
       break;
     }
     case P_D_UP: if (t === 0) sHeld = press(U); break;
@@ -1039,6 +1152,29 @@ function planStep(pid: number, t: number, f: FighterState): void {
     case P_X_FF: if (t === 0) sHeld = press(G); else if (f.vy > 0 && !f.fastFalling) sHeld = press(D); break;
     case P_X_NAIR: if (t === 0) sHeld = press(G); else sHeld = B; if (t === 2) sDirect = C_NAIR; break;
     case P_FS: if (t === 0) sDirect = C_FS; break;
+    case P_RUN_GRAB: {
+      // Grab reach from a run: the dash grab box covers 45 px ahead of our centre.
+      if (!f.onGround || f.action === 'grab') break;
+      const gap = cOpp === null ? 0 : Math.abs(cOpp.x - f.x);
+      if (gap > RUN_GRAB_REACH) sHeld = safeDir(T, f);
+      else if (f.facing !== cDir) sHeld = safeDir(T, f) | WK;   // turn first: a grab only reaches ahead
+      else sHeld = press(G);
+      break;
+    }
+    case P_RESPAWN_SPOT: {
+      // cEdgeX holds the opponent's x at the decision; the spot is RESPAWN_SPOT px short of it on our side.
+      const d = cEdgeX - cDir * RESPAWN_SPOT - f.x;
+      const bit = d > 0 ? R : L;
+      if (!f.onGround) {
+        // Off a platform on the way: drift to the spot and fast fall to the floor.
+        if (Math.abs(d) > 3) sHeld = bit;
+        if (f.action === 'air' && f.vy > 0 && !f.fastFalling) sHeld |= press(D);
+        break;
+      }
+      if (Math.abs(d) > 30) sHeld = safeDir(bit, f);
+      else if (Math.abs(d) > 3) sHeld = safeDir(bit, f) | WK;
+      break;
+    }
     case P_LT_DTILT: ledgeTrap(f, C_DTILT, LT_DTILT_SPOT, LT_DTILT_STARTUP); break;
     case P_LT_DSMASH: ledgeTrap(f, C_DSMASH, LT_DSMASH_SPOT, LT_DSMASH_STARTUP); break;
     case P_LT_DAIR:
@@ -1050,6 +1186,9 @@ function planStep(pid: number, t: number, f: FighterState): void {
     default: break;
   }
   if ((PLAN_FLAGS[pid] & F_TAIL) !== 0 && t >= PLAN_MIN[pid] && offstage(f, cSi)) recoverStep(f, 1);
+  // The dive never leaves over the void without a body under it: it cannot drift, grab a ledge or
+  // stop, so a miss there is a self-destruct.
+  if (sDirect === C_DAIR && !f.onGround && !diveAllowed(f)) sDirect = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1810,7 +1949,10 @@ interface AmMem {
   oppPrevHitstun: number;
   oppEscWatch: number;
   oppIdleRun: number;       // frames the opponent has stood free in neutral without starting anything
+  oppShieldRun: number;     // frames the opponent has held its shield up without leaving it
   habits: Float64Array;
+  /** The HB_NEUTRAL row as seen in this match only (a loaded profile does not seed it). */
+  matchNeutral: Float64Array;
   recent: Int32Array;       // last 16 opponent move starts, as MOVE_INDEX
   recentPos: number;
   repetition: number;       // share of those that are the single most common move, 0..1
@@ -1827,6 +1969,8 @@ interface AmMem {
   alternates: number;
   mashPhase: number;
   techBusy: number;
+  /** Opponent choice in matches of three or more (shared with the search engine), made on first use. */
+  targeter: TeamTargeter | null;
 }
 
 const memSlots: AmMem[] = [];
@@ -1836,11 +1980,11 @@ for (let i = 0; i < MAX_PLAYERS; i++) {
     lastDecide: -999, lastSig: -1,
     hist: [], histFrame: new Int32Array(HIST), outHeld: new Int32Array(HIST), outDirect: new Int32Array(HIST),
     perceived: null, work: null,
-    oppIdx: -1, oppPrevAction: '', oppPrevMove: null, oppPrevHitstun: 0, oppEscWatch: 0, oppIdleRun: 0,
-    habits: new Float64Array(HB_COUNT * HB_WIDTH), recent: new Int32Array(16), recentPos: 0, repetition: 0,
+    oppIdx: -1, oppPrevAction: '', oppPrevMove: null, oppPrevHitstun: 0, oppEscWatch: 0, oppIdleRun: 0, oppShieldRun: 0,
+    habits: new Float64Array(HB_COUNT * HB_WIDTH), matchNeutral: new Float64Array(HB_WIDTH), recent: new Int32Array(16), recentPos: 0, repetition: 0,
     lastStarter: -1, lastDamageFrame: 0, lastStageDamage: 0, used: new Float64Array(PLAN_COUNT),
     preds: [null, null, null, null],
-    decisions: 0, steps: 0, alternates: 0, mashPhase: 0, techBusy: 0,
+    decisions: 0, steps: 0, alternates: 0, mashPhase: 0, techBusy: 0, targeter: null,
   });
 }
 
@@ -1848,10 +1992,11 @@ function resetMem(mem: AmMem): void {
   mem.matchRef = null; mem.lastFrame = -1; mem.prevHeld = 0; mem.plan = -1; mem.planT = 0;
   mem.planDir = 1; mem.planHome = 1; mem.planEdge = 0; mem.planFire = 0; mem.lastDecide = -999; mem.lastSig = -1;
   mem.histFrame.fill(-1); mem.outHeld.fill(0); mem.outDirect.fill(0);
-  mem.oppIdx = -1; mem.oppPrevAction = ''; mem.oppPrevMove = null; mem.oppPrevHitstun = 0; mem.oppEscWatch = 0; mem.oppIdleRun = 0;
-  mem.habits.fill(1); mem.recent.fill(-1); mem.recentPos = 0; mem.repetition = 0;
+  mem.oppIdx = -1; mem.oppPrevAction = ''; mem.oppPrevMove = null; mem.oppPrevHitstun = 0; mem.oppEscWatch = 0; mem.oppIdleRun = 0; mem.oppShieldRun = 0;
+  mem.habits.fill(1); mem.matchNeutral.fill(1); mem.recent.fill(-1); mem.recentPos = 0; mem.repetition = 0;
   mem.lastStarter = -1; mem.lastDamageFrame = 0; mem.lastStageDamage = 0; mem.used.fill(0);
   mem.decisions = 0; mem.steps = 0; mem.alternates = 0; mem.mashPhase = 0; mem.techBusy = 0;
+  if (mem.targeter !== null) mem.targeter.reset();
 }
 for (let i = 0; i < memSlots.length; i++) resetMem(memSlots[i]);
 
@@ -2068,6 +2213,9 @@ function launchKills(p: number, pos: number, blast: Rect, si: StageInfo): boolea
     fall = Math.min(def.maxFall, fall + def.gravity);
     vx = dirX * spd; vy = dirY * spd + fall;
     x += vx; y += vy;
+    // A victim over the stage that is sent down meets the floor (a spike there bounces), it does
+    // not pass through to the bottom blast line.
+    if (pos !== 3 && y > si.topY && x >= si.minX && x <= si.maxX) return false;
     if (x < blast.x || x > blast.x + blast.w || y < blast.y || y > blast.y + blast.h) return true;
   }
   if (pos === 3) {
@@ -2280,6 +2428,10 @@ let rLost = false;
 let rStarter = -1;
 /** A hit in the rollout opened a table kill chain. */
 let rChain = false;
+/** Our last hit on the modelled opponent was routed: it landed in its hitstun (a true combo) or off the stage. */
+let rRouted = false;
+/** KOs of the modelled opponent whose last hit from us was routed. */
+let rKoRouted = 0;
 /**
  * E3: a rollout in which a starter lands whose chain the combo table says ends past the blast line
  * (from the victim's bracket and spot at that hit) is worth a little more than a raw launch that
@@ -2287,9 +2439,22 @@ let rChain = false;
  * A KO actually seen inside the horizon (520) still outranks it.
  */
 const CHAIN_KILL_VALUE = 400;
+/** Extra for a KO (seen, or projected from the launch) whose last hit was routed. */
+const ROUTED_KO = 80;
+/**
+ * A passive opponent near a ledge is most of a KO: pushed off it hangs (and a hanger that never
+ * climbs is open to the ledge traps) or falls. Worth PASSIVE_EDGE at the corner, falling off
+ * linearly to nothing PASSIVE_RAMP px inward, times its passivity; a hanger 1.2 times that.
+ */
+const PASSIVE_EDGE = 60;
+const PASSIVE_RAMP = 200;
+/** Height over the stage top past which a passive opponent counts as sent up and away, px. */
+const PASSIVE_HIGH = 40;
+/** Below this passivity the edge term is off; it grows linearly to PASSIVE_EDGE at 1. */
+const PASSIVE_MIN = 0.5;
 
-interface Base { myPct: number; oppPct: number; myStocks: number; oppStocks: number; stall: boolean }
-const base: Base = { myPct: 0, oppPct: 0, myStocks: 0, oppStocks: 0, stall: false };
+interface Base { myPct: number; oppPct: number; myStocks: number; oppStocks: number; stall: boolean; oBroken: boolean }
+const base: Base = { myPct: 0, oppPct: 0, myStocks: 0, oppStocks: 0, stall: false, oBroken: false };
 
 /**
  * Runs plan `pid` for `h` frames on a copy of `from`, the opponent replying with `model`, and
@@ -2347,7 +2512,7 @@ function rollout(from: GameState, work: GameState, meI: number, oppI: number, pi
   }
   rollPrev[meI] = myPrev;
   rDealt = 0; rTaken = 0; rKoOpp = 0; rKoMe = 0; rKoOther = 0; rKoMate = 0; rMateTaken = 0; rGrabbed = false; rFsCaught = false; rBackHome = false;
-  rMinMargin = 1e9; rLost = false; rStarter = -1; rChain = false;
+  rMinMargin = 1e9; rLost = false; rStarter = -1; rChain = false; rRouted = false; rKoRouted = 0;
   const blast = blastOf(work);
   const meSlot = fs[meI].slot;
   const oppSlot = fs[oppI].slot;
@@ -2357,6 +2522,7 @@ function rollout(from: GameState, work: GameState, meI: number, oppI: number, pi
     const o = fs[oppI];
     cPrev = rollPrev[meI];
     cFrame = work.frame;
+    cOpp = o;
     planStep(pid, t, m);
     const mi = rollInputs[meI];
     mi.held = sHeld; mi.pressed = sHeld & ~rollPrev[meI]; mi.released = rollPrev[meI] & ~sHeld; mi.direct = sDirect;
@@ -2374,6 +2540,8 @@ function rollout(from: GameState, work: GameState, meI: number, oppI: number, pi
         inp.held = hd; inp.pressed = 0; inp.released = 0; inp.direct = 0;
       }
     }
+    const oPre = fs[oppI];
+    const preRouted = oPre.hitstun > 0 || oPre.hitlag > 0 || offstage(oPre, cSi);
     stepGame(work, rollInputs);
     {
       const mm = fs[meI];
@@ -2390,6 +2558,7 @@ function rollout(from: GameState, work: GameState, meI: number, oppI: number, pi
         if (x.attacker === meSlot && x.victim !== meSlot && !sameTeam(work, meSlot, x.victim)) {
           rDealt += x.damage;
           if (x.victim === oppSlot) {
+            rRouted = preRouted;
             const mf = fs[meI] as SimFighter;
             const id = mf.action === 'throw' && mf.activeThrowId !== null ? mf.activeThrowId : mf.action === 'attack' ? mf.moveId : null;
             rStarter = comboIndexOf(id);
@@ -2406,7 +2575,7 @@ function rollout(from: GameState, work: GameState, meI: number, oppI: number, pi
       } else if (x.type === 'ko') {
         if (x.slot === meSlot) rKoMe++;
         else if (sameTeam(work, meSlot, x.slot)) rKoMate++;
-        else if (x.slot === oppSlot) rKoOpp++;
+        else if (x.slot === oppSlot) { rKoOpp++; if (rRouted) rKoRouted++; }
         else rKoOther++;
       } else if (x.type === 'grab') {
         if (x.attacker === meSlot && !sameTeam(work, meSlot, x.victim)) rGrabbed = true;
@@ -2430,6 +2599,9 @@ function evaluate(st: GameState, meI: number, oppI: number, frames: number): num
   let s = 0;
   s += rDealt * 1.0 - rTaken * 1.25;
   s += rKoOpp * 520 - rKoMe * 640 + rKoOther * 420 - rKoMate * 380 - rMateTaken * 0.5;
+  // A KO off a true combo or an edgeguard is the one a person cannot shield or read: worth more
+  // than the same KO off a raw kill move, so the search routes toward it when both are there.
+  s += rKoRouted * ROUTED_KO;
   const adx = Math.abs(o.x - m.x);
   const ady = Math.abs(o.y - m.y);
   // Hitstun and frame advantage are only worth something while we can still get to the victim: a
@@ -2440,6 +2612,7 @@ function evaluate(st: GameState, meI: number, oppI: number, frames: number): num
     if (launched(o)) {
       const ko = projectedKo(o, blast);
       s += 360 * ko;
+      if (rRouted) s += ROUTED_KO * ko;
       s += Math.min(o.hitstun, 30) * 0.45 * reach;
       // Dead time: a launch that is not a KO and leaves the victim far above or away is time we
       // spend waiting for it to come down instead of hitting it again.
@@ -2452,7 +2625,9 @@ function evaluate(st: GameState, meI: number, oppI: number, frames: number): num
       s += out * 0.06 + Math.max(0, o.y - si.topY) * 0.08;
     }
     if (rChain && projectedKo(o, blast) < 1) s += CHAIN_KILL_VALUE * reach;
-    if (o.action === 'shieldBreak') s += 140;
+    // A break the rollout caused is worth a lot; one that was there already is only the punish it
+    // opens, which the damage terms score (keeping it broken is not a goal in itself).
+    if (o.action === 'shieldBreak' && !base.oBroken) s += 140;
     if (o.action === 'grabbed') {
       s += 14;
       // Held at kill percent: the throw that follows is a KO, so the grab is worth one already.
@@ -2492,7 +2667,22 @@ function evaluate(st: GameState, meI: number, oppI: number, frames: number): num
   if (bm > 0 && bo === 0 && adx < 64 && ady < 50) s -= bm * 0.35;
   // Stage control and spacing, both small next to damage.
   s -= Math.abs(m.x - si.cx) * 0.012;
+  // An opponent that does nothing is killed at the ledge (a hanger is open to dtilt, dsmash and the
+  // dive, and a passive one never climbs): carrying it there is worth more the more passive it is.
   s += Math.abs(o.x - si.cx) * 0.01;
+  if (cPassive > PASSIVE_MIN && rKoOpp === 0 && o.stocks > 0) {
+    const pw = PASSIVE_EDGE * (cPassive - PASSIVE_MIN) / (1 - PASSIVE_MIN);
+    // Off the stage (thrown or knocked past the lip) or hanging: it can only fall or hang there.
+    if (o.action === 'ledgeHang' || offstage(o, si)) s += pw * 1.2;
+    else {
+      const edge = Math.min(Math.abs(o.x - si.minX), Math.abs(o.x - si.maxX));
+      s += pw * Math.max(0, 1 - edge / PASSIVE_RAMP);
+      // Sent high over the stage it only comes back down to the middle (the ceilings are far):
+      // time off the ledge plan, worth up to half the edge term.
+      const high = si.topY - PASSIVE_HIGH - o.y;
+      if (high > 0) s -= pw * 0.5 * Math.min(1, high / 150);
+    }
+  }
   if (m.onGround && o.onGround && !launched(o)) s -= Math.abs(adx - 58) * 0.02;
   // The pull reads the real distance: a fighter parked on a platform over the opponent is not close.
   if (base.stall) s -= Math.sqrt(adx * adx + ady * ady) * 0.04 - rDealt * 0.5;
@@ -2533,7 +2723,16 @@ const MARGIN_W = 0.4;
 /** Direct code of each attack class (0 when the class is not a direct move). */
 const CLASS_CODE = new Int32Array(NA);
 
+/** Passivity of the opponent planned against (passivity(mem)), set per decision for the scoring. */
+let cPassive = 0;
+
+/** Set per decision by buildCandidates: shots are pointless (a shield), the crescent is locked or pointless. */
+let noShot = false;
+let noCrescent = false;
+
 function addCand(pid: number, bonus: number): void {
+  if ((pid === P_SSPEC || pid === P_A_SSPEC) && noCrescent) return;
+  if ((pid === P_NSPEC || pid === P_NSPEC_FULL || pid === P_A_NSPEC) && noShot) return;
   for (let i = 0; i < nCand; i++) if (cand[i] === pid) { if (bonus > candBonus[i]) candBonus[i] = bonus; return; }
   if (nCand >= cand.length) return;
   cand[nCand] = pid; candBonus[nCand] = bonus; nCand++;
@@ -2750,6 +2949,14 @@ function addFollowPlans(moveIdx: number, grounded: boolean, facingIn: boolean, b
   }
 }
 
+/**
+ * The opponent is on its respawn platform (it can sit there RESPAWN_PLATFORM_FRAMES, invulnerable
+ * throughout), or a passive one is still falling from it with its invulnerability to spend.
+ */
+function respawnWait(o: FighterState, oOffstage: boolean): boolean {
+  return o.action === 'respawn' || (cPassive > PASSIVE_MIN && o.invuln > 24 && !o.onGround && !oOffstage);
+}
+
 function kcOn(starter: number, b: number, pos: number): boolean {
   return killConfirm[(starter * N_BRACKET + b) * N_POS + pos] === 1;
 }
@@ -2773,6 +2980,14 @@ function buildCandidates(st: GameState, meI: number, oppI: number, mem: AmMem, c
     if (pr.alive && pr.owner !== m.slot && !sameTeam(st, m.slot, pr.owner)) shots++;
   }
   const threat = (o.action === 'attack' && busyFrames(o) > 0) || shots > 0;
+  // Side special does nothing while our crescent is out (moveLocked), and any projectile that meets
+  // a shield is destroyed on it: neither is worth a candidate slot then.
+  const crescentOut = moveLocked(st, m as SimFighter, CHARACTER_DEFS[m.charId], 'sspecial');
+  const oShield = o.action === 'shield' || o.action === 'shieldStun';
+  // A hanger sits under the lip, out of every shot's line but the orb from below: the ledge traps are the answer.
+  const oHang = o.action === 'ledgeHang';
+  noShot = oShield || oHang;
+  noCrescent = crescentOut || oShield || oHang;
 
   if (canFs) addCand(P_FS, 0);
 
@@ -2854,8 +3069,15 @@ function buildCandidates(st: GameState, meI: number, oppI: number, mem: AmMem, c
     }
   }
 
+  if (respawnWait(o, oOffstage) && !m.onGround && !offstage(m, si) && m.action === 'air') {
+    addCand(P_RESPAWN_SPOT, 0);
+    return true;
+  }
   if (!m.onGround) {
     const off = offstage(m, si);
+    // Off the stage at or below the ledge with no jump left: the up special is the only way back
+    // and every aerial (a combo follow-up included) spends height it has not got. Recover only.
+    if (off && m.jumpsLeft === 0 && m.y > si.topY - 10) nCand = 0;
     if (off) {
       addCand(P_REC_MID, 0); addCand(P_REC_EARLY, 0); addCand(P_REC_LATE, 0);
       // The air dodge onto the ledge only once the jumps are spent (E4).
@@ -2863,6 +3085,7 @@ function buildCandidates(st: GameState, meI: number, oppI: number, mem: AmMem, c
       if (m.jumpsLeft > 0) addCand(P_A_DJ_F, 0);
       if (m.action === 'air') addCand(P_A_USPEC, 0);
       if (m.jumpsLeft === 0 && canAirDodge(m)) addCand(P_A_AD_S, 0);
+      if (m.jumpsLeft === 0 && m.y > si.topY - 10) return true;
     }
     if (oLow && dy > 0 && adx < 70 && m.action === 'air') addCand(P_A_DAIR_SPIKE, EG_BONUS);
     // Hits on a victim off the stage are edgeguards: the aerials that reach it come first.
@@ -2894,10 +3117,16 @@ function buildCandidates(st: GameState, meI: number, oppI: number, mem: AmMem, c
   }
 
   // Grounded.
+  // The opponent on its respawn platform (100 frames at most, invulnerable 120): nothing can touch
+  // it, and a jump at it is time spent in the air when it drops. Wait under it on our side.
+  if (respawnWait(o, oOffstage)) {
+    addCand(P_RESPAWN_SPOT, 0);
+    return true;
+  }
   const oOff = oOffstage || o.action === 'ledgeHang';
   // Ledge trap: a hanger is out of reach of everything but dtilt, dsmash and dair (hitsLedge), and
   // an orb only reaches it from under the lip. Examined first, like the edgeguards.
-  if (o.action === 'ledgeHang' && adx < 260 && dy > 0 && dy < 40) {
+  if (o.action === 'ledgeHang' && adx < LT_RANGE && dy > 0 && dy < 40) {
     addCand(P_LT_DSMASH, EG_BONUS); addCand(P_LT_DTILT, EG_BONUS);
     if (m.percent < 150) addCand(P_LT_DAIR, EG_BONUS);
   }
@@ -2916,6 +3145,8 @@ function buildCandidates(st: GameState, meI: number, oppI: number, mem: AmMem, c
       addCand(P_EG_HOG, 0);
     }
   }
+  // A shield (projectiles break on it) is grabbed: run in and take it, examined early.
+  if (oShield && o.onGround && Math.abs(dy) < 20 && adx < 260) addCand(P_RUN_GRAB, EXPLOIT_BONUS);
   addCand(P_WAIT, 0);
   addCand(P_DASH_F, 0); addCand(P_DASH_B, 0);
   if (adx < 160) { addCand(P_DD_F, 0); addCand(P_DD_B, 0); }
@@ -3127,6 +3358,22 @@ function bump(mem: AmMem, ctx: number, i: number): void {
   const o = ctx * HB_WIDTH;
   for (let k = 0; k < HB_WIDTH; k++) mem.habits[o + k] *= 0.94;
   mem.habits[o + i] += 1;
+  if (ctx === HB_NEUTRAL) {
+    const n = mem.matchNeutral;
+    for (let k = 0; k < HB_WIDTH; k++) n[k] *= 0.94;
+    n[i] += 1;
+  }
+}
+
+/**
+ * Passivity seen in this match alone, for the passive-kill terms (the ledge push, the respawn
+ * wait): they change how we play, so they follow what this opponent does now, not a profile.
+ */
+function matchPassivity(mem: AmMem): number {
+  const n = mem.matchNeutral;
+  let sum = 0;
+  for (let k = 0; k < HB_WIDTH; k++) sum += n[k];
+  return sum > 0 ? n[3] / sum : 0;
 }
 
 function observe(state: GameState, meI: number, oppI: number, mem: AmMem): void {
@@ -3186,6 +3433,7 @@ function observe(state: GameState, meI: number, oppI: number, mem: AmMem): void 
   // starting an attack, a grab, a shield or a dodge counts as one "nothing" answer, so a player who
   // stands there (or a dummy that only walks) is read as passive within a few seconds and the
   // attacking and shielding reply models stop vetoing the kill moves that would work on it.
+  mem.oppShieldRun = act === 'shield' || act === 'shieldStun' ? mem.oppShieldRun + 1 : 0;
   if (neutralFree(o)) {
     mem.oppIdleRun++;
     if (mem.oppIdleRun % IDLE_BUMP === 0) bump(mem, HB_NEUTRAL, 3);
@@ -3302,6 +3550,36 @@ function nearestOpp(state: GameState, meI: number): number {
   return best;
 }
 
+let teamTargeting = true;
+/**
+ * On (the default): with three or more fighters the opponent is the TeamTargeter's pick (src/ai/
+ * targets.ts: never a teammate, exposed and kill-range opponents first, load shared with teammates,
+ * converging on a kill). Off: the nearest opponent, as Aevalmere shipped before the new engine.
+ * A two-fighter match always takes the nearest opponent (the targeter's pick there is the same).
+ */
+export function setAevalmereTeamTargeting(on: boolean): void { teamTargeting = on; }
+
+/**
+ * An opponent this close (|dx| + |dy|, px) is planned against whatever the targeter prefers: it is
+ * the one that can hit us next. Same rule and value as the search engine (brain.ts CONTACT_RANGE).
+ */
+const CONTACT_RANGE = 120;
+
+/**
+ * The opponent to plan against: the targeter's pick, unless the nearest opponent is inside
+ * CONTACT_RANGE; the nearest when the targeter has none (every opponent dead or respawning).
+ */
+function pickOpp(state: GameState, meI: number, mem: AmMem): number {
+  const near = nearestOpp(state, meI);
+  if (!teamTargeting || warming || state.fighters.length <= 2) return near;
+  if (mem.targeter === null) mem.targeter = createTargeter();
+  const i = mem.targeter.pick(state, meI, state.frame);
+  if (i < 0 || i === near || near < 0) return i >= 0 ? i : near;
+  const me = state.fighters[meI], o = state.fighters[near];
+  if (o.action !== 'dead' && Math.abs(o.x - me.x) + Math.abs(o.y - me.y) < CONTACT_RANGE) return near;
+  return i;
+}
+
 /** Predicted frames until our tumble lands, stepping a copy of the real state, or -1. */
 function tumbleLandIn(state: GameState, meI: number, work: GameState, mem: AmMem): number {
   copyGameStateInto(state, work);
@@ -3353,6 +3631,10 @@ export function warmAevalmere(config: MatchConfig): void {
   if (config === warmedConfig) return;
   warmedConfig = config;
   buildComboTable(config.stageId);
+  // The targeter reads every fighter's AI profile; derive them now rather than on frame 0.
+  if (teamTargeting && config.players.length > 2) {
+    for (let i = 0; i < config.players.length; i++) profileFor(config.players[i].charId, config.stageId);
+  }
   const players: MatchConfig['players'] = [];
   for (let i = 0; i < config.players.length; i++) {
     const p = config.players[i];
@@ -3425,6 +3707,7 @@ export function aevalmereInput(state: GameState, slot: number, rand: () => numbe
   const work = (mem.work as Scratch).st;
   snapshot(state, mem);
   cSi = stageInfo(state.stageId);
+  cStageId = state.stageId;
   const me = state.fighters[meI];
   if (newMatch) startPredictors(state, meI, mem);
   // Watch every enemy, every frame, whatever we are doing (E2).
@@ -3440,7 +3723,7 @@ export function aevalmereInput(state: GameState, slot: number, rand: () => numbe
   if (koSeen) saveProfiles(mem);
 
   if (me.stocks <= 0 || me.action === 'dead') { mem.plan = -1; return finish(mem, state, out, 0, 0); }
-  const oppI = nearestOpp(state, meI);
+  const oppI = pickOpp(state, meI, mem);
   if (oppI >= 0) observe(state, meI, oppI, mem);
 
   // Stall clock: no damage anywhere on the stage for a while makes closing distance worth more.
@@ -3547,6 +3830,11 @@ export function aevalmereInput(state: GameState, slot: number, rand: () => numbe
     if (need) mem.lastSig = sig;
   }
 
+  // Shield camping: an opponent that has sat in its shield SHIELD_CAMP frames is grabbed. Shots break
+  // on the shield and every hit into it is shield damage at best; the grab is the answer and needs
+  // no search (the reply models would weigh an out-of-shield punish the camper never throws).
+  if (forced < 0 && need && oppI >= 0 && mem.oppShieldRun >= SHIELD_CAMP && me.onGround && o.onGround &&
+      Math.abs(o.y - me.y) < 20 && Math.abs(o.x - me.x) < 300 && actionableNow(me)) forced = P_RUN_GRAB;
   if (forced >= 0) {
     mem.plan = forced; mem.planT = 0; mem.lastDecide = state.frame;
     mem.planDir = o.x >= me.x ? 1 : -1;
@@ -3562,6 +3850,8 @@ export function aevalmereInput(state: GameState, slot: number, rand: () => numbe
     cFireAt = state.frame + (po.action === 'ledgeHang' ? po.invuln : 0);
     const bm = P.fighters[meI];
     base.myPct = bm.percent; base.oppPct = po.percent; base.myStocks = bm.stocks; base.oppStocks = po.stocks;
+    base.oBroken = po.action === 'shieldBreak';
+    cPassive = matchPassivity(mem);
     const pred = mem.preds[po.slot];
     const hiD = (((state.frame - AEVALMERE_REACT) % HIST) + HIST) % HIST;
     if (state.frame >= AEVALMERE_REACT && mem.histFrame[hiD] === state.frame - AEVALMERE_REACT) {
@@ -3590,6 +3880,12 @@ export function aevalmereInput(state: GameState, slot: number, rand: () => numbe
     cEdgeX = mem.planEdge;
     cFireAt = mem.planFire;
     cFrame = state.frame;
+    cOpp = null;
+    if (oppI >= 0) {
+      const hi = (((state.frame - AEVALMERE_REACT) % HIST) + HIST) % HIST;
+      const seen = state.frame >= AEVALMERE_REACT && mem.histFrame[hi] === state.frame - AEVALMERE_REACT;
+      cOpp = seen ? mem.hist[hi].st.fighters[oppI] : state.fighters[oppI];
+    }
     planStep(mem.plan, mem.planT, me);
     held = sHeld;
     direct = sDirect;

@@ -9,13 +9,20 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.server.json",
     "test:sim": "npx --yes tsx src/sim/selftest.ts",
+    "test:ai": "npx --yes tsx src/ai/eval/main.ts --tier fast",
+    "test:ai:full": "npx --yes tsx src/ai/eval/main.ts --tier full",
+    "test:ai:god": "npx --yes tsx src/ai/eval/main.ts --tier god",
+    "test:ai:legacy": "npx --yes tsx src/ai/aitest.ts",
+    "test:ai:ladder": "npx --yes tsx src/ai/eval/main.ts --tier fast --only mono,at,au,bb,bb.order,perf,team.mate,ffa.focus",
+    "diag:cpu": "npx --yes tsx src/ai/eval/diag/strength.ts",
     "calibrate": "npx --yes tsx src/sim/calibrate.ts",
     "lan": "npx --yes tsx server/lan.ts",
     "test:net": "npx --yes tsx --expose-gc src/net/nettest.ts",
     "test:discovery": "npx --yes tsx src/net/discoverytest.ts",
     "test:lobby": "npx --yes tsx server/lobbytest.ts",
     "test:lobbycore": "npx --yes tsx src/net/lobbycoretest.ts",
-    "test:signal": "npx --yes tsx src/net/sdpcodetest.ts"
+    "test:signal": "npx --yes tsx src/net/sdpcodetest.ts && npx --yes tsx src/net/signaltest.ts",
+    "rendezvous": "npx --yes tsx server/rendezvous/node.ts"
   },
   "devDependencies": {
     "@types/ws": "^8.18.1",
