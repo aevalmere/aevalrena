@@ -18,7 +18,8 @@ const DIR_BUTTONS = [12, 13, 14, 15];
 
 /**
  * Buttons that dispatch a key once per press. B0 Cross/A, B1 Circle/B, B9 Options/Menu,
- * B2 Square/X (KeyN: edit name on Character Select), B3 Triangle/Y (KeyT: team colour).
+ * B2 Square/X (KeyN: edit name on Character Select), B3 Triangle/Y (KeyT: team colour),
+ * B4 / B5 L1 / R1 (BracketLeft / BracketRight: outfit colour variant on Character Select).
  */
 const BUTTON_MAP: { button: number; code: string }[] = [
   { button: 0, code: 'Enter' },
@@ -26,6 +27,8 @@ const BUTTON_MAP: { button: number; code: string }[] = [
   { button: 9, code: 'Escape' },
   { button: 2, code: 'KeyN' },
   { button: 3, code: 'KeyT' },
+  { button: 4, code: 'BracketLeft' },
+  { button: 5, code: 'BracketRight' },
 ];
 
 interface PadNavState {

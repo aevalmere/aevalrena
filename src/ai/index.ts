@@ -1476,8 +1476,9 @@ function survivalDi(prof: CpuProfile, rand: () => number, me: FighterState, mem:
 /**
  * A CPU can't reach an opponent hanging, climbing or rolling off a ledge by walking toward their
  * real (off-stage) position, and must never dash there. Treat the ledge as if the opponent stood
- * 24 px inward, walk over, and stop 30 px short of the edge. Once in range, poke with dtilt, or
- * with an armed forward smash toward the edge when the profile says the read is worth it.
+ * 24 px inward, walk over, and stop 30 px short of the edge. A hanging opponent is out of reach of
+ * everything but the down attacks (SPEC 4.5, `hitsLedge`), so against one the CPU walks in to
+ * LEDGE_HANG_SPOT and uses dtilt or dsmash, timed for the end of the ledge invincibility.
  */
 function ledgeApproach(
   prof: CpuProfile, rand: () => number, opp: FighterState, mem: CpuMem, me: FighterState,
@@ -1486,6 +1487,8 @@ function ledgeApproach(
   const towardEdgeBit = inward === 1 ? Btn.Left : Btn.Right;
   const stageBit = inward === 1 ? Btn.Right : Btn.Left;
   const distInward = (me.x - cornerX) * inward;
+
+  if (opp.action === 'ledgeHang') return ledgeHangPunish(prof, rand, opp, mem, me, distInward, towardEdgeBit, stageBit);
 
   // Ledge trap standoff. Disciplined profiles wait outside the ledge attack's reach instead of
   // walking into it; the rest still crowd the edge the way they always did.
@@ -1502,12 +1505,6 @@ function ledgeApproach(
     return 0;
   }
 
-  // A hanging opponent is the longest guaranteed opening there is, and their ledge invincibility
-  // is exactly the time a charge wants: hold it and let go as they come up.
-  if (opp.action === 'ledgeHang' && rand() < prof.smashAccuracy) {
-    return chargeSmashFor(prof, rand, mem, SMASH_STARTUP + CHARGE_FRAMES + 2, towardEdgeBit);
-  }
-
   // Cover the get-up options rather than guessing. A ledge roll comes up behind us, which only a
   // down smash covers; a climb comes up in front, into a forward smash.
   if (opp.action === 'ledgeRoll') {
@@ -1521,6 +1518,46 @@ function ledgeApproach(
 
   if (opp.percent > 80 && opp.invuln === 0 && rand() < prof.smashAccuracy) {
     return queueSmash(mem, towardEdgeBit);
+  }
+  return armTilt(mem, Btn.Down);
+}
+
+/**
+ * Where to stand to hit a ledge hanger, in px inward of the corner. The hang hurtbox hangs from
+ * 2 px under the lip, 13 px either side of the corner: dtilt's circle (x 10, r 9 at the feet)
+ * reaches it from inside 29 px and dsmash's (x 18, r 14) from inside 42, so 16 px covers both.
+ */
+const LEDGE_HANG_SPOT = 16;
+/** Startups of the two down attacks that reach a hanger, for timing them past the invincibility. */
+const DTILT_STARTUP = 5;
+const DSMASH_STARTUP = 12;
+
+function ledgeHangPunish(
+  prof: CpuProfile, rand: () => number, opp: FighterState, mem: CpuMem, me: FighterState,
+  distInward: number, towardEdgeBit: number, stageBit: number,
+): number {
+  // Disciplined profiles wait out the ledge invincibility beyond the ledge attack's reach and only
+  // step in when a swing would land; the rest walk straight to the spot.
+  const waitOut = prof.spacing > 0.4 && opp.invuln > DSMASH_STARTUP + 10;
+  const spot = waitOut ? LEDGE_TRAP : LEDGE_HANG_SPOT;
+  if (distInward > spot + 4) {
+    mem.dirHeld = towardEdgeBit | Btn.Walk;
+    return 0;
+  }
+  if (distInward < 4) {
+    mem.dirHeld = stageBit | Btn.Walk;
+    return 0;
+  }
+  mem.dirHeld = 0;
+  if (waitOut) return 0;
+  // A dsmash hits on both sides, so the facing does not matter; dtilt only reaches forward.
+  if (opp.invuln <= DSMASH_STARTUP && (opp.percent > 60 || rand() < 0.35 + 0.65 * prof.smashAccuracy)) {
+    return queueSmash(mem, Btn.Down);
+  }
+  if (opp.invuln > DTILT_STARTUP) return 0;
+  if (me.facing !== (towardEdgeBit === Btn.Right ? 1 : -1)) {
+    mem.dirHeld = towardEdgeBit | Btn.Walk;
+    return 0;
   }
   return armTilt(mem, Btn.Down);
 }
@@ -2571,7 +2608,8 @@ function decide(state: GameState, slot: number, prof: CpuProfile, rand: () => nu
         mem.dodgeCd = DODGE_COOLDOWN;
         return Btn.Dodge;
       }
-      return Btn.Up;
+      // A held direction never climbs; the Jump button is the plain get-up.
+      return Btn.Jump;
     }
     return 0;
   }
@@ -2625,6 +2663,14 @@ function decide(state: GameState, slot: number, prof: CpuProfile, rand: () => nu
   // Recovery above runs with or without a live opponent; there is nothing left
   // to chase once every other fighter is out or waiting to respawn.
   if (!opp) { mem.dirHeld = 0; mem.egPhase = 0; return 0; }
+
+  // Helpless over the stage: drift toward the middle. Chasing an opponent on the ledge from here
+  // drifts off the lip with no way back, since the ledge it would snap to is taken.
+  if (me.action === 'airHelpless') {
+    const center = (ground.minX + ground.maxX) / 2;
+    mem.dirHeld = me.x < center ? Btn.Right : Btn.Left;
+    return 0;
+  }
 
   if (me.onGround && opp.ledge >= 0 &&
       (opp.action === 'ledgeHang' || opp.action === 'ledgeClimb' || opp.action === 'ledgeRoll')) {

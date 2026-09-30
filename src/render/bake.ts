@@ -1,5 +1,6 @@
 import type { ImageSheetData } from '../core/types';
 import { WHITE } from './colors';
+import { remapPixels } from './palette';
 
 /**
  * Sprite baker. A character ships one packed PNG atlas; at load we decode it
@@ -300,6 +301,41 @@ export async function bakeSheet(
     frames.set(frameName, { variants, outlines, ax, ay, w });
   }
   sheets.set(sheetId, frames);
+}
+
+/** True once `sheetId` has been baked. */
+export function hasSheet(sheetId: string): boolean {
+  return sheets.has(sheetId);
+}
+
+/**
+ * Colour variant of an already baked sheet (src/render/palette.ts): every frame's pixels
+ * read back from the base bake, remapped, and stored under `variantId`. The white hit-flash
+ * silhouettes and any outline rings do not depend on the palette, so they are shared with the
+ * base sheet. Synchronous and run once per variant in use; a match with only the base colour
+ * never calls it. Returns false when the base sheet is not baked.
+ */
+export function bakeVariantSheet(baseId: string, variantId: string, variant: number): boolean {
+  if (sheets.has(variantId)) return true;
+  const base = sheets.get(baseId);
+  if (base === undefined) return false;
+  const frames = new Map<string, FrameEntry>();
+  for (const [frameName, entry] of base) {
+    const src = entry.variants[0];
+    if (src === null) continue;
+    const w = src.width;
+    const h = src.height;
+    const pixels = context2d(src).getImageData(0, 0, w, h).data;
+    remapPixels(pixels, variant);
+    const variants: (HTMLCanvasElement | null)[] = new Array(VARIANT_COUNT).fill(null);
+    variants[0] = canvasFrom(pixels, w, h);
+    variants[VARIANT_FLIP] = canvasFrom(mirrored(pixels, w, h), w, h);
+    variants[VARIANT_WHITE] = entry.variants[VARIANT_WHITE];
+    variants[VARIANT_WHITE | VARIANT_FLIP] = entry.variants[VARIANT_WHITE | VARIANT_FLIP];
+    frames.set(frameName, { variants, outlines: entry.outlines, ax: entry.ax, ay: entry.ay, w: entry.w });
+  }
+  sheets.set(variantId, frames);
+  return true;
 }
 
 export function getFrame(

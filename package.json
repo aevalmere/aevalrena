@@ -13,7 +13,9 @@
     "lan": "npx --yes tsx server/lan.ts",
     "test:net": "npx --yes tsx --expose-gc src/net/nettest.ts",
     "test:discovery": "npx --yes tsx src/net/discoverytest.ts",
-    "test:lobby": "npx --yes tsx server/lobbytest.ts"
+    "test:lobby": "npx --yes tsx server/lobbytest.ts",
+    "test:lobbycore": "npx --yes tsx src/net/lobbycoretest.ts",
+    "test:signal": "npx --yes tsx src/net/sdpcodetest.ts"
   },
   "devDependencies": {
     "@types/ws": "^8.18.1",

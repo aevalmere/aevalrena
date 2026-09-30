@@ -1,4 +1,5 @@
 import type { Facing } from '../core/types';
+import { VARIANT_COUNT, variantTable } from './palette';
 
 /**
  * Fixed particle pool, structs of arrays. Nothing is allocated after creation.
@@ -21,6 +22,16 @@ const TYPE_COUNT = 8;
 const TYPE_COLOR: readonly string[] = [
   '#b8e3ff', '#f0ead6', '#c9d1e0', '#7fb2ff', '#9aa5b8', '#6e7a94', '#7fb2ff', '#b8e3ff',
 ];
+/**
+ * TYPE_COLOR per colour variant, [variant][type], built once: water sparks, droplets and the KO
+ * ring take the colour of the fighter they came from. Grey dust stays grey through the remap.
+ */
+const TYPE_COLOR_BY_VARIANT: readonly (readonly string[])[] = (() => {
+  const perType = TYPE_COLOR.map((c) => variantTable(c));
+  const out: string[][] = [];
+  for (let v = 0; v < VARIANT_COUNT; v++) out.push(perType.map((t) => t[v]));
+  return out;
+})();
 const TYPE_SIZE = new Uint8Array([2, 1, 3, 2, 2, 1, 2, 1]);
 const TYPE_GRAVITY = new Float32Array([0.05, 0.05, 0.02, 0.02, -0.012, 0, 0.11, 0.11]);
 const TYPE_DRAG = new Float32Array([0.94, 0.94, 0.97, 0.97, 0.9, 0.88, 0.99, 0.99]);
@@ -32,6 +43,8 @@ export interface ParticlePool {
   vy: Float32Array;
   life: Float32Array;
   kind: Uint8Array;
+  /** Colour variant per particle (src/render/palette.ts). */
+  tint: Uint8Array;
   cursor: number;
   seed: number;
 }
@@ -44,6 +57,7 @@ export function createParticles(): ParticlePool {
     vy: new Float32Array(POOL_SIZE),
     life: new Float32Array(POOL_SIZE),
     kind: new Uint8Array(POOL_SIZE),
+    tint: new Uint8Array(POOL_SIZE),
     cursor: 0,
     seed: 0x9e3779b9,
   };
@@ -75,7 +89,8 @@ function emit(
   y: number,
   vx: number,
   vy: number,
-  life: number
+  life: number,
+  variant: number
 ): void {
   const i = pool.cursor;
   pool.cursor = (i + 1) % POOL_SIZE;
@@ -85,9 +100,10 @@ function emit(
   pool.vy[i] = vy;
   pool.life[i] = life;
   pool.kind[i] = kind;
+  pool.tint[i] = variant > 0 && variant < VARIANT_COUNT ? variant : 0;
 }
 
-export function spawnHitSparks(pool: ParticlePool, x: number, y: number, damage: number): void {
+export function spawnHitSparks(pool: ParticlePool, x: number, y: number, damage: number, variant = 0): void {
   const count = 4 + Math.min(10, Math.floor(damage));
   for (let i = 0; i < count; i++) {
     const speed = 0.8 + rand(pool) * 2.2;
@@ -99,12 +115,13 @@ export function spawnHitSparks(pool: ParticlePool, x: number, y: number, damage:
       y,
       Math.cos(a) * speed,
       Math.sin(a) * speed,
-      10 + rand(pool) * 10
+      10 + rand(pool) * 10,
+      variant
     );
   }
 }
 
-export function spawnKoBurst(pool: ParticlePool, x: number, y: number): void {
+export function spawnKoBurst(pool: ParticlePool, x: number, y: number, variant = 0): void {
   for (let i = 0; i < 40; i++) {
     const speed = 1.5 + rand(pool) * 3.5;
     const a = (i / 40) * Math.PI * 2 + spread(pool, 0.1);
@@ -115,7 +132,8 @@ export function spawnKoBurst(pool: ParticlePool, x: number, y: number): void {
       y,
       Math.cos(a) * speed,
       Math.sin(a) * speed,
-      24 + rand(pool) * 16
+      24 + rand(pool) * 16,
+      variant
     );
   }
 }
@@ -131,7 +149,8 @@ export function spawnLandDust(pool: ParticlePool, x: number, y: number, hard: bo
       y - rand(pool) * 2,
       dir * (0.5 + rand(pool) * (hard ? 1.6 : 0.8)),
       -rand(pool) * 0.5,
-      12 + rand(pool) * 10
+      12 + rand(pool) * 10,
+      0
     );
   }
 }
@@ -145,12 +164,13 @@ export function spawnDashDust(pool: ParticlePool, x: number, y: number, facing: 
       y - rand(pool) * 3,
       -facing * (0.4 + rand(pool) * 1.2),
       -rand(pool) * 0.4,
-      10 + rand(pool) * 8
+      10 + rand(pool) * 8,
+      0
     );
   }
 }
 
-export function spawnDroplets(pool: ParticlePool, x: number, y: number, count: number): void {
+export function spawnDroplets(pool: ParticlePool, x: number, y: number, count: number, variant = 0): void {
   for (let i = 0; i < count; i++) {
     emit(
       pool,
@@ -159,7 +179,8 @@ export function spawnDroplets(pool: ParticlePool, x: number, y: number, count: n
       y + spread(pool, 5),
       spread(pool, 1.4),
       -rand(pool) * 1.6,
-      16 + rand(pool) * 14
+      16 + rand(pool) * 14,
+      variant
     );
   }
 }
@@ -187,17 +208,21 @@ function stepOnce(pool: ParticlePool): void {
   }
 }
 
-/** Draw in world space, grouped by type so fillStyle changes at most once per type. */
+/**
+ * Draw in world space, grouped by type. fillStyle changes once per type, plus once more each
+ * time the colour variant changes inside a type (only when fighters in different colours are
+ * spraying at once). Colours come from a prebuilt table, so nothing is allocated.
+ */
 export function drawParticles(ctx: CanvasRenderingContext2D, pool: ParticlePool): void {
-  const { x, y, life, kind } = pool;
+  const { x, y, life, kind, tint } = pool;
   for (let k = 0; k < TYPE_COUNT; k++) {
-    let styled = false;
+    let styled = -1;
     const size = TYPE_SIZE[k];
     for (let i = 0; i < POOL_SIZE; i++) {
       if (life[i] <= 0 || kind[i] !== k) continue;
-      if (!styled) {
-        ctx.fillStyle = TYPE_COLOR[k];
-        styled = true;
+      if (tint[i] !== styled) {
+        styled = tint[i];
+        ctx.fillStyle = TYPE_COLOR_BY_VARIANT[styled][k];
       }
       ctx.fillRect(Math.round(x[i]), Math.round(y[i]), size, size);
     }

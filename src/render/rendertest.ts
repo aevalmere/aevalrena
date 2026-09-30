@@ -3,6 +3,7 @@ import type { GameState, MatchConfig, PerfSample, SimEvent } from '../core/types
 import { frameNameFor } from './anim';
 import { getFrame } from './bake';
 import { createRenderer } from './index';
+import { VARIANT_COUNT, VARIANT_NAMES, remapRgb, rgbToHsl } from './palette';
 import { getCharVisual } from './visuals';
 
 /**
@@ -157,6 +158,10 @@ class FakeContext {
     return { data: new Uint8ClampedArray(w * h * 4) };
   }
 
+  createImageData(w: number, h: number): { data: Uint8ClampedArray } {
+    return { data: new Uint8ClampedArray(w * h * 4) };
+  }
+
   beginPath(): void {}
   arc(): void {}
   fill(): void {}
@@ -275,7 +280,7 @@ function hitEvent(victim: number): SimEvent {
 /** Body canvas the renderer would pick for a fighter, normal or white silhouette. */
 function bodyCanvasFor(state: GameState, index: number, white: boolean): object | null {
   const fighter = state.fighters[index];
-  const visual = getCharVisual(fighter.charId);
+  const visual = getCharVisual(fighter.charId, fighter.variant);
   if (visual === null) return null;
   const name = frameNameFor(visual.sprites, fighter);
   if (name === null) return null;
@@ -317,6 +322,58 @@ function copyLog(log: CallLog): CallLog {
   for (let i = 0; i < log.scales.length; i++) copy.scales.push(log.scales[i]);
   for (let i = 0; i < log.transforms.length; i++) copy.transforms.push(log.transforms[i]);
   return copy;
+}
+
+// ---------------- colour variants ----------------
+
+/** Target band per variant for a sample blue pixel: [hue min, hue max, sat max] (-1 = any hue). */
+const VARIANT_BANDS: readonly [number, number, number][] = [
+  [200, 215, 1],   // blue: unchanged
+  [275, 285, 1],   // purple
+  [-1, -1, 0.12],  // white: near zero saturation
+  [335, 345, 1],   // pink
+];
+
+/**
+ * The bake-time remap (src/render/palette.ts): a near-black outline pixel never moves, and a
+ * sample of Aeval's water blue lands in each variant's hue band (white: desaturated and lighter,
+ * not flattened to pure white).
+ */
+export function paletteChecks(): RenderTestResult[] {
+  const out: RenderTestResult[] = [];
+  const rgb = [0, 0, 0];
+  const hsl = [0, 0, 0];
+  // The sheet's commonest outline colour, and a saturated navy that is still near black.
+  const darks: [number, number, number][] = [[0x1b, 0x19, 0x2b], [0x0a, 0x10, 0x30]];
+  let darkOk = true;
+  for (const dark of darks) {
+    for (let v = 0; v < VARIANT_COUNT; v++) {
+      remapRgb(dark[0], dark[1], dark[2], v, rgb);
+      if (rgb[0] !== dark[0] || rgb[1] !== dark[1] || rgb[2] !== dark[2]) darkOk = false;
+    }
+  }
+  out.push({
+    name: 'colour variants leave near-black outline pixels unchanged',
+    pass: darkOk,
+    detail: '#1b192b and #0a1030 through all ' + VARIANT_COUNT + ' variants',
+  });
+  const blue: [number, number, number] = [0x3f, 0x8f, 0xe6];
+  rgbToHsl(blue[0], blue[1], blue[2], hsl);
+  const baseL = hsl[2];
+  for (let v = 0; v < VARIANT_COUNT; v++) {
+    remapRgb(blue[0], blue[1], blue[2], v, rgb);
+    rgbToHsl(rgb[0], rgb[1], rgb[2], hsl);
+    const band = VARIANT_BANDS[v];
+    const hueOk = band[0] < 0 || (hsl[0] >= band[0] && hsl[0] <= band[1]);
+    const satOk = hsl[1] <= band[2];
+    const whiteOk = band[0] >= 0 || (hsl[2] > baseL && hsl[2] < 0.97);
+    out.push({
+      name: 'sample blue remaps into the ' + VARIANT_NAMES[v].toLowerCase() + ' band',
+      pass: hueOk && satOk && whiteOk,
+      detail: 'hue ' + hsl[0].toFixed(1) + ' sat ' + hsl[1].toFixed(2) + ' light ' + hsl[2].toFixed(2),
+    });
+  }
+  return out;
 }
 
 // ---------------- the test ----------------
@@ -389,6 +446,13 @@ export async function runRenderTest(): Promise<RenderTestResult[]> {
   }
   const zoomMax = TUNING.camera.zoomMax;
 
+  // Colour variant: the same fighter in purple draws a canvas from its own lazily baked sheet.
+  const baseBody = bodyCanvasFor(state, 1, false);
+  state.fighters[1].variant = 1;
+  const tinted = renderFrame(lastFrame + 1, noEvents);
+  const purpleBody = bodyCanvasFor(state, 1, false);
+  state.fighters[1].variant = 0;
+
   return [
     {
       name: 'screen shake fires on the hit frame and decays to zero',
@@ -417,6 +481,11 @@ export async function runRenderTest(): Promise<RenderTestResult[]> {
         repeat.fillRects + ' on the repeat render',
     },
     {
+      name: 'a fighter in a colour variant draws its variant sheet',
+      pass: purpleBody !== null && purpleBody !== baseBody && drewCanvas(tinted, purpleBody) && !drewCanvas(tinted, baseBody),
+      detail: 'variant canvas drawn: ' + drewCanvas(tinted, purpleBody) + ', base canvas drawn: ' + drewCanvas(tinted, baseBody),
+    },
+    {
       name: 'parallax layers scale with camera zoom',
       pass: baseline.scales.length > 0 && Math.abs(zoomScale - zoomMax) < 1e-6,
       detail:
@@ -426,7 +495,7 @@ export async function runRenderTest(): Promise<RenderTestResult[]> {
 }
 
 if (typeof process !== 'undefined' && process.argv[1] && process.argv[1].endsWith('rendertest.ts')) {
-  const results = await runRenderTest();
+  const results = [...paletteChecks(), ...(await runRenderTest())];
   let passed = 0;
   for (let i = 0; i < results.length; i++) {
     const r = results[i];

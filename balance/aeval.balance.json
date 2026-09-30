@@ -80,18 +80,19 @@
     },
     "utilt": {
       "damage": 7,
-      "startup": 6,
+      "startup": 10,
       "active": [
-        6,
-        11
+        10,
+        15
       ],
-      "total": 24,
-      "iasa": 20,
+      "total": 30,
+      "iasa": 26,
       "angle": 90,
       "bkb": 37,
       "kbg": 90,
       "role": "anti-air",
-      "animation": "utilt"
+      "animation": "utilt",
+      "change_2026_09_29": "startup 6 to 10, total 24 to 30: the anti-air was too fast to challenge from above; anim holds moved so the javelin frame starts on frame 10"
     },
     "dtilt": {
       "damage": 6,
@@ -106,7 +107,8 @@
       "bkb": 34,
       "kbg": 95,
       "role": "combo starter at low percent",
-      "animation": "dtilt"
+      "animation": "dtilt",
+      "hitsLedge": true
     },
     "dashatk": {
       "damage": 9,
@@ -141,18 +143,19 @@
     },
     "usmash": {
       "damage": 14,
-      "startup": 12,
+      "startup": 16,
       "active": [
-        12,
-        18
+        16,
+        22
       ],
-      "total": 40,
+      "total": 46,
       "angle": 88,
       "bkb": 30,
       "kbg": 74,
       "chargeable": true,
       "role": "anti-air kill",
-      "animation": "usmash"
+      "animation": "usmash",
+      "change_2026_09_29": "startup 12 to 16, total 40 to 46: a kill move that also covered landings on reaction; anim holds moved to match"
     },
     "dsmash": {
       "damage": 12,
@@ -167,25 +170,45 @@
       "kbg": 52,
       "chargeable": true,
       "role": "ledge and crossup coverage",
-      "animation": "dsmash"
+      "animation": "dsmash",
+      "hitsLedge": true
     },
     "nair": {
-      "damage": 7,
-      "startup": 5,
+      "damage": 8,
+      "startup": 3,
       "active": [
-        5,
-        22
+        3,
+        20
       ],
-      "total": 34,
-      "landingLag": 8,
-      "angle": 60,
-      "bkb": 21,
-      "kbg": 63,
-      "role": "defensive bubble and combo bridge",
-      "animation": "nair"
+      "total": 30,
+      "landingLag": 5,
+      "angle": 70,
+      "bkb": 20,
+      "kbg": 50,
+      "role": "fast body-centred bubble and combo bridge into tilts",
+      "animation": "nair",
+      "late": {
+        "active": [
+          7,
+          20
+        ],
+        "damage": 5,
+        "angle": 60,
+        "bkb": 12,
+        "kbg": 40
+      },
+      "radius": {
+        "clean": 22,
+        "late": 20,
+        "centre": [
+          0,
+          -20
+        ]
+      },
+      "change_2026_09_29": "startup 5 to 3, clean 3-6 then weaker late hit to 20, r 16 at x 6 to r 22 at the body centre, landing lag 8 to 5, lower knockback: it was too slow and too small to be an out of shield or combo tool"
     },
     "fair": {
-      "damage": 10,
+      "damage": 11.5,
       "startup": 9,
       "active": [
         9,
@@ -197,10 +220,12 @@
       "bkb": 18,
       "kbg": 54,
       "role": "main aerial spacer",
-      "animation": "fair"
+      "animation": "fair",
+      "reach": 41,
+      "change_2026_09_29": "damage 10 to 11.5, reach 35 to 41 (tip circle added): the main spacer lost too many trades at its own range"
     },
     "bair": {
-      "damage": 11,
+      "damage": 12.5,
       "startup": 7,
       "active": [
         7,
@@ -212,22 +237,26 @@
       "bkb": 21,
       "kbg": 56,
       "role": "strong retreating aerial",
-      "animation": "bair"
+      "animation": "bair",
+      "reach": 41,
+      "change_2026_09_29": "damage 11 to 12.5, reach 34 to 41 (tip circle added): the retreating aerial should win at the range it is thrown from"
     },
     "uair": {
-      "damage": 9,
-      "startup": 8,
+      "damage": 8,
+      "startup": 10,
       "active": [
-        8,
-        12
+        10,
+        14
       ],
-      "total": 30,
-      "landingLag": 11,
+      "total": 33,
+      "landingLag": 12,
       "angle": 85,
       "bkb": 26,
       "kbg": 79,
       "role": "juggle",
-      "animation": "uair"
+      "animation": "uair",
+      "reachTopY": -110,
+      "change_2026_09_29": "damage 9 to 8, startup 8 to 10, total 30 to 33, landing lag 11 to 12, javelin top -114 to -110: juggles were too safe and rewarding"
     },
     "dair": {
       "damage": 12,
@@ -242,23 +271,31 @@
       "bkb": 30,
       "kbg": 85,
       "role": "commitment spike",
-      "animation": "dair"
+      "animation": "dair",
+      "hitsLedge": true,
+      "bounceOnHit": {
+        "vy": -3.5,
+        "actionableIn": 10,
+        "restoresAirDodge": true,
+        "restoresDoubleJump": false
+      },
+      "change_2026_09_29": "bounces on a body hit like the SSBU dair hop: vy -3.5 (short hop), air dodge back, actionable 10 frames after hitlag instead of 20 more move frames"
     },
     "nspecial": {
       "damage": 4,
-      "startup": 11,
+      "startup": 9,
       "projectile": "orb",
       "projectileSpeed": 3.5,
       "lifetime": 48,
       "role": "slow durable zoning",
       "animation": "nspecial",
-      "total": 40,
+      "total": 31,
       "bkb": 14,
       "kbg": 30,
       "radius": 8,
       "charged": {
-        "startup": 27,
-        "total": 56,
+        "startup": 21,
+        "total": 43,
         "projectileSpeed": 9.5,
         "lifetime": 34,
         "damage": 16,
@@ -267,7 +304,7 @@
         "radius": 12,
         "strength": 10
       },
-      "chargeCastFrames": 16,
+      "chargeCastFrames": 12,
       "strength": 2,
       "burstStrength": {
         "tap": 2,
@@ -278,7 +315,9 @@
       "burstDamage": {
         "tap": 2,
         "full": 8
-      }
+      },
+      "healFraction": 0.35,
+      "change_2026_09_29": "tap cast frame 11 to 9 and move 40 to 31, chargeCastFrames 16 to 12 (full charge fires on 21, was 27; move 43, was 56); charge length unchanged. A direct orb hit heals Aeval 35 percent of the damage dealt, floor 0"
     },
     "sspecial": {
       "damage": 9,

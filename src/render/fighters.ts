@@ -4,7 +4,7 @@ import { MAX_PLAYERS } from '../core/types';
 import type { FighterState, GameState } from '../core/types';
 import { animFrameIndex, pickAnimName } from './anim';
 import { getFrame, getFrameAnchor } from './bake';
-import { GLOW, INK, STONE, STONE_LIGHT, WHITE, slotColor } from './colors';
+import { INK, STONE, STONE_LIGHT, WHITE, glowFor, slotColor } from './colors';
 import { getCharVisual } from './visuals';
 
 /**
@@ -49,7 +49,7 @@ export function drawRespawnPlatforms(
     ctx.fillRect(x, y, RESPAWN_PLAT_W, 2);
     ctx.fillStyle = STONE_LIGHT;
     ctx.fillRect(x + 2, y + 2, RESPAWN_PLAT_W - 4, 1);
-    ctx.fillStyle = GLOW;
+    ctx.fillStyle = glowFor(fighter.variant);
     ctx.fillRect(x + 6, y - 1, RESPAWN_PLAT_W - 12, 1);
   }
 }
@@ -130,7 +130,8 @@ export function resolveFighterFrames(state: GameState, deps: FighterDrawDeps): v
   const count = Math.min(state.fighters.length, deps.frameNames.length);
   for (let i = 0; i < count; i++) {
     const fighter = state.fighters[i];
-    const visual = getCharVisual(fighter.charId);
+    // The body sheet in the fighter's colour variant (baked on first use).
+    const visual = getCharVisual(fighter.charId, fighter.variant);
     if (i < animMirror.length) animMirror[i] = 0;
     deps.sheetIds[i] = visual === null ? '' : visual.bodySheetId;
     deps.frameNames[i] = '';

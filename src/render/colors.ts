@@ -1,5 +1,7 @@
 /** Shared color constants for the renderer. Values come from SPEC sections 6 and 8. */
 
+import { variantTable } from './palette';
+
 export const PLAYER_COLORS: readonly string[] = ['#7fb2ff', '#ff7f7f', '#ffd27f', '#9fff7f'];
 
 export const INK = '#1a1b26';
@@ -8,6 +10,14 @@ export const STONE = '#3a4a6b';
 export const STONE_LIGHT = '#6e7a94';
 export const PALE = '#c9d1e0';
 export const GLOW = '#7fb2ff';
+/** GLOW per colour variant (src/render/palette.ts): charge beads, respawn glow, fallback orb. */
+export const GLOW_VARIANTS: readonly string[] = variantTable(GLOW);
+
+/** GLOW in colour variant `v`; out of range reads as the base blue. */
+export function glowFor(v: number): string {
+  const c = GLOW_VARIANTS[v];
+  return c === undefined ? GLOW : c;
+}
 
 export const WHITE = '#ffffff';
 

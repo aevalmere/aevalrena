@@ -2,7 +2,8 @@
  * What the rollback engine needs from a network: broadcast a packet to every other peer in the
  * match, and hand over whatever arrived since the last call. Ordering and reliability are not
  * assumed (packets repeat unacked inputs). Implementations: the WebSocket relay client below,
- * the fake hub in nettest.ts, and later a WebRTC DataChannel mesh.
+ * the WebRTC and loopback links of the in-browser mode (createLinkTransport in rtc.ts), and the
+ * fake hub in nettest.ts.
  */
 export interface NetTransport {
   send(packet: Uint8Array): void;

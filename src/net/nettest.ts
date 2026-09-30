@@ -44,8 +44,16 @@ function rng(seed: number): () => number {
 }
 
 /**
- * A relay like server/lobbyhost.ts: every packet reaches the relay (TCP) and is logged there,
- * then goes to each other peer after the one-way delay, with jitter, and may be lost on that leg.
+ * A relay like src/net/lobbycore.ts. Two link kinds:
+ *
+ * - 'ws' (the LAN agent): every packet reaches the relay (TCP) and is logged there, then goes to
+ *   each other peer after the one-way delay, with jitter, and may be lost on that leg;
+ * - 'rtc' (the in-browser mode): the relay runs in peer 0's tab, so peer 0's own packets reach it
+ *   at once. A guest's packet crosses the unordered, maxRetransmits 0 data channel twice, guest
+ *   to host (lost there: never logged, never relayed) and host to guest, each leg lossy and
+ *   jittered by up to 3 frames, so packets also arrive out of order. Lobby messages (the
+ *   retirement) use the reliable channel and are not simulated here: the scenario delivers them.
+ *
  * A blocked peer is cut off in both directions and nothing it sends is logged.
  */
 class FakeHub {
@@ -58,7 +66,8 @@ class FakeHub {
   sent = 0;
   dropped = 0;
 
-  constructor(readonly peers: number, readonly delay: number, readonly loss: number, seed: number, private readonly owners: number[]) {
+  constructor(readonly peers: number, readonly delay: number, readonly loss: number, seed: number, private readonly owners: number[],
+    readonly link: 'ws' | 'rtc' = 'ws') {
     this.rand = rng(seed);
     this.log = new InputLog(owners.length);
     for (let i = 0; i < peers; i++) this.inbox.push([]);
@@ -68,12 +77,23 @@ class FakeHub {
     return {
       send: (data: Uint8Array) => {
         if (this.blocked.has(peer)) return;
+        const rtc = this.link === 'rtc';
+        if (rtc && peer !== 0) {
+          // Guest to host leg of the unordered channel.
+          this.sent++;
+          if (this.rand() < this.loss) { this.dropped++; return; }
+        }
         this.log.record(data, (idx) => this.owners[idx] === peer);
         for (let to = 0; to < this.peers; to++) {
           if (to === peer || this.blocked.has(to)) continue;
+          if (rtc && to === 0) {
+            // Arrived at the host tab: its own session reads it after the uplink delay.
+            this.queue.push({ at: this.now + this.delay, to, data: data.slice() });
+            continue;
+          }
           this.sent++;
           if (this.rand() < this.loss) { this.dropped++; continue; }
-          const jitter = this.delay > 0 && this.rand() < 0.2 ? 1 : 0;
+          const jitter = rtc ? Math.floor(this.rand() * 4) : this.delay > 0 && this.rand() < 0.2 ? 1 : 0;
           this.queue.push({ at: this.now + this.delay + jitter, to, data: data.slice() });
         }
       },
@@ -193,6 +213,8 @@ interface Scenario {
   corruptPeer?: number;
   /** Sample heap every N frames (soak). */
   heapEvery?: number;
+  /** 'rtc': the in-browser mode's links (see FakeHub). Default 'ws'. */
+  link?: 'ws' | 'rtc';
 }
 
 interface ScenarioResult {
@@ -235,7 +257,7 @@ function runScenario(sc: Scenario): ScenarioResult {
   const players = sc.owners.length;
   const cpus = sc.cpus ?? [];
   const config = makeConfig(players, cpus, sc.stocks ?? 3);
-  const hub = new FakeHub(sc.peers, sc.delay, sc.loss, sc.seed, sc.owners);
+  const hub = new FakeHub(sc.peers, sc.delay, sc.loss, sc.seed, sc.owners, sc.link ?? 'ws');
   let desyncLog = '';
   const hits: number[] = new Array(sc.peers).fill(0);
   const cpuRng = createRng(0xc0ffee);
@@ -397,6 +419,19 @@ const SCENARIOS: Scenario[] = [
   { name: 'desync control (peer 1 drifts at frame 500)', peers: 2, owners: [0, 1], delay: 2, loss: 0.05, startLag: [0, 0], seed: 5, frames: 900, corruptPeer: 1 },
 ];
 
+/**
+ * The in-browser mode: the same scenarios over the WebRTC-like fake links, with loss on both
+ * legs of the unordered channel and reordering. The reconnect scenario is left out: that mode
+ * has no resume (a reload counts as leaving).
+ */
+const RTC_SCENARIOS: Scenario[] = SCENARIOS
+  .filter((sc) => sc.drop === undefined)
+  .map((sc) => ({ ...sc, name: `rtc: ${sc.name}`, link: 'rtc' as const, seed: sc.seed + 7000 }));
+RTC_SCENARIOS.push({
+  name: 'rtc: 4 peers, 2f one-way, 20% loss per leg of the unordered channel', peers: 4, owners: [0, 1, 2, 3], delay: 2, loss: 0.2,
+  startLag: [0, 1, 2, 4], seed: 2020, frames: 1800, link: 'rtc',
+});
+
 // Tick cost, for the report.
 {
   const s = new RollbackSession({
@@ -484,7 +519,7 @@ for (const [name, check] of [['R13 pending effects stay bounded while hidden', p
   ok = ok && r.pass;
   process.stdout.write(`${r.pass ? 'PASS' : 'FAIL'} ${name}: ${r.detail}\n`);
 }
-for (const sc of SCENARIOS) {
+for (const sc of [...SCENARIOS, ...RTC_SCENARIOS]) {
   const r = runScenario(sc);
   results.push(r);
   ok = ok && r.pass;

@@ -159,6 +159,11 @@ export interface ProjectileDef {
    * Omitted fields keep the base value at every charge. Only a chargeable move charges.
    */
   charged?: { vx?: number; lifetime?: number; damage?: number; bkb?: number; kbg?: number; r?: number; strength?: number };
+  /**
+   * Drain: on a hit that lands on a fighter (not a shield), the owner's percent drops by this
+   * fraction of the damage dealt, floored at 0. Omitted means no heal.
+   */
+  healFraction?: number;
 }
 
 export interface MoveDef {
@@ -182,6 +187,17 @@ export interface MoveDef {
   helplessAfter?: boolean;  // up-special: fall helpless when done in air
   airOnly?: boolean;
   groundOnly?: boolean;
+  /**
+   * Hits a fighter hanging on a ledge. Only down attacks set it; every other melee hitbox
+   * passes over a ledge hanger. Projectiles ignore it and use the hurtbox overlap alone.
+   */
+  hitsLedge?: boolean;
+  /**
+   * Bounce on hit (the dair hop): when a hitbox of this move lands on a fighter (not a shield),
+   * the attacker's vy is set to `vy` (negative is up), a fast fall is cancelled, the air dodge
+   * comes back (the double jump does not) and the move ends `actionableIn` frames later.
+   */
+  bounceOnHit?: { vy: number; actionableIn: number };
 }
 
 export type ThrowId = 'fthrow' | 'bthrow' | 'uthrow' | 'dthrow';
@@ -377,6 +393,8 @@ export interface FighterState {
   fsMeter: number;               // 0..FS_METER.max, public so the HUD can draw it
   /** Match records for the results screen. Sim-owned, deterministic, cloned with the state. */
   stats: FighterStats;
+  /** Colour variant 0..3 (blue, purple, white, pink). Cosmetic: only the renderer reads it. */
+  variant: number;
 }
 
 /**
@@ -469,6 +487,8 @@ export interface MatchConfig {
     name?: string;
     /** Team colour, an index into PLAYER_COLORS; absent = the slot's own colour. */
     team?: number;
+    /** Colour variant 0..3 (blue, purple, white, pink); absent = 0. Cosmetic only. */
+    variant?: number;
   }[];
   stocks: number;
   timeLimitSec: number;          // 0 = none
@@ -558,6 +578,8 @@ export interface ResultsData {
     name?: string;
     /** Team colour index (PLAYER_COLORS); the slot's own colour when absent. */
     team?: number;
+    /** Colour variant 0..3; 0 when absent. */
+    variant?: number;
   }[];
   /** Teams rule only: the winning team colour index, -1 on a draw. */
   winnerTeam?: number;

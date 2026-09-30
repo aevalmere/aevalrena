@@ -425,11 +425,11 @@ function testChargedOrb(): SelfTestResult {
   // A one frame press fires on its own: nothing is held after the press and the orb
   // still comes out, on the move's own spawn frame, exactly as a charged one does. No
   // hold is needed to make the move happen at all.
-  // A full charge casts chargeCastFrames later (frame 27 rather than 11).
+  // A full charge casts chargeCastFrames later (frame 21 rather than 9).
   const orbSpawnFrame = PROJECTILE_DEFS['orb'].spawnFrame;
   const castFrames = CHARACTER_DEFS['aeval'].moves.nspecial.chargeCastFrames ?? 0;
   const instant = tap.charge === 0 && tap.frame === orbSpawnFrame && full.frame === orbSpawnFrame + castFrames
-    && orbSpawnFrame === 11 && castFrames === 16;
+    && orbSpawnFrame === 9 && castFrames === 12;
   const tapWeakAndSmall = tap.power === 1 && tap.scale === 0.6 && Math.abs(tap.damage - 4) < 1e-9;
   const fullCharged = full.charge === 60;
   const fullStrongAndBig = full.power === 1 && full.scale === 1.5 && Math.abs(full.damage - 16) < 1e-9;
@@ -2553,8 +2553,8 @@ function orbFlight(holdFrames: number): { spawnFrame: number; moveEnd: number; v
 function testChargedOrbFlight(): SelfTestResult {
   const tap = orbFlight(0);
   const full = orbFlight(60);
-  // Tap: 3.5 px/frame for 48 frames. Full: 9.5 px/frame for 34 frames, 16 frames later.
-  const later = full.spawnFrame === tap.spawnFrame + 16 && full.moveEnd === tap.moveEnd + 16;
+  // Tap: 3.5 px/frame for 48 frames. Full: 9.5 px/frame for 34 frames, 12 frames later.
+  const later = full.spawnFrame === tap.spawnFrame + 12 && full.moveEnd === tap.moveEnd + 12;
   const faster = Math.abs(tap.vx - 3.5) < 1e-9 && Math.abs(full.vx - 9.5) < 1e-9;
   const further = Math.abs(tap.travel - 3.5 * 48) < 1e-6 && Math.abs(full.travel - 9.5 * 34) < 1e-6;
   return {
@@ -2664,10 +2664,11 @@ function ledgeOptionInvuln(press: InputFrame, action: ActionId): number {
 }
 
 function testLedgeGetUpInvuln(): SelfTestResult {
-  const climb = ledgeOptionInvuln(inp(Btn.Up, Btn.Up), 'ledgeClimb');
+  // Jump climbs; the ledge jump is the ledgeJump command alone.
+  const climb = ledgeOptionInvuln(inp(Btn.Jump, Btn.Jump), 'ledgeClimb');
   const roll = ledgeOptionInvuln(inp(Btn.Dodge, Btn.Dodge), 'ledgeRoll');
   const attack = ledgeOptionInvuln(inp(Btn.Attack, Btn.Attack), 'attack');
-  const jump = ledgeOptionInvuln(inp(Btn.Jump, Btn.Jump), 'air');
+  const jump = ledgeOptionInvuln(cmdInp('ledgeJump', 0, 0), 'air');
   // An option that sets invuln 2 each frame of its window leaves one step of tail at 1, so a
   // window of n frames reads as n + 1 steps; the jump's plain 12-frame timer reads as 12.
   const want = { climb: 28 + 1, roll: ROLL.invEnd + 6 + 1 + 1, attack: 22 + 1, jump: 12 };
@@ -2897,6 +2898,200 @@ function testUnchargeableUsesBase(): SelfTestResult {
 }
 
 
+/**
+ * Fighter 0 hanging on Tidegate's right ledge with the hang invulnerability run out, and
+ * fighter 1 free to be placed by the caller. Returns the corner and the platform top.
+ */
+function hungVulnerable(): { state: GameState; f: SimFighter; o: SimFighter; cornerX: number; topY: number } {
+  const state = hangingState();
+  for (let i = 0; i < 60; i++) step(state, NONE, NONE);   // LEDGE_HANG_INVULN is 40
+  const fighters = simFighters(state);
+  const p = STAGE_DEFS['tidegate'].platforms[0];
+  return { state, f: fighters[0], o: fighters[1], cornerX: p.x + p.w, topY: p.y };
+}
+
+/** Puts fighter `o` at (x, y), still, facing `facing`, grounded or airborne. */
+function placeAt(o: SimFighter, x: number, y: number, facing: 1 | -1, grounded: boolean): void {
+  o.x = x;
+  o.y = y;
+  o.prevY = y;
+  o.vx = 0;
+  o.vy = 0;
+  o.facing = facing;
+  o.onGround = grounded;
+  o.fastFalling = false;
+  setAction(o, grounded ? 'idle' : 'air');
+}
+
+/**
+ * A ledge hanger is out of reach of ftilt and of a fair that overlaps its hurtbox (neither is
+ * a down attack), and of a tap orb thrown along the stage floor, which flies over it.
+ */
+function testLedgeHangerDodgesHighHits(): SelfTestResult {
+  const def = CHARACTER_DEFS['aeval'];
+
+  const a = hungVulnerable();
+  placeAt(a.o, a.cornerX - 30, a.topY, 1, true);
+  startMove(a.state, a.o, def, 'ftilt');
+  for (let i = 0; i < 30; i++) step(a.state, NONE, NONE);
+  const ftiltMissed = a.f.percent === 0 && a.f.action === 'ledgeHang';
+
+  // fair from off stage, circle centred on the hanger's hurtbox: only the hitsLedge rule stops it.
+  const b = hungVulnerable();
+  placeAt(b.o, b.cornerX + 30, b.topY + 34, -1, false);
+  startMove(b.state, b.o, def, 'fair');
+  b.o.actionFrame = 8;
+  for (let i = 0; i < 8; i++) step(b.state, NONE, NONE);
+  const fairMissed = b.f.percent === 0 && b.f.action === 'ledgeHang';
+
+  const c = hungVulnerable();
+  placeAt(c.o, c.cornerX - 100, c.topY, 1, true);
+  startMove(c.state, c.o, def, 'nspecial');
+  let passedOver = false;
+  for (let i = 0; i < 70; i++) {
+    step(c.state, NONE, NONE);
+    for (let k = 0; k < c.state.projectiles.length; k++) {
+      const pr = c.state.projectiles[k];
+      if (pr.alive && pr.defId === 'orb' && pr.x > c.cornerX) passedOver = true;
+    }
+  }
+  const orbMissed = passedOver && c.f.percent === 0 && c.f.action === 'ledgeHang';
+  return {
+    name: 'ce. a ledge hanger is not hit by ftilt, by an overlapping fair or by an orb along the floor',
+    pass: ftiltMissed && fairMissed && orbMissed,
+    detail: `ftilt: percent ${a.f.percent} ${a.f.action} | fair: percent ${b.f.percent} ${b.f.action} | `
+      + `orb passed over ${passedOver}, percent ${c.f.percent} ${c.f.action}`,
+  };
+}
+
+/**
+ * dair reaches a ledge hanger and bounces the attacker: vy set to the short hop's -3.5, air
+ * dodge given back, double jump not, and actionable well before the move's 36 frames would
+ * have run out.
+ */
+function testDairHitsHangerAndBounces(): SelfTestResult {
+  const def = CHARACTER_DEFS['aeval'];
+  const t = hungVulnerable();
+  placeAt(t.o, t.cornerX + 16, t.topY - 2, -1, false);
+  t.o.airDodgeUsed = true;
+  t.o.jumpsLeft = 0;
+  startMove(t.state, t.o, def, 'dair');
+  t.o.actionFrame = 11;
+  step(t.state, NONE, NONE);
+  const hit = t.f.percent > 0;
+  const vy = t.o.vy;
+  const dodgeBack = !t.o.airDodgeUsed;
+  const jumps = t.o.jumpsLeft;
+  const lag = t.o.hitlag;
+  let free = -1;
+  for (let i = 1; i <= 40 && free < 0; i++) {
+    step(t.state, NONE, NONE);
+    if (t.o.action !== 'attack') free = i;
+  }
+  const want = lag + 10;
+  return {
+    name: 'cf. dair hits a ledge hanger and hops the attacker up, air dodge back, actionable 10 frames after hitlag',
+    pass: hit && vy === -3.5 && dodgeBack && jumps === 0 && free === want && t.o.action === 'air',
+    detail: `hanger percent ${t.f.percent}, attacker vy ${vy}, air dodge back ${dodgeBack}, jumps ${jumps}, `
+      + `actionable after ${free} steps (want ${want}, hitlag ${lag}), now ${t.o.action}`,
+  };
+}
+
+/** An orb thrown from the air at hang height lands on the hanger and drains 35 percent of it back to Aeval. */
+function testOrbAtHangHeightAndDrain(): SelfTestResult {
+  const def = CHARACTER_DEFS['aeval'];
+  const t = hungVulnerable();
+  placeAt(t.o, t.cornerX + 70, t.topY + 30, -1, false);
+  t.o.percent = 50;
+  startMove(t.state, t.o, def, 'nspecial');
+  let dealt = 0;
+  let casterAfter = -1;
+  for (let i = 0; i < 60 && dealt === 0; i++) {
+    step(t.state, NONE, NONE);
+    if (t.f.percent > 0) {
+      dealt = t.f.percent;
+      casterAfter = t.o.percent;
+    }
+  }
+  const want = 50 - dealt * 0.35;
+  return {
+    name: 'cg. an orb at hang height hits the hanger and heals the caster 35 percent of the damage',
+    pass: dealt > 0 && Math.abs(casterAfter - want) < 1e-9 && casterAfter < 50,
+    detail: `hanger took ${dealt.toFixed(2)}, caster ${casterAfter.toFixed(2)} (want ${want.toFixed(2)})`,
+  };
+}
+
+/** Drain floors at 0: a caster at 0.5 percent ends at exactly 0. */
+function testDrainFloor(): SelfTestResult {
+  const def = CHARACTER_DEFS['aeval'];
+  const t = hungVulnerable();
+  placeAt(t.o, t.cornerX + 70, t.topY + 30, -1, false);
+  t.o.percent = 0.5;
+  startMove(t.state, t.o, def, 'nspecial');
+  for (let i = 0; i < 60 && t.f.percent === 0; i++) step(t.state, NONE, NONE);
+  return {
+    name: 'ch. drain never takes the caster below 0 percent',
+    pass: t.f.percent > 0 && t.o.percent === 0,
+    detail: `hanger ${t.f.percent.toFixed(2)}, caster ${t.o.percent}`,
+  };
+}
+
+/**
+ * Held directions never climb: toward the stage and Up both leave the fighter hanging. Jump
+ * climbs to the stage, Attack climbs into ledgeatk, Shield rolls, Down drops.
+ */
+function testLedgeButtonsOnly(): SelfTestResult {
+  const a = hungVulnerable();
+  for (let i = 0; i < 90; i++) step(a.state, inp(Btn.Left, i === 0 ? Btn.Left : 0), NONE);
+  for (let i = 0; i < 60; i++) step(a.state, inp(Btn.Up, i === 0 ? Btn.Up : 0), NONE);
+  const stayed = a.f.action === 'ledgeHang';
+
+  const b = hungVulnerable();
+  step(b.state, inp(Btn.Jump, Btn.Jump), NONE);
+  const climbing = b.f.action === 'ledgeClimb';
+  for (let i = 0; i < 40; i++) step(b.state, NONE, NONE);
+  const onStage = b.f.onGround && b.f.x < b.cornerX && b.f.ledge === -1;
+
+  const c = hungVulnerable();
+  step(c.state, inp(Btn.Attack, Btn.Attack), NONE);
+  const attacked = c.f.action === 'attack' && c.f.moveId === 'ledgeatk' && c.f.onGround && c.f.x < c.cornerX;
+
+  const d = hungVulnerable();
+  step(d.state, inp(Btn.Shield, Btn.Shield), NONE);
+  const rolled = d.f.action === 'ledgeRoll';
+
+  const e = hungVulnerable();
+  step(e.state, inp(Btn.Down, Btn.Down), NONE);
+  const dropped = e.f.action === 'air' && e.f.ledge === -1;
+  return {
+    name: 'ci. hanging: toward and Up do nothing, Jump climbs, Attack climbs into ledgeatk, Shield rolls, Down drops',
+    pass: stayed && climbing && onStage && attacked && rolled && dropped,
+    detail: `held toward and up: ${a.f.action} | jump: climbing ${climbing}, on stage ${onStage} | `
+      + `attack: ${c.f.action} ${c.f.moveId} | shield: ${d.f.action} | down: ${e.f.action}`,
+  };
+}
+
+/** Falling past a ledge with no input grabs it whichever way the fighter faces; holding away does not. */
+function testNeutralFallGrabsLedge(): SelfTestResult {
+  const run = (held: number): ActionId => {
+    const state = fresh(1, 10);
+    const f = simFighters(state)[0];
+    state.fighters[1].x = -150;
+    const p = STAGE_DEFS['tidegate'].platforms[0];
+    placeAt(f, p.x + p.w + 8, p.y + 10, 1, false);
+    f.vy = 1;
+    step(state, inp(held, 0), NONE);
+    return f.action;
+  };
+  const neutral = run(0);
+  const away = run(Btn.Right);
+  return {
+    name: 'cj. falling past a ledge facing away with no input grabs it; holding away falls past',
+    pass: neutral === 'ledgeHang' && away !== 'ledgeHang',
+    detail: `no input: ${neutral}, holding away: ${away}`,
+  };
+}
+
 export function runSimSelfTest(): SelfTestResult[] {
   return [
     testLanding(),
@@ -2985,6 +3180,12 @@ export function runSimSelfTest(): SelfTestResult[] {
     testStrengthTiers(),
     testBurstSkipsOrbVictim(),
     testUnchargeableUsesBase(),
+    testLedgeHangerDodgesHighHits(),
+    testDairHitsHangerAndBounces(),
+    testOrbAtHangHeightAndDrain(),
+    testDrainFloor(),
+    testLedgeButtonsOnly(),
+    testNeutralFallGrabsLedge(),
   ];
 }
 

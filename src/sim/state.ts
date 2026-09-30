@@ -156,10 +156,26 @@ export function enterAction(f: SimFighter, action: ActionId): void {
   if (f.action !== action) setAction(f, action);
 }
 
-/** Feet at (x, y), body from y - h to y, centered on x. */
+/** A ledge hanger's feet sit this far below the platform top (ledge.ts places them there). */
+export const LEDGE_HANG_DROP = 20;
+/**
+ * A ledge hanger's hurtbox starts this far below the platform top and runs down the crouch
+ * hurtbox's height, so a shot skimming the stage floor passes over it and only a shot low
+ * enough (or a down attack reaching under the lip) connects.
+ */
+export const LEDGE_HANG_HURT_TOP = 2;
+
+/** Feet at (x, y), body from y - h to y, centered on x. A ledge hanger's box hangs under the lip. */
 export function fighterHurtbox(f: FighterState, def: CharacterDef, out: Rect): Rect {
+  if (f.action === 'ledgeHang' || f.action === 'ledgeGrab') {
+    const hang = def.crouchHurtbox;
+    out.x = f.x - hang.w / 2;
+    out.y = f.y - LEDGE_HANG_DROP + LEDGE_HANG_HURT_TOP;
+    out.w = hang.w;
+    out.h = hang.h;
+    return out;
+  }
   const low = f.action === 'crouch'
-    || f.action === 'ledgeHang'
     || (f.action === 'attack' && f.moveId === 'dtilt');
   const src = low ? def.crouchHurtbox : def.hurtbox;
   out.x = f.x - src.w / 2;
@@ -239,7 +255,13 @@ function makeFighter(
     comboCount: 0,
     statX: x,
     moveCounted: true,
+    variant: 0,
   };
+}
+
+/** Colour variant from a player setup: 0..3, anything else reads as 0 (blue). Cosmetic only. */
+function variantOf(v: number | undefined): number {
+  return typeof v === 'number' && v >= 0 && v < 4 ? Math.floor(v) : 0;
 }
 
 export function createGameState(config: MatchConfig): GameState {
@@ -251,6 +273,7 @@ export function createGameState(config: MatchConfig): GameState {
     const spawn = stage.spawns[i % stage.spawns.length];
     const facing: 1 | -1 = spawn.x > 0 ? -1 : 1;
     fighters.push(makeFighter(p.slot, p.charId, spawn.x, spawn.y, facing, config.stocks, def));
+    fighters[fighters.length - 1].variant = variantOf(p.variant);
   }
   return {
     frame: 0,
@@ -336,6 +359,7 @@ function cloneFighter(src: SimFighter): SimFighter {
     comboCount: src.comboCount,
     statX: src.statX,
     moveCounted: src.moveCounted,
+    variant: src.variant,
   };
 }
 
@@ -363,6 +387,7 @@ function cloneConfig(src: MatchConfig): MatchConfig {
     const copy: MatchConfig['players'][number] = { slot: p.slot, charId: p.charId, cpu: p.cpu, cpuLevel: p.cpuLevel };
     if (p.name !== undefined) copy.name = p.name;
     if (p.team !== undefined) copy.team = p.team;
+    if (p.variant !== undefined) copy.variant = p.variant;
     players.push(copy);
   }
   return {

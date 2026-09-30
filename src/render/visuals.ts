@@ -3,7 +3,8 @@ import type { FxAnimDef } from '../characters/aeval/art/anims';
 import { CHARACTER_DEFS, CHARACTER_SPRITES } from '../characters/registry';
 import type { CharacterSprites, ImageSheetData, ProjectileDef } from '../core/types';
 import { portraitFrameName } from './anim';
-import { bakeSheet, getFrame } from './bake';
+import { bakeSheet, bakeVariantSheet, getFrame } from './bake';
+import { VARIANT_COUNT } from './palette';
 
 const NO_OUTLINES: readonly string[] = [];
 
@@ -72,6 +73,12 @@ export interface ProjectileVisual {
 
 const charVisuals = new Map<string, CharVisual>();
 const projectileVisuals = new Map<string, ProjectileVisual>();
+/**
+ * Colour variant visuals per character, index = variant (src/render/palette.ts). Index 0 is
+ * the base visual; the others are baked the first time something asks for them, so a match
+ * where everyone plays the base colour bakes nothing extra.
+ */
+const variantVisuals = new Map<string, (CharVisual | null)[]>();
 
 /** Collect `base0`, `base1`, ... while the sheet has them. */
 function probeFrames(sheet: ImageSheetData, base: string): string[] {
@@ -88,6 +95,7 @@ function probeFrames(sheet: ImageSheetData, base: string): string[] {
 export async function buildVisuals(): Promise<void> {
   charVisuals.clear();
   projectileVisuals.clear();
+  variantVisuals.clear();
 
   for (const charId in CHARACTER_SPRITES) {
     const sprites = CHARACTER_SPRITES[charId];
@@ -235,9 +243,31 @@ function geyserTiming(visual: CharVisual, charId: string): void {
   }
 }
 
-export function getCharVisual(charId: string): CharVisual | null {
-  const v = charVisuals.get(charId);
-  return v === undefined ? null : v;
+/**
+ * The character's render data in colour `variant` (0 = the sheet as drawn). A variant is baked
+ * from the base sheets on first use and cached; the effect halos are silhouettes, so they are
+ * shared with the base visual.
+ */
+export function getCharVisual(charId: string, variant = 0): CharVisual | null {
+  const base = charVisuals.get(charId);
+  if (base === undefined) return null;
+  if (variant <= 0 || variant >= VARIANT_COUNT) return base;
+  let list = variantVisuals.get(charId);
+  if (list === undefined) {
+    list = new Array<CharVisual | null>(VARIANT_COUNT).fill(null);
+    list[0] = base;
+    variantVisuals.set(charId, list);
+  }
+  const cached = list[variant];
+  if (cached !== null) return cached;
+  const suffix = '#' + variant;
+  const bodySheetId = base.bodySheetId + suffix;
+  const fxSheetId = base.fxSheetId + suffix;
+  if (!bakeVariantSheet(base.bodySheetId, bodySheetId, variant)) return base;
+  if (!bakeVariantSheet(base.fxSheetId, fxSheetId, variant)) return base;
+  const built: CharVisual = { ...base, bodySheetId, fxSheetId };
+  list[variant] = built;
+  return built;
 }
 
 export function getProjectileVisual(defId: string): ProjectileVisual | null {

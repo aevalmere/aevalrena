@@ -1,12 +1,12 @@
 import { LEDGE_HANG_INVULN, LEDGE_MAX_REGRABS, ROLL } from '../core/constants';
 import { Btn } from '../core/types';
 import type { ActionId, CharacterDef, GameState, Platform } from '../core/types';
-import { commandOf, heldDir, heldDown, heldUp, peekBufferedDirect, takeBuffered, takeBufferedDirect } from './input';
-import { setAction, simFighters, stageOf, type SimFighter } from './state';
+import { commandOf, heldDir, heldDown, peekBufferedDirect, takeBuffered, takeBufferedDirect } from './input';
+import { LEDGE_HANG_DROP, setAction, simFighters, stageOf, type SimFighter } from './state';
 import { startMove } from './moves';
 
 /** Feet sit this far below the platform top while hanging. */
-const HANG_DROP = 20;
+const HANG_DROP = LEDGE_HANG_DROP;
 const CLIMB_FRAMES = 30;
 const CLIMB_INVULN_FRAMES = 28;
 /** Extra invulnerable frames a ledge roll gets past a ground roll's ROLL.invEnd. */
@@ -72,7 +72,9 @@ function grabLedge(
  * Ledge snap (SPEC 4.5). The fighter's ledgeGrabBox is tested against a region that
  * hangs off the platform corner: outward by the grab box width, from just above the
  * corner down by its height. Airborne, falling, not attacking, facing the stage or
- * drifting toward it, and the ledge must be free.
+ * drifting toward it, and the ledge must be free. A fighter falling past with no horizontal
+ * input and Down not held grabs too, whichever way it faces, so a player can drop off the
+ * stage on purpose and catch the ledge. Holding away or holding Down falls past it.
  */
 export function tryLedgeGrab(state: GameState, f: SimFighter, def: CharacterDef): void {
   if (f.ledge >= 0 || f.onGround || f.vy <= 0) return;
@@ -104,8 +106,10 @@ export function tryLedgeGrab(state: GameState, f: SimFighter, def: CharacterDef)
       if ((f.x - cornerX) * outward < -2) continue;
 
       const inward = -outward;
-      const toward = f.facing === inward || f.vx * inward > 0 || heldDir(f) === inward;
-      if (!toward) continue;
+      const dir = heldDir(f);
+      const toward = f.facing === inward || f.vx * inward > 0 || dir === inward;
+      const neutral = dir === 0 && !heldDown(f);
+      if (!toward && !neutral) continue;
       grabLedge(state, f, def, index, cornerX, p.y, inward);
       return;
     }
@@ -132,11 +136,17 @@ export function stepLedge(state: GameState, f: SimFighter, def: CharacterDef): v
     f.vx = 0;
     f.vy = 0;
 
-    // The ledge commands do exactly what Jump, Attack, Dodge and a climb do here. Any
-    // other command has nothing to do while hanging and is dropped.
+    // Hanging never climbs on a held direction: a button leaves the ledge. Jump climbs,
+    // Attack climbs into the ledge attack, Dodge or Shield rolls, Down or away drops. Up and
+    // toward the stage do nothing. The ledgeJump command is the only way to jump off.
     const cmd = commandOf(peekBufferedDirect(f));
     if (cmd !== null) takeBufferedDirect(f);
-    if (takeBuffered(f, Btn.Jump) || cmd === 'ledgeJump') {
+    if (takeBuffered(f, Btn.Jump) || cmd === 'ledgeGetUp') {
+      setAction(f, 'ledgeClimb');
+      if (f.invuln < 2) f.invuln = 2;   // covered from the frame it starts, not the one after
+      return;
+    }
+    if (cmd === 'ledgeJump') {
       releaseLedge(f);
       setAction(f, 'air');
       f.x = cornerX + inward * 6;
@@ -153,18 +163,12 @@ export function stepLedge(state: GameState, f: SimFighter, def: CharacterDef): v
       startMove(state, f, def, 'ledgeatk');
       return;
     }
-    if (takeBuffered(f, Btn.Dodge) || cmd === 'ledgeRoll') {
+    if (takeBuffered(f, Btn.Dodge | Btn.Shield) || cmd === 'ledgeRoll') {
       setAction(f, 'ledgeRoll');
       if (f.invuln < 2) f.invuln = 2;   // covered from the frame it starts, not the one after
       return;
     }
-    const dir = heldDir(f);
-    if (cmd === 'ledgeGetUp' || heldUp(f) || dir === inward) {
-      setAction(f, 'ledgeClimb');
-      if (f.invuln < 2) f.invuln = 2;   // covered from the frame it starts, not the one after
-      return;
-    }
-    if (heldDown(f) || dir === -inward) {
+    if (heldDown(f) || heldDir(f) === -inward) {
       releaseLedge(f);
       setAction(f, 'air');
       f.jumpsLeft = def.jumps;

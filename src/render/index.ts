@@ -146,14 +146,34 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
     return i < 0 ? '' : state.fighters[i].charId;
   }
 
+  /** Colour variant of the fighter in `slot` (src/render/palette.ts), 0 when there is none. */
+  function variantForSlot(state: GameState, slot: number): number {
+    if (slot < 0 || slot >= MAX_PLAYERS) return 0;
+    const i = slotToIndex[slot];
+    return i < 0 ? 0 : state.fighters[i].variant;
+  }
+
+  /**
+   * The die event carries no owner, so match it to the projectile it came from: the sim marks
+   * it dead where it stood, and it is still in the list on the frame the event is read.
+   */
+  function variantForDeath(state: GameState, defId: string, x: number, y: number): number {
+    for (let i = 0; i < state.projectiles.length; i++) {
+      const p = state.projectiles[i];
+      if (p.defId === defId && p.x === x && p.y === y) return variantForSlot(state, p.owner);
+    }
+    return 0;
+  }
+
   function consumeEvents(state: GameState): void {
     for (let e = 0; e < state.events.length; e++) {
       const event = state.events[e];
       switch (event.type) {
         case 'hit': {
-          spawnHitSparks(particles, event.x, event.y, event.damage);
-          spawnDroplets(particles, event.x, event.y, 4);
-          spawnSpark(sparks, event.x, event.y, charIdForSlot(state, event.attacker));
+          const v = variantForSlot(state, event.attacker);
+          spawnHitSparks(particles, event.x, event.y, event.damage, v);
+          spawnDroplets(particles, event.x, event.y, 4, v);
+          spawnSpark(sparks, event.x, event.y, charIdForSlot(state, event.attacker), v);
           let amount = HIT_SHAKE_BASE + event.kb * HIT_SHAKE_PER_KB;
           if (amount > HIT_SHAKE_MAX) amount = HIT_SHAKE_MAX;
           addShake(shakeState, amount);
@@ -169,7 +189,7 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
           addShake(shakeState, SHIELD_BREAK_SHAKE);
           break;
         case 'ko':
-          spawnKoBurst(particles, event.x, event.y);
+          spawnKoBurst(particles, event.x, event.y, variantForSlot(state, event.slot));
           addShake(shakeState, KO_SHAKE);
           break;
         case 'land':
@@ -180,13 +200,13 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
           spawnDashDust(particles, event.x, event.y, event.facing);
           break;
         case 'projectileSpawn':
-          spawnDroplets(particles, event.x, event.y, 6);
+          spawnDroplets(particles, event.x, event.y, 6, variantForSlot(state, event.slot));
           break;
         case 'projectileDie':
-          spawnDroplets(particles, event.x, event.y, 4);
+          spawnDroplets(particles, event.x, event.y, 4, variantForDeath(state, event.defId, event.x, event.y));
           break;
         case 'respawn':
-          spawnDroplets(particles, event.x, event.y, 8);
+          spawnDroplets(particles, event.x, event.y, 8, variantForSlot(state, event.slot));
           break;
         default:
           break;

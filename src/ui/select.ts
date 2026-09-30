@@ -10,6 +10,8 @@ import {
   type MenuCtx,
   type SlotMode,
 } from './context';
+import { VARIANT_COUNT, VARIANT_NAMES, VARIANT_SWATCHES, clampVariant } from '../render/palette';
+import { setVariantSrc } from '../render/varianticon';
 import { PLAYER_ACCENTS, TEAM_NAMES, accentVars, iconAsset, uiAsset } from './theme';
 
 const CARD_COUNT = MAX_PLAYERS;
@@ -47,6 +49,31 @@ function loadNames(): string[] {
     /* storage blocked or corrupt: defaults */
   }
   return out;
+}
+
+/** localStorage key for each human slot's last chosen colour variant. */
+const VARIANTS_KEY = 'aevalrena.variants.v1';
+
+function loadVariants(): number[] {
+  const out: number[] = new Array(CARD_COUNT).fill(0);
+  try {
+    const raw = localStorage.getItem(VARIANTS_KEY);
+    if (raw === null) return out;
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return out;
+    for (let i = 0; i < CARD_COUNT; i += 1) out[i] = clampVariant(parsed[i]);
+  } catch {
+    /* storage blocked or corrupt: blue */
+  }
+  return out;
+}
+
+function saveVariants(variants: number[]): void {
+  try {
+    localStorage.setItem(VARIANTS_KEY, JSON.stringify(variants));
+  } catch {
+    /* storage blocked or full: remembered for this session only */
+  }
 }
 
 function saveNames(names: string[]): void {
@@ -282,6 +309,34 @@ export const CSS = `
   text-shadow: var(--glow);
   box-shadow: 0 1px 0 0 color-mix(in srgb, var(--accent) 55%, transparent);
 }
+.sel-variants {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 18px;
+  padding-left: 2px;
+}
+.sel-variants[hidden] { display: none; }
+.sel-variant {
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--swatch);
+  cursor: pointer;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--text) 25%, transparent);
+  transition: box-shadow 120ms ease-out, opacity 120ms ease-out;
+}
+.sel-variant:hover, .sel-variant:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--text) 60%, transparent);
+}
+.sel-variant.sel-variant-on {
+  box-shadow: 0 0 0 2px var(--panel), 0 0 0 3.5px var(--accent), 0 0 6px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+.sel-variant:disabled { opacity: 0.25; cursor: default; }
 .sel-cpu-row {
   display: flex;
   flex-direction: column;
@@ -350,6 +405,9 @@ export const CSS = `
 interface CardRefs {
   root: HTMLElement;
   swatch: HTMLButtonElement;
+  /** The colour variant row under the portrait, one circle per variant. */
+  variantRow: HTMLElement;
+  variantDots: HTMLButtonElement[];
   nameInput: HTMLInputElement;
   face: HTMLElement;
   name: HTMLElement;
@@ -361,7 +419,7 @@ interface CardRefs {
   keysLine: HTMLElement;
   markerHome: HTMLElement;
   marker: HTMLElement;
-  /** Character id the portrait currently shows, so it is rebuilt only on change. */
+  /** Character id and variant the portrait currently shows, so it is rebuilt only on change. */
   faceChar: string | null;
 }
 
@@ -450,6 +508,20 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
     top.appendChild(info);
     frame.appendChild(top);
 
+    // Colour variants: four circles, the current one ringed.
+    const variantRow = el('div', 'sel-variants');
+    const variantDots: HTMLButtonElement[] = [];
+    for (let v = 0; v < VARIANT_COUNT; v += 1) {
+      const dot = el('button', 'sel-variant');
+      dot.type = 'button';
+      dot.setAttribute('style', `--swatch:${VARIANT_SWATCHES[v]}`);
+      dot.title = `Colour: ${VARIANT_NAMES[v]}`;
+      dot.setAttribute('aria-label', `Player ${slot + 1} colour ${VARIANT_NAMES[v]}`);
+      variantRow.appendChild(dot);
+      variantDots.push(dot);
+    }
+    frame.appendChild(variantRow);
+
     // Team colour swatch and, for a human, the typed name.
     const idRow = el('div', 'sel-id-row');
     const swatch = el('button', 'ui-frame sel-swatch');
@@ -492,7 +564,7 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
 
     cardsWrap.appendChild(root);
     cards.push({
-      root, swatch, nameInput, face, name, tagLine, modeBtn, cpuRow, cpuSlider, cpuLabel, keysLine, markerHome, marker, faceChar: null,
+      root, swatch, variantRow, variantDots, nameInput, face, name, tagLine, modeBtn, cpuRow, cpuSlider, cpuLabel, keysLine, markerHome, marker, faceChar: null,
     });
   }
 
@@ -529,6 +601,8 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
   hint.appendChild(document.createTextNode(
     'N / pad X (Square) or click the name: type a name (Enter / Esc done)   T / pad Y (Triangle) or click the swatch: team colour. Same colour = one team'
   ));
+  hint.appendChild(document.createElement('br'));
+  hint.appendChild(document.createTextNode('[ and ] or pad L1 / R1 or click a circle: outfit colour'));
   panel.appendChild(hint);
 
   let focusIndex = 0;
@@ -538,10 +612,85 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
   let nameBeforeEdit = '';
 
   const names = loadNames();
+  const savedVariants = loadVariants();
   state.slots.forEach((s, slot) => {
     if (s.name === undefined) s.name = names[slot];
     if (s.team === undefined) s.team = slot;
+    if (s.variant === undefined) s.variant = s.mode === 'human' ? savedVariants[slot] : 0;
   });
+
+  function variantOf(slot: number): number {
+    return clampVariant(state.slots[slot].variant);
+  }
+
+  /**
+   * True when another active slot (below `limit`, all of them by default) plays the same
+   * character in colour `v`.
+   */
+  function variantTaken(slot: number, v: number, limit = CARD_COUNT): boolean {
+    const s = state.slots[slot];
+    for (let other = 0; other < limit; other += 1) {
+      if (other === slot) continue;
+      const o = state.slots[other];
+      if (o.mode === 'off' || o.charId !== s.charId) continue;
+      if (variantOf(other) === v) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Keep two slots on the same character in different colours. A human keeps its colour when
+   * it is free, else takes the first unused one; a CPU takes the next unused one after its own.
+   * Only slots below `limit` count, so a full pass keeps the lower slot's pick.
+   */
+  function settleVariant(slot: number, limit = CARD_COUNT): void {
+    const s = state.slots[slot];
+    if (s.mode === 'off') return;
+    const current = variantOf(slot);
+    if (!variantTaken(slot, current, limit)) {
+      s.variant = current;
+      return;
+    }
+    for (let step = 1; step <= VARIANT_COUNT; step += 1) {
+      const v = s.mode === 'cpu' ? (current + step) % VARIANT_COUNT : step - 1;
+      if (!variantTaken(slot, v, limit)) {
+        s.variant = v;
+        return;
+      }
+    }
+  }
+
+  function settleAllVariants(): void {
+    for (let slot = 0; slot < CARD_COUNT; slot += 1) settleVariant(slot, slot);
+  }
+
+  function persistVariants(): void {
+    for (let slot = 0; slot < CARD_COUNT; slot += 1) {
+      if (state.slots[slot].mode === 'human') savedVariants[slot] = variantOf(slot);
+    }
+    saveVariants(savedVariants);
+  }
+
+  function setVariant(slot: number, v: number): void {
+    const s = state.slots[slot];
+    if (s.mode === 'off' || v < 0 || v >= VARIANT_COUNT || variantTaken(slot, v)) return;
+    s.variant = v;
+    if (s.mode === 'human') persistVariants();
+    refreshCard(slot);
+  }
+
+  /** Step to the next colour no other slot on this character is using. */
+  function cycleVariant(slot: number, dir: 1 | -1): void {
+    if (state.slots[slot].mode === 'off') return;
+    const current = variantOf(slot);
+    for (let step = 1; step < VARIANT_COUNT; step += 1) {
+      const v = (current + dir * step + VARIANT_COUNT) % VARIANT_COUNT;
+      if (!variantTaken(slot, v)) {
+        setVariant(slot, v);
+        return;
+      }
+    }
+  }
 
   function teamOf(slot: number): number {
     const t = state.slots[slot].team;
@@ -598,11 +747,12 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
     stageNext.hidden = !multi;
   }
 
-  function refreshFace(card: CardRefs, charIndex: number): void {
+  function refreshFace(card: CardRefs, charIndex: number, variant: number): void {
     const character = deps.characters[charIndex];
     const id = character ? character.id : '';
-    if (card.faceChar === id) return;
-    card.faceChar = id;
+    const faceKey = `${id}#${variant}`;
+    if (card.faceChar === faceKey) return;
+    card.faceChar = faceKey;
     card.face.textContent = '';
     if (character && character.icon) {
       card.face.classList.remove('sel-face-fallback');
@@ -615,10 +765,11 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
       if (bust !== icon) {
         img.onerror = (): void => {
           img.onerror = null;
-          img.src = icon;
+          setVariantSrc(img, icon, variant);
         };
       }
-      img.src = bust;
+      // The bust in the slot's colour variant (src/render/palette.ts, same remap as the sprites).
+      setVariantSrc(img, bust, variant);
       card.face.appendChild(img);
     } else {
       card.face.classList.add('sel-face-fallback');
@@ -660,7 +811,14 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
     card.keysLine.hidden = s.mode !== 'human';
     const charIndex = clampCharIndex(s.charIndex);
     card.name.textContent = deps.characters[charIndex]?.name ?? '';
-    refreshFace(card, charIndex);
+    const variant = variantOf(slot);
+    refreshFace(card, charIndex, variant);
+    card.variantRow.hidden = !active;
+    card.variantDots.forEach((dot, v) => {
+      dot.classList.toggle('sel-variant-on', v === variant);
+      dot.disabled = !active || (v !== variant && variantTaken(slot, v));
+      dot.setAttribute('aria-pressed', v === variant ? 'true' : 'false');
+    });
 
     if (s.mode === 'cpu') card.cpuSlider.value = String(s.cpuLevel);
     refreshCpuText(slot);
@@ -675,6 +833,11 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
     placeMarker(slot);
   }
 
+  /** Every card: a colour change on one slot can free or take a colour on another. */
+  function refreshAllCards(): void {
+    for (let slot = 0; slot < CARD_COUNT; slot += 1) refreshCard(slot);
+  }
+
   function refreshStart(): void {
     startBtn.disabled = activeSlotCount() < 2;
   }
@@ -685,6 +848,7 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
   }
 
   function refreshAll(): void {
+    settleAllVariants();
     for (let slot = 0; slot < CARD_COUNT; slot += 1) refreshCard(slot);
     refreshStage();
     refreshStart();
@@ -696,7 +860,10 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
     const idx = SLOT_MODE_CYCLE.indexOf(s.mode);
     const nextIdx = (idx + dir + SLOT_MODE_CYCLE.length) % SLOT_MODE_CYCLE.length;
     s.mode = SLOT_MODE_CYCLE[nextIdx] as SlotMode;
-    refreshCard(slot);
+    // A slot turned human picks up its saved colour; either way it must not clash.
+    if (s.mode === 'human') s.variant = savedVariants[slot];
+    settleVariant(slot);
+    refreshAllCards();
     refreshStart();
   }
 
@@ -738,7 +905,9 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
     const s = state.slots[slot];
     s.charIndex = clampCharIndex(index);
     s.charId = chars[s.charIndex].id;
-    refreshCard(slot);
+    if (s.mode === 'human') s.variant = savedVariants[slot];
+    settleVariant(slot);
+    refreshAllCards();
   }
 
   function cycleCharacter(slot: number, dir: 1 | -1): void {
@@ -774,6 +943,7 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
         cpuLevel: s.mode === 'cpu' ? s.cpuLevel : 0,
         ...(s.mode === 'human' ? { name: nameOf(slot) } : {}),
         team: teamOf(slot),
+        variant: variantOf(slot),
       });
     });
     callbacks.startMatch({
@@ -898,6 +1068,15 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
       updateFocusVisual();
       cycleTeam(slot);
     });
+    card.variantDots.forEach((dot, v) => {
+      ctx.addListener(dot, 'pointerdown', (e: Event) => e.stopPropagation());
+      ctx.addListener(dot, 'click', (e: Event) => {
+        e.stopPropagation();
+        focusIndex = slot;
+        updateFocusVisual();
+        setVariant(slot, v);
+      });
+    });
     ctx.addListener(card.nameInput, 'pointerdown', (e: Event) => e.stopPropagation());
     ctx.addListener(card.nameInput, 'click', (e: Event) => e.stopPropagation());
     ctx.addListener(card.nameInput, 'focus', () => {
@@ -988,6 +1167,13 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
         if (focusIndex < CARD_COUNT) {
           ev.preventDefault();
           cycleTeam(focusIndex);
+        }
+        break;
+      case 'BracketLeft':
+      case 'BracketRight':
+        if (focusIndex < CARD_COUNT) {
+          ev.preventDefault();
+          cycleVariant(focusIndex, ev.code === 'BracketLeft' ? -1 : 1);
         }
         break;
       case 'ArrowLeft':

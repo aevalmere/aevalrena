@@ -1,9 +1,12 @@
+import { NETWORK_HINT, type Invite } from '../net/browserhost';
 import { lanClient, type LobbyRow } from '../net/client';
 import {
   AUTO_DELAY, defaultSettings, LAN_PORT, LOBBY_MAX, SIM_LATENCIES, type LobbyMember, type LobbySettings,
 } from '../net/protocol';
 import { LOCAL_TAG } from '../net/view';
+import { VARIANT_COUNT, VARIANT_NAMES, VARIANT_SWATCHES, clampVariant } from '../render/palette';
 import type { MenuCtx } from './context';
+import { encodeQr, qrSvg } from './qr';
 import { accentVars, PLAYER_ACCENTS, TEAM_NAMES, uiAsset } from './theme';
 
 /**
@@ -23,6 +26,7 @@ const NAME_KEY = 'aevalrena.lan.name';
 const ADDR_KEY = 'aevalrena.lan.address';
 const CHAR_KEY = 'aevalrena.lan.char';
 const DRAFT_KEY = 'aevalrena.lan.draft';
+const MODE_KEY = 'aevalrena.lan.mode';
 
 function load(key: string, fallback: string): string {
   try {
@@ -94,10 +98,25 @@ export const CSS = `
 }
 .lan-chip:hover:not(:disabled), .lan-chip:focus-visible { background: color-mix(in srgb, var(--accent) 28%, transparent); border-color: var(--accent); outline: none; }
 .lan-chip:disabled { cursor: default; opacity: 0.85; }
+.lan-variant-dot { display: inline-block; width: 0.6rem; height: 0.6rem; border-radius: 50%; margin-right: 0.4rem; vertical-align: -0.05rem; }
 .lan-ok { color: #9fff7f; text-shadow: 0 0 6px rgba(159, 255, 127, 0.5); }
 .lan-host { color: #ffd27f; }
 .lan-warn { color: #ffb38a; }
 .lan-hint { font-size: 0.62rem; letter-spacing: 0.2em; text-transform: uppercase; color: #7d8699; }
+.lan-field.lan-code-field { text-transform: none; letter-spacing: 0.02em; font-weight: 400; min-width: 0; flex: 1; }
+.lan-codebox { display: flex; gap: 0.9rem; align-items: flex-start; margin-top: 0.3rem; }
+@media (max-width: 560px) { .lan-codebox { flex-direction: column; } }
+.lan-qr { flex-shrink: 0; width: 11rem; height: 11rem; line-height: 0; }
+.lan-qr svg { width: 100%; height: 100%; image-rendering: pixelated; }
+.lan-codeside { display: flex; flex-direction: column; gap: 0.5rem; min-width: 0; flex: 1; }
+.lan-code {
+  font-family: var(--font-ui); font-size: 0.72rem; line-height: 1.45; letter-spacing: 0.02em; text-transform: none;
+  word-break: break-all; user-select: all; color: var(--text); padding: 0.4rem 0.5rem;
+  background: color-mix(in srgb, var(--accent) 8%, transparent); border-left: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.lan-invites { display: flex; flex-direction: column; gap: 0.6rem; margin-top: 0.2rem; }
+.lan-invite { --chamfer: 10px; padding: 0.65rem 0.8rem 0.75rem; display: flex; flex-direction: column; gap: 0.35rem; }
+.lan-note { font-size: 0.72rem; letter-spacing: 0.08em; line-height: 1.5; color: #9aa4b8; }
 `;
 
 function h<K extends keyof HTMLElementTagNameMap>(tag: K, cls: string, parent: HTMLElement | null, text?: string): HTMLElementTagNameMap[K] {
@@ -139,6 +158,39 @@ function defaultAgentAddress(): string {
 }
 
 let autoTried = false;
+/** Browser mode: the join code being typed, and the answer code the host is typing. */
+let joinCode = '';
+let answerCode = '';
+
+/** The link a join code's QR carries: this page with the code after #join=. */
+function joinLink(code: string): string {
+  if (location.protocol !== 'http:' && location.protocol !== 'https:') return code;
+  return `${location.origin}${location.pathname}#join=${code}`;
+}
+
+function copyText(text: string, done: (ok: boolean) => void): void {
+  const fallback = (): void => {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try {
+      ok = document.execCommand('copy');
+    } catch {
+      ok = false;
+    }
+    ta.remove();
+    done(ok);
+  };
+  if (navigator.clipboard !== undefined && typeof navigator.clipboard.writeText === 'function') {
+    navigator.clipboard.writeText(text).then(() => done(true), fallback);
+  } else {
+    fallback();
+  }
+}
 
 export function render(container: HTMLElement, ctx: MenuCtx): void {
   const client = lanClient;
@@ -159,11 +211,21 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
   const stageName = (id: string): string => stages.find((s) => s.id === id)?.name ?? id;
   const charName = (id: string): string => characters.find((c) => c.id === id)?.name ?? id;
 
-  // The page came from an agent (npm run lan): talk to it without asking.
-  if (client.agentStatus === 'idle' || (client.agentStatus === 'closed' && !autoTried)) {
-    autoTried = true;
-    client.connectAgent(defaultAgentAddress(), name);
+  // A scanned #join= link: the browser mode's join field starts filled in.
+  if (client.pendingJoinCode !== '') {
+    joinCode = client.pendingJoinCode;
+    client.pendingJoinCode = '';
   }
+
+  /** Agent mode: talk to the agent that served this page without asking. */
+  function autoConnect(): void {
+    if (client.mode !== 'agent' || client.lobby !== null) return;
+    if (client.agentStatus === 'idle' || (client.agentStatus === 'closed' && !autoTried)) {
+      autoTried = true;
+      client.connectAgent(defaultAgentAddress(), name);
+    }
+  }
+  autoConnect();
 
   function nav(el: HTMLElement, key: string): void {
     el.dataset.nav = key;
@@ -315,7 +377,19 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
     button(byAddr, 'Find', 'join-find', () => client.addAgentByAddress(joinAddress));
     h('div', 'lan-hint', left, 'Not listed? Type the address the other machine\'s agent printed.');
 
-    const right = h('div', 'lan-list', cols);
+    youAndDraft(h('div', 'lan-list', cols));
+    const actions = h('div', 'lan-actions', panel);
+    button(actions, 'Create lobby', 'lobby-create', () => {
+      focusKey = 'start';
+      client.name = name.trim().slice(0, 12) || 'PLAYER';
+      store(DRAFT_KEY, JSON.stringify(draft));
+      client.create(draft, charId);
+    });
+    button(actions, 'Back', 'back', back);
+  }
+
+  /** Name, character and the new lobby's settings (both modes). */
+  function youAndDraft(right: HTMLElement): void {
     h('div', 'lan-hint', right, 'You');
     const nameRow = row(right, 'Name', 'my-name');
     field(nameRow, name, 'Your name', 12, (v) => {
@@ -337,14 +411,141 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
       store(DRAFT_KEY, JSON.stringify(draft));
       paint(true);
     });
+  }
+
+  /** First view: how this device plays on the LAN. */
+  function renderChoose(panel: HTMLElement): void {
+    h('div', 'lan-sub', panel, 'Pick how this device plays on the LAN');
+    if (focusKey === '') focusKey = load(MODE_KEY, 'browser') === 'agent' ? 'mode-agent' : 'mode-browser';
+    const list = h('div', 'lan-list', panel);
+    const browserRow = row(list, 'In browser', 'mode-browser', () => {
+      focusKey = 'lobby-create';
+      store(MODE_KEY, 'browser');
+      client.setMode('browser');
+    });
+    h('span', 'lan-meta', browserRow, 'No install. The host sends each guest a join code');
+    const agentRow = row(list, 'Local agent', 'mode-agent', () => {
+      focusKey = 'lobby-create';
+      store(MODE_KEY, 'agent');
+      client.setMode('agent');
+      autoConnect();
+    });
+    h('span', 'lan-meta', agentRow, location.protocol === 'https:'
+      ? 'Needs "npm run lan" and the page it serves (http)'
+      : 'Every player runs "npm run lan". Lobbies are found automatically');
+    const actions = h('div', 'lan-actions', panel);
+    button(actions, 'Back', 'back', back);
+  }
+
+  /** A code as text, a QR code and a Copy button. */
+  function codeBlock(parent: HTMLElement, code: string, qrText: string, key: string): void {
+    const box = h('div', 'lan-codebox', parent);
+    const qr = h('div', 'lan-qr', box);
+    qr.setAttribute('role', 'img');
+    qr.setAttribute('aria-label', 'QR code of the code');
+    qr.innerHTML = qrSvg(encodeQr(qrText, 'L'));
+    const side = h('div', 'lan-codeside', box);
+    h('div', 'lan-code', side, code);
+    const copy = button(side, 'Copy', key, () => {
+      copyText(code, (ok) => {
+        copy.textContent = ok ? 'Copied' : 'Select the text and copy it';
+        window.setTimeout(() => { copy.textContent = 'Copy'; }, 1500);
+      });
+    });
+  }
+
+  /** Browser mode, not in a lobby: join with a code, or create a lobby in this tab. */
+  function renderBrowser(panel: HTMLElement): void {
+    h('div', 'lan-sub', panel, 'In browser · automatic lobby discovery is not available in this mode. The host gives each guest a join code');
+    const cols = h('div', 'lan-cols', panel);
+    const left = h('div', 'lan-list', cols);
+    h('div', 'lan-hint', left, 'Join with code');
+    const g = client.guest;
+    const join = (): void => {
+      if (joinCode.trim() === '') {
+        client.message = "Paste the host's join code first";
+        paint(true);
+        return;
+      }
+      client.name = name.trim().slice(0, 12) || 'PLAYER';
+      focusKey = 'join-copy';
+      client.joinWithCode(joinCode, charId);
+    };
+    if (g.state === 'answering') {
+      h('div', 'lan-note', left, 'Making your answer code...');
+    } else if (g.state === 'answer') {
+      h('div', 'lan-note', left, 'Give this answer code to the host. The host enters it to connect you.');
+      codeBlock(left, g.code, g.code, 'join-copy');
+      h('div', 'lan-note', left, 'Waiting for the host...');
+      const actions = h('div', 'lan-actions', left);
+      button(actions, 'Cancel', 'join-cancel', () => client.cancelGuest());
+    } else {
+      const line = h('div', 'lan-inline', left);
+      const inp = field(line, joinCode, 'Join code', 1000, (v) => { joinCode = v; }, join);
+      inp.classList.add('lan-code-field');
+      inp.placeholder = 'Paste the host\'s join code';
+      button(line, g.state === 'failed' ? 'Retry' : 'Join', 'join-go', join);
+      if (g.state === 'failed') {
+        h('div', 'lan-note lan-warn', left, g.message);
+        h('div', 'lan-note', left, NETWORK_HINT);
+      } else {
+        h('div', 'lan-note', left, 'The host makes one code per guest. Paste it here, or scan the host\'s QR code with this device\'s camera.');
+      }
+    }
+    youAndDraft(h('div', 'lan-list', cols));
     const actions = h('div', 'lan-actions', panel);
     button(actions, 'Create lobby', 'lobby-create', () => {
-      focusKey = 'start';
+      focusKey = 'invite';
       client.name = name.trim().slice(0, 12) || 'PLAYER';
       store(DRAFT_KEY, JSON.stringify(draft));
-      client.create(draft, charId);
+      client.createInBrowser(draft, charId, { stages: stages.map((s) => s.id), characters: characters.map((c) => c.id) });
     });
     button(actions, 'Back', 'back', back);
+  }
+
+  /** Browser mode host: one join code per guest, and the answer codes coming back. */
+  function renderInvites(panel: HTMLElement, members: number, inMatch: boolean): void {
+    const box = h('div', 'lan-invites', panel);
+    h('div', 'lan-hint', box, 'Invite players · each guest needs their own join code');
+    const invites: Invite[] = client.host.list();
+    for (const inv of invites) {
+      const card = h('div', 'ui-frame lan-invite', box);
+      card.setAttribute('style', accentVars(null));
+      const head = h('div', 'lan-card-head', card);
+      h('span', 'ui-tag', head, `Invite ${inv.id}`);
+      const stateText = inv.state === 'preparing' ? 'Making the code' : inv.state === 'code' ? 'Waiting for an answer'
+        : inv.state === 'connecting' ? 'Connecting' : 'Failed';
+      h('span', `ui-tag${inv.state === 'failed' ? ' lan-warn' : ''}`, head, stateText);
+      if (inv.state === 'code') {
+        h('div', 'lan-note', card, 'Send this code to one guest (or let them scan it), then enter the answer code they get below.');
+        codeBlock(card, inv.code, joinLink(inv.code), `invite-copy-${inv.id}`);
+      } else if (inv.state === 'failed') {
+        h('div', 'lan-note lan-warn', card, inv.message);
+        h('div', 'lan-note', card, NETWORK_HINT);
+      }
+      const actions = h('div', 'lan-actions', card);
+      if (inv.state === 'failed') button(actions, 'Retry', `invite-retry-${inv.id}`, () => client.host.retry(inv.id));
+      button(actions, 'Cancel', `invite-cancel-${inv.id}`, () => client.host.cancel(inv.id));
+    }
+    if (invites.some((i) => i.state === 'code')) {
+      const connect = (): void => {
+        const err = answerCode.trim() === '' ? "Paste a guest's answer code first" : client.host.answer(answerCode);
+        if (err === '') answerCode = '';
+        client.message = err;
+        focusKey = 'answer-go';
+        paint(true);
+      };
+      const line = h('div', 'lan-inline', box);
+      const inp = field(line, answerCode, 'Answer code', 1000, (v) => { answerCode = v; }, connect);
+      inp.classList.add('lan-code-field');
+      inp.placeholder = 'Paste a guest\'s answer code';
+      button(line, 'Connect', 'answer-go', connect);
+    }
+    const actions = h('div', 'lan-actions', box);
+    button(actions, 'Invite a player', 'invite', () => {
+      focusKey = 'invite';
+      client.host.invite();
+    }, inMatch || !client.host.canInvite(members));
   }
 
   function renderLobby(panel: HTMLElement): void {
@@ -355,7 +556,7 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
     const localTeam = me === null ? 0 : me.team;
     const hostMember = lobby.members.find((m) => m.id === lobby.hostId);
     const sub = h('div', 'lan-sub', panel,
-      `${lobby.settings.name} · hosted by ${hostMember?.name ?? '?'} at ${client.lobbyAddress}${lobby.inMatch ? ' · match running' : ''} · your ping `);
+      `${lobby.settings.name} · hosted by ${hostMember?.name ?? '?'}${client.mode === 'browser' ? ' in their browser' : ` at ${client.lobbyAddress}`}${lobby.inMatch ? ' · match running' : ''} · your ping `);
     h('span', '', sub, pingLabel(client.rtt)).dataset.ping = 'me';
     const cols = h('div', 'lan-cols', panel);
 
@@ -396,6 +597,12 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
       charChip.type = 'button';
       const teamChip = h('button', 'lan-chip', line, `${TEAM_NAMES[m.team] ?? 'Team'} team`);
       teamChip.type = 'button';
+      // variant: the member's outfit colour, a swatch circle and its name; the owner cycles it.
+      const variant = clampVariant(m.variant);
+      const variantChip = h('button', 'lan-chip', line);
+      variantChip.type = 'button';
+      h('span', 'lan-variant-dot', variantChip).style.background = VARIANT_SWATCHES[variant];
+      variantChip.appendChild(document.createTextNode(VARIANT_NAMES[variant]));
       h('span', 'ui-tag', line, pingLabel(isMe ? client.rtt : m.ping)).dataset.ping = isMe ? 'me' : String(m.id);
       if (isMe && !lobby.inMatch) {
         nav(charChip, 'char');
@@ -407,6 +614,12 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
           store(CHAR_KEY, charId);
           client.setMember({ charId });
         });
+        nav(variantChip, 'variant');
+        variantChip.title = 'Outfit colour';
+        variantChip.addEventListener('click', () => {
+          focusKey = 'variant';
+          client.setMember({ variant: (variant + 1) % VARIANT_COUNT });
+        });
         nav(teamChip, 'team');
         teamChip.title = 'Same colour = team';
         teamChip.addEventListener('click', () => {
@@ -416,6 +629,7 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
       } else {
         charChip.disabled = true;
         teamChip.disabled = true;
+        variantChip.disabled = true;
       }
     }
     for (let s = 0; s < LOBBY_MAX; s++) {
@@ -425,6 +639,8 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
       h('span', 'ui-tag', h('div', 'lan-card-head', card), `Slot ${s + 1}`);
       h('div', 'lan-card-name', card, lobby.settings.cpuFill ? `CPU LV ${lobby.settings.cpuLevel}` : 'Open');
     }
+
+    if (host && client.mode === 'browser') renderInvites(panel, lobby.members.length, lobby.inMatch);
 
     const others = lobby.members.filter((m) => m.id !== lobby.hostId);
     const votes = lobby.members.filter((m) => m.rematch).length;
@@ -451,8 +667,13 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
 
   function back(): void {
     if (client.lobby !== null) client.leave();
-    client.disconnectAgent();
     autoTried = false;
+    if (client.mode !== 'none') {
+      // Back from a mode returns to the mode choice (and drops that mode's connections).
+      focusKey = '';
+      client.setMode('none');
+      return;
+    }
     ctx.go('mode');
   }
 
@@ -465,7 +686,7 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
       ...client.lobby, members: client.lobby.members.map((m) => ({ ...m, ping: 0 })),
     };
     return JSON.stringify([client.agentStatus, client.lobbyStatus, client.message, client.agentAddress,
-      client.rows(), lobby, draft, charId]);
+      client.rows(), lobby, draft, charId, client.mode, client.guest, client.host.list()]);
   }
 
   function updatePings(): void {
@@ -507,12 +728,14 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
     header.appendChild(document.createTextNode(inLobby ? 'LAN lobby' : 'LAN'));
     h('div', 'aev-menu-headline', panel);
 
-    if (client.agentStatus !== 'connected' && !inLobby) renderConnect(panel);
-    else if (!inLobby) renderList(panel);
-    else renderLobby(panel);
+    if (inLobby) renderLobby(panel);
+    else if (client.mode === 'none') renderChoose(panel);
+    else if (client.mode === 'browser') renderBrowser(panel);
+    else if (client.agentStatus !== 'connected') renderConnect(panel);
+    else renderList(panel);
 
     let note = client.message;
-    if (note === '' && client.lobbyStatus === 'joining') note = `Joining ${client.lobbyAddress}...`;
+    if (note === '' && client.lobbyStatus === 'joining') note = client.mode === 'browser' ? 'Joining...' : `Joining ${client.lobbyAddress}...`;
     h('div', 'lan-msg', panel, note);
     h('div', 'lan-hint', panel, 'Arrows move · Enter selects · Esc goes back');
 

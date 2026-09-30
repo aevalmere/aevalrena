@@ -22,6 +22,23 @@ const PERCENT_CAP = 999;
 const GROUNDED_ANGLE = 15;
 const SHIELD_PUSHBACK = 2;
 
+/** True while a fighter hangs on a ledge, where only down attacks and low enough shots reach it. */
+export function hangingOnLedge(f: SimFighter): boolean {
+  return f.action === 'ledgeHang' || f.action === 'ledgeGrab';
+}
+
+/**
+ * The bounce on hit (dair hop): up by `vy`, fast fall cancelled, the air dodge given back
+ * (the double jump is not) and the move cut so it ends `actionableIn` frames after the hitlag.
+ */
+function bounceAttacker(atk: SimFighter, totalFrames: number, bounce: { vy: number; actionableIn: number }): void {
+  atk.vy = bounce.vy;
+  atk.fastFalling = false;
+  atk.airDodgeUsed = false;
+  const cut = totalFrames - bounce.actionableIn;
+  if (atk.actionFrame < cut) atk.actionFrame = cut;
+}
+
 export function canBeHit(f: SimFighter): boolean {
   if (f.action === 'dead' || f.action === 'respawn') return false;
   // Both sides of a Final Smash are out of reach of everyone else until the launch.
@@ -274,6 +291,8 @@ export function resolveHits(state: GameState): void {
     const mv = defOf(atk).moves[atk.moveId];
     const mul = chargeMultiplier(atk.charge, mv.chargeable);
     for (let i = 0; i < fighters.length; i++) hitThisFrame[i] = false;
+    // Set when a hitbox of this move lands on a fighter's body rather than a shield.
+    let hitBody = false;
 
     for (let h = 0; h < mv.hitboxes.length; h++) {
       const hb = mv.hitboxes[h];
@@ -289,6 +308,8 @@ export function resolveHits(state: GameState): void {
         if (v === a || hitThisFrame[v] || caughtThisFrame[v]) continue;
         const vic = fighters[v];
         if (!canBeHit(vic)) continue;
+        // A ledge hanger is out of reach of every melee hitbox except a down attack's.
+        if (hangingOnLedge(vic) && mv.hitsLedge !== true) continue;
         // Teams rule: a teammate's hitbox (grab hitboxes too) passes through.
         if (sameTeam(state, atk.slot, vic.slot)) continue;
         fighterHurtbox(vic, defOf(vic), HURT);
@@ -308,6 +329,7 @@ export function resolveHits(state: GameState): void {
         if (dodgesHit(vic, hy, hb.low, atk.moveId, atk.onGround)) continue;
 
         const dmg = hitboxDamage(hb, mul);
+        const shielded = vic.action === 'shield' || vic.action === 'shieldStun';
         const lag = applyHit(
           state, vic, atk.slot, atk.facing, dmg, hb.angle, hb.bkb, hb.kbg,
           hb.hitlagMul === undefined ? 1 : hb.hitlagMul,
@@ -316,11 +338,15 @@ export function resolveHits(state: GameState): void {
         );
         hitThisFrame[v] = true;
         landed = true;
+        if (!shielded && lag > 0) hitBody = true;
         if (lag > atk.hitlag) atk.hitlag = lag;
       }
       if (landed) atk.hitGroups |= groupBit;
       // A catch took the attacker out of its move, so nothing else of it is active.
       if (caught) break;
+    }
+    if (hitBody && mv.bounceOnHit !== undefined && atk.action === 'attack' && !atk.onGround) {
+      bounceAttacker(atk, mv.totalFrames, mv.bounceOnHit);
     }
   }
 
@@ -344,6 +370,8 @@ export function resolveHits(state: GameState): void {
 
       // Charge and the return pass scale what this instance deals, shield damage included.
       const pdmg = chargedStat(pdef, pr.charge, 'damage') * pr.power;
+      const shielded = vic.action === 'shield' || vic.action === 'shieldStun';
+      const before = vic.percent;
       applyHit(
         state, vic, pr.owner, pr.facing, pdmg, pdef.angle,
         chargedStat(pdef, pr.charge, 'bkb'), chargedStat(pdef, pr.charge, 'kbg'), 1,
@@ -351,6 +379,12 @@ export function resolveHits(state: GameState): void {
       );
       const shooter = fighterBySlot(state, pr.owner);
       if (shooter !== null && !state.finished) shooter.stats.projectilesHit++;
+      // Drain: the owner heals a share of the damage that reached the body.
+      const heal = pdef.healFraction;
+      if (heal !== undefined && !shielded && shooter !== null && shooter.action !== 'dead') {
+        const dealt = vic.percent - before;
+        if (dealt > 0) shooter.percent = Math.max(0, shooter.percent - dealt * heal);
+      }
       pr.hitSlots |= bit;
       if (pdef.destroyOnHit) {
         killProjectile(state, pr, pdef);

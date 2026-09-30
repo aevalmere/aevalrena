@@ -185,7 +185,7 @@ async function main(): Promise<void> {
     // Drop b abnormally.
     b.ws.terminate();
     const drop = await a.next('peerDropped', 3000);
-    bToken = (host as unknown as { lobbies: Map<number, { tokens: Map<number, string> }> }).lobbies.get(lobbyId)?.tokens.get(bMember) ?? '';
+    bToken = (host.core as unknown as { lobbies: Map<number, { tokens: Map<number, string> }> }).lobbies.get(lobbyId)?.tokens.get(bMember) ?? '';
     const b2 = await connect(port, 'ALICE 2');
     b2.send({ t: 'resume', lobbyId, memberId: bMember, token: bToken, version: VERSION });
     const res = await b2.next('resumed');

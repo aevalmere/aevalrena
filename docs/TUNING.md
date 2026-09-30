@@ -97,6 +97,39 @@ is the largest launch knockback the move produces against a victim at 100 percen
 ```
 move        gap  lift    ko %  full ko %  kb at 100
 ---------------------------------------------------
+jab          40     0    none          -       24.6
+ftilt        40     0     198          -       69.2
+utilt        26     0     193          -      117.7
+dtilt        26     0     213          -      111.1
+dashatk      40     0    none          -       85.6
+fsmash       40     0     121         79       94.2
+usmash       26     0     134         90      143.8
+dsmash       40     0     134         92       91.1
+nair         26     0    none          -       69.2
+fair         40     0     135          -       88.3
+bair          0     0     124          -       99.1
+uair          0    44     202          -      103.8
+dair         26     0    none          -      144.6
+nspecial     40     0    none        108       33.3
+sspecial     40     0     197          -       71.2
+uspecial     26     0     127          -      156.6
+dspecial     26     0     194          -      145.7
+ledgeatk     40     0     214          -       66.3
+getupatk     40     0     213          -       67.8
+```
+
+Rerun on 2026-09-29 after the Aeval move pass (see BALANCE_GUIDE.md). The same harness at the
+commit before that pass already read differently from the targets below for moves the pass did not
+touch (ftilt 198, fsmash 121, jab none), so those rows drifted with an earlier wave, not this one.
+What this pass moved, before and after on the same harness: nair none to none (kb at 100 77.5 to
+69.2: it is a combo tool now and is not meant to kill), fair 155 to 135, bair 141 to 124, uair 181
+to 202. utilt and usmash changed only startup and endlag, so their KO percent is unchanged.
+
+Older pass, kept for reference:
+
+```
+move        gap  lift    ko %  full ko %  kb at 100
+---------------------------------------------------
 jab          40     0    none          -       42.5
 ftilt        40     0     166          -       69.2
 utilt        26     0     201          -      117.7
@@ -118,10 +151,21 @@ ledgeatk     40     0     180          -       66.3
 getupatk     40     0     178          -       67.8
 ```
 
-Targets for this pass, all met inside plus or minus 10 percent: jab never below 250, ftilt 165,
+Targets for the older pass, all met there inside plus or minus 10 percent: jab never below 250, ftilt 165,
 utilt 150, dtilt 170, dashatk 150, fsmash 100 uncharged, usmash 105, dsmash 115, nair 175, fair 130,
 bair 120, uair 135, nspecial 210, sspecial 140, uspecial 160, dspecial 130 on the last hit, ledgeatk
 and getupatk 180. dair is a spike and is not calibrated: it sends the victim down, so a grounded
 victim never leaves the stage and the harness reports no kill. Numbers were reached by editing
 `bkb` and `kbg` in `src/characters/aeval/moves.ts`, never by changing the knockback formula or the
 TUNING defaults.
+
+## Move timing notes (2026-09-29)
+
+- Move frame data is in `src/characters/aeval/moves.ts`; the anim holds that line a swing up with
+  its hitbox are in `art/aeval/sheetmap.json` and the generated `src/characters/aeval/art/anims.ts`.
+  When a move's startup changes, move its holds too: utilt [6,4,9,11], usmash [8,8,9,21], uair
+  [5,5,7,16] put the javelin crop (uptilt_spike_2) on the first active frame (10, 16, 10); nair
+  [3,6,6,6,9] starts the swing on frame 3; nspecial [5,4,4,9,9] shows the push on frame 9.
+- dair bounce: `bounceOnHit` on the move def (vy -3.5, actionableIn 10).
+- Orb drain: `healFraction` on the orb projectile def (0.35).
+- Ledge hang hurtbox: `LEDGE_HANG_HURT_TOP` in `src/sim/state.ts` (2 px under the platform top).

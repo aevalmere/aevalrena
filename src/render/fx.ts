@@ -4,7 +4,7 @@ import { MAX_PLAYERS, SIM_HZ } from '../core/types';
 import type { FighterState, GameState, MoveDef, ProjectileDef } from '../core/types';
 import { chargeFraction, projectileChargeScale } from '../sim/hits';
 import { getFrame, getFrameAnchor } from './bake';
-import { GLOW, PALE, WHITE } from './colors';
+import { PALE, WHITE, glowFor } from './colors';
 import type { CharVisual, ProjectileAnim } from './visuals';
 import { getCharVisual, getProjectileVisual } from './visuals';
 
@@ -80,8 +80,9 @@ export function clearSparks(pool: SparkPool): void {
   pool.cursor = 0;
 }
 
-export function spawnSpark(pool: SparkPool, x: number, y: number, charId: string): void {
-  const visual = getCharVisual(charId);
+/** A hit spark from `charId`'s effect sheet, in the attacker's colour variant. */
+export function spawnSpark(pool: SparkPool, x: number, y: number, charId: string, variant = 0): void {
+  const visual = getCharVisual(charId, variant);
   if (visual === null || visual.hitspark.length === 0) return;
   const i = pool.cursor;
   pool.cursor = (i + 1) % SPARK_POOL;
@@ -319,7 +320,8 @@ function drawChargeRing(
   charge: number,
   spin: number,
   held: ProjectileDef | null,
-  facing: number
+  facing: number,
+  variant: number
 ): void {
   const max = TUNING.input.chargeMax > 0 ? TUNING.input.chargeMax : 1;
   let t = charge / max;
@@ -347,7 +349,7 @@ function drawChargeRing(
   const beads = CHARGE_BEADS_MIN + Math.floor((CHARGE_BEADS_MAX - CHARGE_BEADS_MIN) * t);
   const step = CHARGE_DIRS / beads;
 
-  ctx.fillStyle = t < 0.5 ? PALE : GLOW;
+  ctx.fillStyle = t < 0.5 ? PALE : glowFor(variant);
   for (let b = 0; b < beads; b++) {
     const dir = (Math.round(b * step) + spin) % CHARGE_DIRS;
     const bx = cx + Math.round(CHARGE_COS[dir] * radius) - 1;
@@ -446,7 +448,7 @@ export function drawGeysers(
   }
   for (let i = 0; i < count; i++) {
     const fighter = state.fighters[i];
-    updateGeyser(i, fighter, getCharVisual(fighter.charId), state.frame, posX[i], posY[i]);
+    updateGeyser(i, fighter, getCharVisual(fighter.charId, fighter.variant), state.frame, posX[i], posY[i]);
     drawGeyser(ctx, i, state.frame);
   }
 }
@@ -466,7 +468,7 @@ export function drawFighterFx(
     const fighter = state.fighters[i];
     const orbVisual =
       fighter.action === 'attack' && fighter.moveId === 'nspecial'
-        ? getCharVisual(fighter.charId)
+        ? getCharVisual(fighter.charId, fighter.variant)
         : null;
     if (orbVisual !== null && orbVisual.orbCharge.length > 0 && !fighter.charging) {
       drawOrbCast(ctx, orbVisual, fighter, posX[i], posY[i]);
@@ -490,11 +492,12 @@ export function drawFighterFx(
         fighter.charge,
         fighter.charge >> 1,
         heldProjectile(fighter),
-        fighter.facing
+        fighter.facing,
+        fighter.variant
       );
     }
     if (fighter.action !== 'attack' || fighter.moveId !== 'dspecial') continue;
-    const visual = getCharVisual(fighter.charId);
+    const visual = getCharVisual(fighter.charId, fighter.variant);
     if (visual === null) continue;
 
     // The whirlpool keeps cycling for the whole of dspecial.
@@ -507,6 +510,14 @@ export function drawFighterFx(
     const y = Math.round(posY[i] - canvas.height);
     ctx.drawImage(canvas, x, y);
   }
+}
+
+/** Colour variant of the fighter in `slot`, 0 when no fighter has it. Allocation free. */
+function variantOfSlot(state: GameState, slot: number): number {
+  for (let i = 0; i < state.fighters.length; i++) {
+    if (state.fighters[i].slot === slot) return state.fighters[i].variant;
+  }
+  return 0;
 }
 
 export function drawProjectiles(
@@ -526,8 +537,12 @@ export function drawProjectiles(
     const scale = projectile.scale > 0 ? projectile.scale : 1;
 
     const visual = getProjectileVisual(projectile.defId);
+    // A projectile draws in its owner's colour variant.
+    const variant = variantOfSlot(state, projectile.owner);
     let drawn = false;
     if (visual !== null) {
+      const tinted = getCharVisual(visual.owner.charId, variant);
+      const owner = tinted === null ? visual.owner : tinted;
       const isBig = scale >= BIG_SCALE;
       // Charged shots draw the expanded anim when the character has one.
       const useBig = isBig && visual.big !== null;
@@ -546,14 +561,14 @@ export function drawProjectiles(
       }
       if (name !== null) {
         const flipped = projectile.facing === -1;
-        drawShadow(ctx, visual.owner, name, x, y, flipped, drawScale);
+        drawShadow(ctx, owner, name, x, y, flipped, drawScale);
         if (isBig) {
           // One-frame motion trail: the same frame where it was a sim frame ago.
           const alpha = ctx.globalAlpha;
           ctx.globalAlpha = alpha * TRAIL_ALPHA;
           drawCentered(
             ctx,
-            visual.owner.fxSheetId,
+            owner.fxSheetId,
             name,
             x - projectile.vx,
             y - projectile.vy,
@@ -562,12 +577,12 @@ export function drawProjectiles(
           );
           ctx.globalAlpha = alpha;
         }
-        drawn = drawCentered(ctx, visual.owner.fxSheetId, name, x, y, flipped, drawScale);
+        drawn = drawCentered(ctx, owner.fxSheetId, name, x, y, flipped, drawScale);
       }
     }
 
     if (!drawn) {
-      ctx.fillStyle = GLOW;
+      ctx.fillStyle = glowFor(variant);
       ctx.beginPath();
       ctx.arc(Math.round(x), Math.round(y), FALLBACK_PROJECTILE_R * scale, 0, Math.PI * 2);
       ctx.fill();

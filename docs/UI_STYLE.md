@@ -185,3 +185,10 @@ card header. Click or T cycles the slot's team colour through `PLAYER_ACCENTS`
 (`playerAccentVars(players, slot)` in theme.ts). **Name field** (`.sel-name`, humans only):
 Space Mono 700 0.78rem caps, letter-spacing 0.18em, no box, a 1px accent underline at 40% that
 goes full accent with glow while editing.
+
+**Outfit colour** (`src/ui/select.ts`, `.sel-variants`, 2026-09-29): under the card header of
+each active slot, four 13 px circles filled with `VARIANT_SWATCHES` (blue, purple, white, pink
+from `src/render/palette.ts`; the only colours outside the accent tokens), the current one ringed
+in the panel colour and then the accent. A colour another slot already uses on the same character
+is dimmed and cannot be picked. `[` / `]`, pad L1 / R1 or a click cycles it; the portrait bust
+redraws in the chosen colour. The LAN lobby card shows the same swatch as a chip.

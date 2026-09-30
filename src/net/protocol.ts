@@ -14,7 +14,10 @@ export const LAN_PATH = '/lan';
 export const LOBBY_MAX = 4;
 export const SIM_LATENCIES = [0, 30, 60, 100] as const;
 /** Bump on any wire change. The agent's game version hash also covers the sim sources. */
-export const PROTOCOL_VERSION = 3;
+// variant: 3 -> 4 when lobby members started carrying a colour variant.
+export const PROTOCOL_VERSION = 4;
+/** variant: colour variants per character (src/render/palette.ts VARIANT_COUNT). */
+export const VARIANT_MAX = 4;
 /** `inputDelay` value meaning: pick from measured pings at match start. */
 export const AUTO_DELAY = -1;
 /** How long a dropped player's slot is held for a reconnect during a match. */
@@ -43,6 +46,8 @@ export interface LobbyMember {
   charId: string;
   /** Team colour index (PLAYER_ACCENTS). Defaults to the slot's own colour. */
   team: number;
+  /** variant: colour variant 0..3; the agent defaults it to the first one unused on this character. */
+  variant: number;
   ready: boolean;
   /** Voted Rematch on the results screen; when every member has, the lobby restarts. */
   rematch: boolean;
@@ -106,7 +111,7 @@ export type ClientMsg =
   | { t: 'create'; settings: LobbySettings; charId: string }
   | { t: 'join'; lobbyId: number; charId: string }
   | { t: 'leave' }
-  | { t: 'member'; charId?: string; team?: number; ready?: boolean; name?: string }
+  | { t: 'member'; charId?: string; team?: number; variant?: number; ready?: boolean; name?: string }
   | { t: 'settings'; settings: LobbySettings }
   | { t: 'assign'; memberId: number; slot: number }
   | { t: 'start' }
@@ -193,6 +198,18 @@ export function autoDelay(pings: number[], simLatencyMs: number): number {
 }
 
 /**
+ * variant: the first colour variant no one in `players` uses on `charId`, 0 when all are taken.
+ * Also used by the agent to default a joining member.
+ */
+export function freeVariant(players: readonly { charId: string; variant?: number }[], charId: string, from = 0): number {
+  for (let step = 0; step < VARIANT_MAX; step++) {
+    const v = (from + step) % VARIANT_MAX;
+    if (!players.some((p) => p.charId === charId && (p.variant ?? 0) === v)) return v;
+  }
+  return 0;
+}
+
+/**
  * The match a lobby starts: members in slot order, then CPU fill for empty slots (owned by the
  * lobby host's peer, whose browser runs the AI and sends its inputs). Teams follow the frozen
  * rule: on when two or more slots share a colour. When the humans have teamed up (two share a
@@ -211,10 +228,15 @@ export function buildMatchStart(lobby: LobbyInfo, seed: number): MatchStart {
   for (let slot = 0; slot < LOBBY_MAX; slot++) {
     const m = lobby.members.find((x) => x.slot === slot);
     if (m !== undefined) {
-      players.push({ slot, charId: m.charId, cpu: false, cpuLevel: 0, name: m.name, team: m.team });
+      players.push({ slot, charId: m.charId, cpu: false, cpuLevel: 0, name: m.name, team: m.team, variant: m.variant });
       owners.push(slot);
     } else if (lobby.settings.cpuFill) {
-      players.push({ slot, charId: 'aeval', cpu: true, cpuLevel: lobby.settings.cpuLevel, team: cpuTeam >= 0 ? cpuTeam : slot });
+      // variant: a fill CPU takes the next colour no member or earlier CPU uses on its character.
+      const others = [...players, ...lobby.members];
+      players.push({
+        slot, charId: 'aeval', cpu: true, cpuLevel: lobby.settings.cpuLevel, team: cpuTeam >= 0 ? cpuTeam : slot,
+        variant: freeVariant(others, 'aeval'),
+      });
       owners.push(hostSlot);
     }
   }

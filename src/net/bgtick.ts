@@ -35,3 +35,39 @@ export function startBackgroundTicker(onTick: () => void): BackgroundTicker {
     },
   };
 }
+
+export interface WorkerInterval {
+  stop(): void;
+}
+
+/**
+ * `fn` every `ms` from a Worker timer, so it keeps its cadence in a hidden tab (lobby pings and
+ * liveness in the in-browser LAN mode). Falls back to a page setInterval.
+ */
+export function startWorkerInterval(fn: () => void, ms: number): WorkerInterval {
+  let worker: Worker | null = null;
+  let url = '';
+  let interval: ReturnType<typeof setInterval> | 0 = 0;
+  try {
+    const src = `let h=setInterval(()=>postMessage(0),${Math.max(1, Math.round(ms))});onmessage=()=>{clearInterval(h);close();};`;
+    url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+    worker = new Worker(url);
+    worker.onmessage = () => fn();
+  } catch {
+    worker = null;
+    interval = setInterval(fn, ms);
+  }
+  return {
+    stop(): void {
+      if (worker !== null) {
+        worker.postMessage(0);
+        worker.terminate();
+        worker = null;
+      }
+      if (url !== '') URL.revokeObjectURL(url);
+      url = '';
+      if (interval !== 0) clearInterval(interval);
+      interval = 0;
+    },
+  };
+}

@@ -1,8 +1,15 @@
+import { startWorkerInterval, type WorkerInterval } from './bgtick';
+import { BrowserHost, NETWORK_HINT } from './browserhost';
+import { BUILD_VERSION } from './buildversion';
+import { MAX_MISSED } from './lobbycore';
 import {
   LAN_PATH, RECONNECT_MS,
   type ClientMsg, type InputHistory, type LobbyInfo, type LobbyListing, type LobbyMember, type LobbySettings, type MatchStart,
   type Retirement, type ServerMsg,
 } from './protocol';
+import { createLinkTransport, RtcLink, type BrowserLink } from './rtc';
+import { CodeError, expandCode, versionHash } from './sdpcode';
+import { createWebSocketTransport, type NetTransport } from './transport';
 
 /** sessionStorage key of the lobby seat this tab holds, so a reload mid-match can resume it. */
 const SEAT_KEY = 'aevalrena.lan.seat';
@@ -53,6 +60,19 @@ function writeSeat(seat: Seat | null): void {
 
 export type LinkStatus = 'idle' | 'connecting' | 'connected' | 'closed';
 export type LobbyStatus = 'none' | 'joining' | 'in' | 'reconnecting';
+/** 'agent': lobbies live on `npm run lan` agents. 'browser': WebRTC to the host's tab (no agent). */
+export type LanMode = 'none' | 'agent' | 'browser';
+
+/** A guest's side of joining with a code in the browser mode. */
+export interface GuestJoin {
+  state: 'idle' | 'answering' | 'answer' | 'failed';
+  /** The answer code to show the host. */
+  code: string;
+  message: string;
+}
+
+/** How long a guest waits for the host to enter its answer code. */
+export const GUEST_WAIT_MS = 120000;
 
 /** A listing with its agent address resolved, plus whether this build can join it. */
 export interface LobbyRow extends LobbyListing {
@@ -65,6 +85,9 @@ function cleanAddress(address: string): string {
 
 export class LanClient {
   name = 'PLAYER';
+  mode: LanMode = 'none';
+  /** Set from a #join= link: the LAN screen opens the browser mode's join view with it. */
+  pendingJoinCode = '';
 
   agentStatus: LinkStatus = 'idle';
   agentAddress = '';
@@ -90,6 +113,18 @@ export class LanClient {
   private reconnectDeadline = 0;
   /** Test hook: no reconnect attempt before this time (performance.now()). */
   private reconnectHoldUntil = 0;
+
+  /** Browser mode: the lobby link (a WebRTC link, or the host tab's loopback to its own lobby). */
+  private link: BrowserLink | null = null;
+  private linkTimer: WorkerInterval | null = null;
+  private lastRx = 0;
+  /** Browser mode guest: the character to join with once the host's lobby list arrives. */
+  private joinChar = '';
+  /** Browser mode: the host tab's lobby (LobbyCore plus one WebRTC link per guest). */
+  readonly host = new BrowserHost(() => this.changed());
+  guest: GuestJoin = { state: 'idle', code: '', message: '' };
+  private guestLink: RtcLink | null = null;
+  private guestTimer = 0;
 
   /** Last error or notice, shown on the LAN screen; cleared by the next action. */
   message = '';
@@ -416,6 +451,11 @@ export class LanClient {
     this.ws = null;
     this.stopPings();
     if (ws !== null && ws.readyState <= WebSocket.OPEN) ws.close(1000);
+    const link = this.link;
+    this.link = null;
+    this.linkTimer?.stop();
+    this.linkTimer = null;
+    link?.close();
   }
 
   private sendOn(ws: WebSocket, msg: ClientMsg): void {
@@ -423,14 +463,16 @@ export class LanClient {
   }
 
   send(msg: ClientMsg): void {
-    if (this.ws !== null) this.sendOn(this.ws, msg);
+    if (this.link !== null) this.link.sendText(JSON.stringify(msg));
+    else if (this.ws !== null) this.sendOn(this.ws, msg);
     // A player action replaces the last notice; bookkeeping messages keep it (a "lobby closed"
     // notice must survive the backToLobby sent on the way off the results screen).
     if (msg.t !== 'ping' && msg.t !== 'list' && msg.t !== 'backToLobby' && msg.t !== 'rematch' && msg.t !== 'leaveMatch') this.message = '';
   }
 
   private saveSeat(inMatch: boolean): void {
-    if (this.token === '') return;
+    // Browser mode has no resume: a reload counts as leaving.
+    if (this.token === '' || this.link !== null) return;
     writeSeat({ address: this.lobbyAddress, lobbyId: this.lobbyId, memberId: this.memberId, token: this.token, name: this.name, inMatch });
   }
 
@@ -476,6 +518,203 @@ export class LanClient {
     this.ws?.close(4000, 'simulated drop');
   }
 
+  /** The match's input transport over whichever lobby connection this client has. */
+  createMatchTransport(): (NetTransport & { dispose(): void }) | null {
+    if (this.link !== null) return createLinkTransport(this.link);
+    if (this.ws !== null) return createWebSocketTransport(this.ws);
+    return null;
+  }
+
+  // ---------------- browser mode (WebRTC, no agent) ----------------
+
+  /** Pick the LAN mode. Leaving a mode leaves its lobby and drops its connections. */
+  setMode(mode: LanMode): void {
+    if (mode === this.mode) return;
+    if (this.lobby !== null || this.link !== null || this.ws !== null) this.leave();
+    this.disconnectAgent();
+    this.cancelGuest();
+    this.mode = mode;
+    this.message = '';
+    this.changed();
+  }
+
+  /** Host: start a lobby in this tab. Guests join it with codes from `host.invite()`. */
+  createInBrowser(settings: LobbySettings, charId: string, ids: { stages: string[]; characters: string[] }): void {
+    if (this.host.busy) {
+      this.message = 'Your last lobby still has a match running. Try again when it ends';
+      this.changed();
+      return;
+    }
+    this.closeLobbySocket();
+    this.cancelGuest();
+    const link = this.host.start({
+      hostName: this.name, version: BUILD_VERSION, fallbackStage: ids.stages[0] ?? settings.stageId,
+      stages: ids.stages, characters: ids.characters,
+    });
+    this.attachLink(link, { t: 'create', settings, charId });
+  }
+
+  /** Guest: read the host's join code and make the answer code for it. */
+  joinWithCode(text: string, charId: string): void {
+    this.cancelGuest();
+    this.message = '';
+    let offerSdp = '';
+    let invite = 0;
+    try {
+      const code = expandCode(text);
+      if (code.kind !== 'offer') return this.guestFailed('That is an answer code. Enter the join code the host shows');
+      if (code.versionHash !== versionHash(BUILD_VERSION)) {
+        return this.guestFailed('Different version: the host runs another build of the game. Reload both pages');
+      }
+      offerSdp = code.sdp;
+      invite = code.invite;
+    } catch (err) {
+      return this.guestFailed(err instanceof CodeError ? err.message : 'That is not a join code');
+    }
+    let link: RtcLink;
+    try {
+      link = new RtcLink();
+    } catch (err) {
+      return this.guestFailed(`This browser cannot open a WebRTC connection: ${(err as Error).message}`);
+    }
+    this.guestLink = link;
+    this.guest = { state: 'answering', code: '', message: '' };
+    this.changed();
+    link.onOpen = () => {
+      if (this.guestLink !== link) return;
+      this.clearGuestTimer();
+      this.guestLink = null;
+      this.guest = { state: 'idle', code: '', message: '' };
+      this.joinChar = charId;
+      this.attachLink(link, null);
+    };
+    link.onClose = () => {
+      if (this.guestLink === link) this.guestFailed('The connection closed before it opened.');
+    };
+    void (async () => {
+      try {
+        await link.pc.setRemoteDescription({ type: 'offer', sdp: offerSdp });
+        await link.pc.setLocalDescription(await link.pc.createAnswer());
+        const answer = await link.localCode('answer', invite, BUILD_VERSION);
+        if (this.guestLink !== link) return;
+        this.guest = { state: 'answer', code: answer, message: '' };
+        this.guestTimer = window.setTimeout(() => {
+          if (this.guestLink === link) this.guestFailed('The host did not connect within 2 minutes.');
+        }, GUEST_WAIT_MS);
+        this.changed();
+      } catch (err) {
+        if (this.guestLink !== link) return;
+        this.guestFailed(err instanceof CodeError ? err.message : `Could not answer that code: ${(err as Error).message}`);
+      }
+    })();
+  }
+
+  /** Guest: give up on the pending join. */
+  cancelGuest(): void {
+    this.dropGuestLink();
+    if (this.guest.state !== 'idle') {
+      this.guest = { state: 'idle', code: '', message: '' };
+      this.changed();
+    }
+  }
+
+  private guestFailed(message: string): void {
+    this.dropGuestLink();
+    this.guest = { state: 'failed', code: '', message };
+    this.changed();
+  }
+
+  private dropGuestLink(): void {
+    if (this.guestTimer !== 0) window.clearTimeout(this.guestTimer);
+    this.guestTimer = 0;
+    const link = this.guestLink;
+    this.guestLink = null;
+    if (link === null) return;
+    link.onOpen = null;
+    link.onClose = null;
+    link.close();
+  }
+
+  private clearGuestTimer(): void {
+    if (this.guestTimer !== 0) window.clearTimeout(this.guestTimer);
+    this.guestTimer = 0;
+  }
+
+  /** Talk to a lobby over a browser link: hello, then `first` (a guest joins once it has the list). */
+  private attachLink(link: BrowserLink, first: ClientMsg | null): void {
+    this.closeLobbySocket();
+    this.link = link;
+    this.version = BUILD_VERSION;
+    this.lobbyAddress = '';
+    this.lobbyStatus = 'joining';
+    this.message = '';
+    this.lastRx = performance.now();
+    link.onText = (text) => {
+      if (this.link !== link) return;
+      this.lastRx = performance.now();
+      const msg = parse(text);
+      if (msg === null) return;
+      if (msg.t === 'lobbies' && this.lobbyStatus === 'joining' && this.joinChar !== '') {
+        // The host tab holds exactly one lobby: join it.
+        const charId = this.joinChar;
+        this.joinChar = '';
+        const target = msg.lobbies[0];
+        if (target === undefined) {
+          this.message = 'That lobby has closed';
+          this.lobbyStatus = 'none';
+          this.closeLobbySocket();
+          this.changed();
+          return;
+        }
+        this.sendLink(link, { t: 'join', lobbyId: target.lobbyId, charId });
+        return;
+      }
+      if (msg.t === 'welcome' || msg.t === 'lobbies') return;
+      this.receive(msg);
+    };
+    link.onClose = () => {
+      if (this.link === link) this.linkLost();
+    };
+    this.sendLink(link, { t: 'hello', name: this.name, version: BUILD_VERSION });
+    if (first !== null) this.sendLink(link, first);
+    // Pings measure the round trip and keep the host's liveness count at zero; silence from the
+    // host for MAX_MISSED seconds drops the link. A Worker timer keeps this going in a hidden tab.
+    const tick = (): void => {
+      if (this.link !== link) return;
+      if (performance.now() - this.lastRx > MAX_MISSED * 1000 + 500) {
+        link.close();
+        this.linkLost();
+        return;
+      }
+      this.sendLink(link, { t: 'ping', ts: performance.now(), rtt: this.rtt });
+    };
+    this.linkTimer = startWorkerInterval(tick, 1000);
+    tick();
+    this.changed();
+  }
+
+  private sendLink(link: BrowserLink, msg: ClientMsg): void {
+    link.sendText(JSON.stringify(msg));
+  }
+
+  /** The browser link went down: no resume in this mode, so the lobby (or match) is over. */
+  private linkLost(): void {
+    this.link = null;
+    this.linkTimer?.stop();
+    this.linkTimer = null;
+    const hadLobby = this.lobby !== null;
+    this.lobby = null;
+    this.lobbyStatus = 'none';
+    this.token = '';
+    if (this.matchActive) {
+      this.message = 'Lost the connection to the host';
+      this.onLinkLost?.(this.message);
+    } else if (this.message === '') {
+      this.message = hadLobby ? `Lost the connection to the host. ${NETWORK_HINT}` : 'Could not reach the host';
+    }
+    this.changed();
+  }
+
   me(): LobbyMember | null {
     if (this.lobby === null) return null;
     return this.lobby.members.find((m) => m.id === this.memberId) ?? null;
@@ -485,7 +724,7 @@ export class LanClient {
     return this.lobby !== null && this.lobby.hostId === this.memberId;
   }
 
-  setMember(patch: { charId?: string; team?: number; ready?: boolean; name?: string }): void { this.send({ t: 'member', ...patch }); }
+  setMember(patch: { charId?: string; team?: number; variant?: number; ready?: boolean; name?: string }): void { this.send({ t: 'member', ...patch }); }
   setSettings(settings: LobbySettings): void { this.send({ t: 'settings', settings }); }
   assign(memberId: number, slot: number): void { this.send({ t: 'assign', memberId, slot }); }
   start(): void { this.send({ t: 'start' }); }

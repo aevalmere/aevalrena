@@ -489,6 +489,44 @@ stalls. Damage runs at about 6% per second; with the raised ceiling the moves th
 about 100% (bthrow at the ledge) to 140% (usmash), so the floor on a stock is set by the move data.
 Against level 9: still 10/10, 0 SDs, 0 early shields, 0.09 ms per call.
 
+### Retune for the 2026-09-29 balance and ledge wave
+The move pass (BALANCE_GUIDE.md) and the ledge rules (SPEC 4.5) broke five cases: `d`, `j`, `al`,
+`ap` and `aq`. The common cause was the ledge. A fighter falling past a ledge with no input now
+grabs it, and a hanger is out of reach of every melee hitbox except dtilt, dsmash and dair
+(`hitsLedge`). A standing level 0, the scripted spammer and the ledge-test dummy all ended up
+hanging for the rest of the match while the CPUs threw forward smashes and crescents over them.
+
+What changed:
+- Ledge traps (level 10): three plans, `ledgeTrapDtilt`, `ledgeTrapDsmash` and `ledgeTrapDair`,
+  offered first (with the edgeguard bonus) against a hanger within 260 px. Each runs to the spot
+  (dtilt 16 px inward of the corner, dsmash 24, dair 3), then walks the last 50 px, and swings so
+  the first active frame lands as the hanger's ledge invincibility ends. That time is read off the
+  perceived state when the plan is chosen, like the plan direction. Rollouts still pick among
+  them, so dtilt pops the hanger up for a follow-up and dsmash sends it out at 30 degrees.
+- Ledge punish (levels 1 to 9): `ledgeApproach` has a hanging branch. The CPU walks to 16 px
+  inward, where dtilt and dsmash both reach the hang hurtbox, and uses dsmash (always from 60%,
+  otherwise by smash accuracy) or dtilt, timed past the invincibility. Disciplined profiles wait
+  at 44 px, outside the ledge attack, until the invincibility is nearly over. The charged forward
+  smash at a hanger is gone: it can no longer hit one.
+- Helpless over the stage (levels 1 to 9): drift to the middle. Chasing a hanger from there
+  drifted off the lip with the ledge taken, a self-destruct the new rules made common.
+- Predictor: a hanging or lying opponent can only climb, attack, roll, jump or drop, stay or stand.
+  Guesses outside that set (the rhythm and sequence models know nothing of the situation) are
+  masked out. That fixed `ap`, whose worst pair was a rushdown hanging more often than before.
+- Orb drain: a rollout credits percent healed at the same 1.25 weight as damage taken, so a
+  landed orb is worth more than one thrown for space.
+- Frame data: the combo table, kill confirms and every rollout read `moves.ts`, so the slower
+  utilt, usmash and uair, the stronger fair and bair, the new nair and the dair bounce are picked
+  up without table edits: the table is rebuilt at module init and the rollouts score fair and
+  bair kills, nair starters and post-bounce dair follow-ups on what the sim actually does. The
+  level 1 to 9 juggle reads startup and reach from the move data, so no constants changed there.
+
+Measured after the retune (same harness): `d` 36% on the hanger, `j` 6/6 against the spammer,
+`al` standing first KOs 455/501/463 f, `ap` mean gain 15.7 points with the worst pair -2.5,
+`aq` 43% routed and a median first KO of 630 f (10.5 s) against a standing dummy. `ar` still fails
+on p99 alone inside the full harness (about 5 ms); run on its own the same match measures 0.12 ms
+mean and 2.7 ms p99. It failed the same way before this retune. No threshold was changed.
+
 ## 4. Known limits
 - What the wave 2 gates mean (coordinator decision, 2026-09-29): the substantive gates are 0 stocks
   lost to the six archetypes (36/36 matches won, 0 stocks, 0 SDs) and the profile transfer (+17

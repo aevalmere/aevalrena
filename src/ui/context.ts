@@ -20,6 +20,8 @@ export interface SlotState {
   name?: string;
   /** Team colour, an index into PLAYER_ACCENTS; absent means the slot's own colour. */
   team?: number;
+  /** Colour variant 0..3 (src/render/palette.ts); select.ts fills it in. */
+  variant?: number;
 }
 
 /** Menu state shared across screens for the lifetime of the UiController. */

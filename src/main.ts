@@ -30,7 +30,7 @@ import { lanClient } from './net/client';
 import { eliminateFighter } from './net/eliminate';
 import type { InputHistory, MatchStart, Retirement } from './net/protocol';
 import { RollbackSession, type LocalSource, type RollbackOptions } from './net/rollback';
-import { createWebSocketTransport } from './net/transport';
+import type { NetTransport } from './net/transport';
 import { createLocalView, type LocalView } from './net/view';
 import { createLanOverlay, type LanOverlay } from './ui/lan';
 
@@ -67,7 +67,7 @@ interface LanMatch {
   session: LanSession;
   rollback: RollbackSession;
   view: LocalView;
-  transport: ReturnType<typeof createWebSocketTransport>;
+  transport: NetTransport & { dispose(): void };
   overlay: LanOverlay;
   /** Steps the match from a Worker while the tab is hidden (rAF stops there). */
   ticker: BackgroundTicker;
@@ -245,6 +245,7 @@ function buildResults(state: GameState): ResultsData {
     };
     if (name !== undefined) row.name = name;
     if (team !== undefined) row.team = team;
+    if (f.variant !== 0) row.variant = f.variant;
     players.push(row);
   }
   const matchFrames = state.endFrame >= 0 ? state.endFrame : state.frame;
@@ -617,8 +618,9 @@ function boot(): void {
   function startLanMatch(start: MatchStart, history?: InputHistory, retirements: Retirement[] = []): void {
     if (ui === null) return;
     const me = lanClient.me();
-    const ws = lanClient.ws;
-    if (me === null || ws === null) return;
+    // The agent's WebSocket, or in the browser mode the WebRTC link (the loopback on the host).
+    const transport = lanClient.createMatchTransport();
+    if (me === null || transport === null) return;
     // Replacing a finished LAN match: the agent already counts us in the new one.
     endMatch(false);
 
@@ -639,7 +641,6 @@ function boot(): void {
       if (p.cpu) return (_frame: number, st: GameState) => cpuInput(st, p.slot, p.cpuLevel, rand);
       return () => lanSession.localSource();
     });
-    const transport = createWebSocketTransport(ws);
     const lan: LanMatch = {
       session: lanSession,
       rollback: null as unknown as RollbackSession,
@@ -723,6 +724,7 @@ function boot(): void {
       document.documentElement.dataset.aevlan = JSON.stringify({
         phase,
         hidden: document.hidden,
+        mode: lanClient.mode,
         agentStatus: lanClient.agentStatus,
         lobbyStatus: lanClient.lobbyStatus,
         message: lanClient.message,
@@ -802,6 +804,7 @@ function boot(): void {
       cpuLevel: p.cpuLevel,
       ...(p.name === undefined ? {} : { name: p.name }),
       ...(p.team === undefined ? {} : { team: p.team }),
+      ...(p.variant === undefined ? {} : { variant: p.variant }),
     }));
     startMatch({
       stageId: previous.stageId,
@@ -878,7 +881,17 @@ function boot(): void {
       resizeView();
       if (ui !== null) ui.show('title');
       // A reload in the middle of a LAN match: take the seat back and land in the match.
-      lanClient.resumeSavedSeat();
+      const resumed = lanClient.resumeSavedSeat();
+      // A scanned in-browser LAN join code (#join=<code>): open the join view with it filled in.
+      const joinLink = /^#join=([A-Za-z0-9_-]+)$/.exec(location.hash);
+      if (joinLink !== null) {
+        history.replaceState(null, '', location.pathname + location.search);
+        if (!resumed) {
+          lanClient.setMode('browser');
+          lanClient.pendingJoinCode = joinLink[1];
+          openLanScreen();
+        }
+      }
     })
     .catch((err: unknown) => {
       showBootError(uiRoot, err);

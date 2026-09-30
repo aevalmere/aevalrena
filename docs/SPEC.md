@@ -532,9 +532,9 @@ Air, actionable (air with no hitstun, not helpless):
 Smash charge: a `chargeable` move holds at frame 0 for up to `chargeMax` frames (60) while its charge
 button is held down. That button is Special for a move whose `chargeButton` is `'special'`; otherwise
 it depends on how the smash started. A smash started with Attack held (a flick, or a jump-cancelled /
-out-of-shield smash) charges on Attack. A smash started without Attack down at all — the F&W up
-smash, the F&S down smash, or the C-stick — has no Attack key in its input, so it charges instead on
-its own direction: Up for up smash, Down for down smash, the facing side (or the matching C-stick
+out-of-shield smash) charges on Attack. A smash started without Attack down at all, such as the F&W
+up smash, the F&S down smash, or the C-stick, has no Attack key in its input, so it charges instead
+on its own direction: Up for up smash, Down for down smash, the facing side (or the matching C-stick
 direction) for forward smash. Damage scales by `1 + chargeBonus * charge/max` (chargeBonus 0.4).
 
 Moves end at `totalFrames`, or earlier at `iasa` if a new action is requested. Aerials that reach the
@@ -633,14 +633,28 @@ tiers: jabDrop 1, orb 2 (tap) to 10 (full), orbBurst the same 2 to 10 as its orb
 ### 4.5 Ledges
 
 A platform with `ledgeLeft/ledgeRight` has a grab point at its top corner. A fighter that is airborne,
-falling (vy > 0), not in hitstun, not attacking, and whose `ledgeGrabBox` overlaps a grab point (and
-is facing it or moving toward it) snaps to `ledgeHang` at the ledge with `LEDGE_HANG_INVULN` frames
-of invuln. From hang: up or toward-stage = `ledgeClimb` (30f, invulnerable for its first 28),
-jump = `ledgeJump` (invulnerable for 12 frames from the frame it leaves), attack = `ledgeatk`
-(invulnerable on move frames 0 to 21), shield = `ledgeRoll` (invulnerable through `ROLL.invEnd + 6`),
-down or away = drop (regain double jump). A hang never times out: nothing but the fighter's own
-ledge option or a KO ends it (ledge stalling is allowed). Each regrab without landing increments
-`ledgeRegrabs`; above `LEDGE_MAX_REGRABS` the ledge does not grant invuln.
+falling (vy > 0), not in hitstun, not attacking, and whose `ledgeGrabBox` overlaps a grab point snaps
+to `ledgeHang` at the ledge with `LEDGE_HANG_INVULN` frames of invuln when it is facing the stage,
+moving toward it, holding toward it, or holding no horizontal direction and not Down. The last case
+lets a player drop off the stage facing out and catch the ledge on the way down; holding away or
+holding Down falls past.
+
+Grabbing never climbs, and no held direction climbs: Up and toward-stage do nothing while hanging.
+The fighter leaves the ledge by a button: Jump = `ledgeClimb` (30f, invulnerable for its first 28),
+Attack = `ledgeatk` (climbs and swings, invulnerable on move frames 0 to 21), Dodge or Shield =
+`ledgeRoll` (invulnerable through `ROLL.invEnd + 6`), Down or away = drop (regain double jump). The
+`ledgeGetUp`, `ledgeAttack` and `ledgeRoll` commands do the same as their buttons; the `ledgeJump`
+command is the only way to jump straight off (invulnerable for 12 frames from the frame it leaves).
+A hang never times out: nothing but the fighter's own ledge option or a KO ends it (ledge stalling
+is allowed). Each regrab without landing increments `ledgeRegrabs`; above `LEDGE_MAX_REGRABS` the
+ledge does not grant invuln.
+
+A hanging fighter's hurtbox is the crouch hurtbox (26 x 26) hung under the lip: its top sits
+`LEDGE_HANG_HURT_TOP` (2) px below the platform top. Only melee hitboxes of a move with
+`hitsLedge` (Aeval: dtilt, dsmash, dair) can hit it; every other melee hitbox passes over. A
+projectile hits it when its circle overlaps that hurtbox, so a shot skimming the stage floor (the
+tap orb at y -20, even a full-charge orb whose 18 px circle bottoms out at y -2) flies over, and a
+shot thrown from the air at hang height connects. Hang invulnerability still applies on top.
 
 ### 4.6 Match
 
@@ -685,18 +699,18 @@ fresh (0%) opponent is KO'd by a full-charge fsmash around 90% from center stage
 |---|---|---|---|---|---|---|
 | jab | 18 | 4-7 | 3 | 361 | 20 / 40 | short water slap, iasa 14 |
 | ftilt | 30 | 10-14 | 8 | 361 | 19 / 51 | forward splash, chain of r 10 circles x 12 to 70 at y -18 (reach 80), iasa 26 |
-| utilt | 24 | 6-11 | 7 | 90 | 37 / 90 | upward ripple |
-| dtilt | 22 | 5-9 | 6 | 80 | 34 / 95 | low puddle poke, pops up |
+| utilt | 30 | 10-15 | 7 | 90 | 37 / 90 | upward ripple, iasa 26 |
+| dtilt | 22 | 5-9 | 6 | 80 | 34 / 95 | low puddle poke, pops up, hitsLedge |
 | dashatk | 36 | 8-18 | 9 | 60 | 32 / 50 | slide on a wave, velocity +3 vx on frame 4, chain of r 11 circles x 14 to 91 at y -16 (reach 102) |
 | fsmash | 48 | 18-23 | 15 | 361 | 19 / 46 | chargeable, big crescent wave, chain of r 13 circles x 16 to 89 at y -18 (reach 102) |
-| usmash | 40 | 12-18 | 14 | 88 | 30 / 74 | chargeable, geyser burst |
-| dsmash | 42 | 12-15 both sides | 12 | 30 | 21 / 52 | chargeable, ring wave both sides |
-| nair | 34 | 5-22 | 7 | 60 | 21 / 63 | orbiting bubble, landing lag 8 |
-| fair | 30 | 9-13 | 10 | 45 | 18 / 54 | forward wave slash, landing lag 12 |
-| bair | 28 | 7-10 | 11 | 361 | 21 / 56 | back splash, landing lag 12 |
-| uair | 30 | 8-12 | 9 | 85 | 26 / 79 | upward flick, landing lag 11 |
-| dair | 36 | 12-16 | 12 | 270 (spike) | 30 / 85 | downward drop, landing lag 16 |
-| nspecial | 40 (56 full charge) | projectile f11 (f27 full charge) | 4 (11 full) | 40 | 14 / 30 (40 / 84 full) | Water Orb: vx 3.5 to 9.5, lifetime 48 to 34, r 8 to 12, clash strength 2 to 10, chargeCastFrames 16; stats lerp on the exponential charge curve, then power 0.25-1.4 and scale 0.6-1.5 on top; destroyOnHit, bursts with the orb's power and scale |
+| usmash | 46 | 16-22 | 14 | 88 | 30 / 74 | chargeable, geyser burst |
+| dsmash | 42 | 12-15 both sides | 12 | 30 | 21 / 52 | chargeable, ring wave both sides, hitsLedge |
+| nair | 30 | 3-6 clean, 7-20 late | 8 clean, 5 late | 70 clean, 60 late | 20 / 50 clean, 12 / 40 late | body-centred bubble r 22 (r 20 late), one group, landing lag 5 |
+| fair | 30 | 9-13 | 11.5 | 45 | 18 / 54 | forward wave slash, circles x 22 r 13 and x 29 r 12 (reach 41), landing lag 12 |
+| bair | 28 | 7-10 | 12.5 | 361 | 21 / 56 | back splash, circles x -22 and x -29 r 12 (reach 41), landing lag 12 |
+| uair | 33 | 10-14 | 8 | 85 | 26 / 79 | upward flick, javelin tops out at y -110, landing lag 12 |
+| dair | 36 | 12-16 | 12 | 270 (spike) | 30 / 85 | downward drop, landing lag 16, hitsLedge; on a body hit the attacker hops up (vy -3.5), gets the air dodge back (not the double jump) and is actionable 10 frames after hitlag |
+| nspecial | 31 (43 full charge) | projectile f9 (f21 full charge) | 4 (16 full) | 40 | 14 / 30 (40 / 36 full) | Water Orb: vx 3.5 to 9.5, lifetime 48 to 34, r 8 to 12, clash strength 2 to 10, chargeCastFrames 12; stats lerp on the exponential charge curve, scale 0.6-1.5 on top; destroyOnHit, bursts with the orb's scale; a direct hit heals Aeval 35 percent of the damage dealt (floor 0 percent) |
 | sspecial | 42 | projectile f10 | 9 | 361 | 24 / 44 | Tidal Crescent: vx 3.2, lifetime 146, returns on age 57 (about 202 px out) for half damage, dies about 82 px behind; clash strength 4; pierces (destroyOnHit false); no fighter movement |
 | uspecial | 48 | 8-20 | 8 | 80 | 55 / 66 | Geyser: velocity setY -6.5 on f8, then +0.3 drift; helplessAfter |
 | dspecial | 50 | 10-46 multi (4 pull windows of 8f, then a 5f launcher) | 2 x5 | 90 then 60 last | 6 / 10, last 68 / 153 | Whirlpool: pulls in, last hit launches |
@@ -806,6 +820,37 @@ the primary read.
 
 Budget: render + sim under 4 ms per frame on a 2020 integrated-GPU laptop at 1x zoom with 4
 fighters and 200 particles. No `ctx.filter`, no `shadowBlur`, no per-frame `getImageData`.
+
+### 8.1 Colour variants (2026-09-29)
+
+Aeval has four outfit colours of the same character: 0 blue (the sheet as drawn, default),
+1 purple, 2 white, 3 pink. They are a palette swap, not separate art.
+
+- Remap (`src/render/palette.ts`, pure, no DOM): a pixel belongs to the blue cluster when its
+  HSL hue is in 175..265, saturation is at least 0.35 and lightness is above 0.12, with a short
+  linear feather at each edge so antialiased pixels do not seam. The band was measured from the
+  body and fx atlases: saturated pixels peak at hue 200..215 (water, eyes, projectiles); the hair
+  and coat share the hue family but sit below saturation 0.3, and the ink outline sits below
+  lightness 0.12, so neither moves. Skin (hue 0..40, 320..360) is outside the band. Purple: hue
+  280 plus half the pixel's offset from 207, saturation x1.12. Pink: hue 340 the same way,
+  lightness lifted 14% toward white. White: saturation x0.08, lightness lifted 42% toward white,
+  so shading stays. Lightness and relative saturation are otherwise kept.
+- Bake: `bakeVariantSheet` in `bake.ts` remaps an already baked sheet frame by frame and shares
+  its white hit-flash silhouettes. `getCharVisual(charId, variant)` in `visuals.ts` bakes a
+  variant's body and fx sheets on first use and caches them; a match played only in blue bakes
+  nothing extra.
+- Sim: `MatchConfig.players[].variant?` (absent = 0) becomes `FighterState.variant` (0..3,
+  anything else reads as 0). It is cosmetic; no sim rule reads it.
+- Render: the body, the up-special geyser, the whirl, the charging orb, hit sparks and the
+  charge beads draw in the fighter's variant; a projectile draws in its owner's. Particle and
+  glow colours (`particles.ts`, `GLOW` in `colors.ts`) are per-variant tables built once at load.
+- UI: character select shows four swatch circles per active slot (see `docs/UI_STYLE.md`
+  section 7); the HUD bust and stocks and the results win pose are recoloured with the same
+  remap (`src/render/varianticon.ts`). Two slots on the same character never share a colour.
+- LAN: `LobbyMember.variant` travels with the character and team colour; the agent defaults a
+  joining member to the first colour unused on their character, accepts only 0..3, and fill
+  CPUs take the next unused one. `PROTOCOL_VERSION` 4.
+- Previews: `npx --yes tsx tools/variants/preview.ts` writes `art/aeval/preview_variants/`.
 
 ---
 

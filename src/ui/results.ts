@@ -1,6 +1,7 @@
 import type { FighterStats, ResultsData } from '../core/types';
 import type { MenuCtx } from './context';
 import { pickQuote } from './quotes';
+import { setVariantSrc } from '../render/varianticon';
 import { TEAM_NAMES, accentVars, iconAsset, playerAccentVars, playerTag, uiAsset } from './theme';
 
 /**
@@ -480,7 +481,8 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
             pose.style.setProperty('--pose-h', `${pose.naturalHeight * 3}px`);
           }
         });
-        pose.src = iconAsset(info.winPose);
+        // The win pose in the winner's colour variant (src/render/palette.ts).
+        setVariantSrc(pose, iconAsset(info.winPose), p.variant ?? 0);
         ringWrap.appendChild(pose);
       }
       stage.appendChild(ringWrap);

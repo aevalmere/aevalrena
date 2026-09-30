@@ -1,6 +1,7 @@
 import type { GameState } from '../core/types';
 import { FS_METER } from '../core/constants';
 import { percentColor } from '../render/colors';
+import { setVariantSrc } from '../render/varianticon';
 import { iconAsset, playerAccentVars, playerTag, uiAsset } from './theme';
 
 /**
@@ -331,8 +332,11 @@ function el(tag: string, className: string, parent: HTMLElement | null): HTMLEle
   return node;
 }
 
-/** An <img> showing `src` that falls back once to `fallback` if `src` fails to load. */
-function img(className: string, src: string, fallback: string, parent: HTMLElement): HTMLImageElement {
+/**
+ * An <img> showing `src` in colour `variant` (src/render/palette.ts) that falls back once to
+ * `fallback` if `src` fails to load.
+ */
+function img(className: string, src: string, fallback: string, parent: HTMLElement, variant: number): HTMLImageElement {
   const node = document.createElement('img');
   node.className = className;
   node.alt = '';
@@ -340,10 +344,10 @@ function img(className: string, src: string, fallback: string, parent: HTMLEleme
   if (src !== fallback) {
     node.onerror = (): void => {
       node.onerror = null;
-      node.src = fallback;
+      setVariantSrc(node, fallback, variant);
     };
   }
-  node.src = src;
+  setVariantSrc(node, src, variant);
   parent.appendChild(node);
   return node;
 }
@@ -377,7 +381,7 @@ export function createHud(host: HTMLElement, deps: HudDeps): Hud {
     const portrait = el('div', 'hud-portrait', card);
     el('div', 'hud-ring', portrait);
     if (info.icon !== null && info.bust !== null) {
-      img('hud-face', info.bust, info.icon, portrait);
+      img('hud-face', info.bust, info.icon, portrait, fighter.variant);
     } else {
       const face = el('div', 'hud-face hud-face-fallback', portrait);
       face.textContent = info.name.slice(0, 1);
@@ -398,7 +402,7 @@ export function createHud(host: HTMLElement, deps: HudDeps): Hud {
     const stocks: HTMLElement[] = [];
     for (let s = 0; s < stockCount; s++) {
       if (info.icon !== null && info.stock !== null) {
-        stocks.push(img('hud-stock', info.stock, info.icon, stockRow));
+        stocks.push(img('hud-stock', info.stock, info.icon, stockRow, fighter.variant));
       } else {
         stocks.push(el('span', 'hud-stock', stockRow));
       }

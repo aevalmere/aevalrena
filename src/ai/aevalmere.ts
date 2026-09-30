@@ -747,6 +747,11 @@ const P_X_FF = defPlan('tumbleFastFall', 2, F_TAIL, 36);
 const P_X_NAIR = defPlan('tumbleNair', 3, F_ATTACK | F_TAIL, 36);
 // Final Smash
 const P_FS = defPlan('finalSmash', 2, 0, 24);
+// Ledge traps (2026-09-29 ledge rules): a hanger is reached only by the down attacks. Walk to the
+// spot and swing as its ledge invincibility runs out. Re-planned every REPLAN frames on the walk.
+const P_LT_DTILT = defPlan('ledgeTrapDtilt', 1, F_ATTACK | F_INTR, 60);
+const P_LT_DSMASH = defPlan('ledgeTrapDsmash', 1, F_ATTACK | F_INTR, 64);
+const P_LT_DAIR = defPlan('ledgeTrapDair', 1, F_ATTACK | F_INTR | F_TAIL, 64);
 const PLAN_COUNT = PLAN_NAME.length;
 
 /** Debug name of a plan id, for the harness and the docs. */
@@ -761,6 +766,9 @@ let cHome = 1;          // toward the stage centre, fixed when the plan was chos
 let cSi: StageInfo = { minX: -180, maxX: 180, topY: 0, botY: 24, cx: 0 };
 let sHeld = 0;
 let sDirect = 0;
+let cFrame = 0;         // sim frame of the step being scripted (real or rollout)
+let cEdgeX = 0;         // ledge trap: the corner the opponent hangs from, fixed when the plan was chosen
+let cFireAt = 0;        // ledge trap: first sim frame a hit can land (the hanger's invincibility ends)
 
 /** A fresh press of `bit` if it is not held already this frame; nothing otherwise. */
 function press(bit: number): number { return (cPrev & bit) === 0 ? bit : 0; }
@@ -812,6 +820,35 @@ function recoverStep(f: FighterState, variant: number): void {
   if (f.jumpsLeft === 0 && f.vy > 0 && below > REC_US_AT[variant]) {
     if ((cPrev & SP) === 0) sDirect = C_USPEC;
   }
+}
+
+/** Ledge trap spots, px inward of the corner, and the startups the swing is timed with. */
+const LT_DTILT_SPOT = 16;
+const LT_DSMASH_SPOT = 24;
+const LT_DAIR_SPOT = 3;
+const LT_DTILT_STARTUP = 5;
+const LT_DSMASH_STARTUP = 12;
+/** dair: jump squat, a short hop's rise and the dair startup, frames from the jump press to the hit. */
+const LT_DAIR_LEAD = 18;
+/** Past this many px beyond the spot the approach runs instead of walking. */
+const LT_RUN_MARGIN = 50;
+
+/**
+ * Ledge trap script: walk to `spot` px inward of the hanger's corner (never past it), face the
+ * edge, then send `code` so its first active frame lands on cFireAt or later. The hang hurtbox
+ * sits under the lip, 13 px either side of the corner: dtilt reaches it from inside 29 px,
+ * dsmash (both sides) from inside 42.
+ */
+function ledgeTrap(f: FighterState, code: number, spot: number, lead: number): void {
+  if (!f.onGround || f.action === 'attack' || f.action === 'jumpsquat') return;
+  const T = dirBit(cDir);
+  const d = (f.x - cEdgeX) * -cDir;
+  // Run while far (the skid out of a run is well under LT_RUN_MARGIN), walk the last stretch.
+  if (d > spot + LT_RUN_MARGIN) { sHeld = safeDir(T, f); return; }
+  if (d > spot + 3) { sHeld = safeDir(T, f) | WK; return; }
+  if (code === C_DTILT && f.facing !== cDir) { sHeld = safeDir(T, f) | WK; return; }
+  if (cFrame + lead < cFireAt) return;
+  if (code === 0) sHeld = press(J); else sDirect = code;
 }
 
 /** Short-hop / full-hop aerial script: Jump held `hold` frames, the aerial sent on frame `atk`. */
@@ -1002,6 +1039,14 @@ function planStep(pid: number, t: number, f: FighterState): void {
     case P_X_FF: if (t === 0) sHeld = press(G); else if (f.vy > 0 && !f.fastFalling) sHeld = press(D); break;
     case P_X_NAIR: if (t === 0) sHeld = press(G); else sHeld = B; if (t === 2) sDirect = C_NAIR; break;
     case P_FS: if (t === 0) sDirect = C_FS; break;
+    case P_LT_DTILT: ledgeTrap(f, C_DTILT, LT_DTILT_SPOT, LT_DTILT_STARTUP); break;
+    case P_LT_DSMASH: ledgeTrap(f, C_DSMASH, LT_DSMASH_SPOT, LT_DSMASH_STARTUP); break;
+    case P_LT_DAIR:
+      // A short hop straight up at the lip, the dair on the way down, fast fall into the hanger.
+      if (f.onGround || f.action === 'jumpsquat') ledgeTrap(f, 0, LT_DAIR_SPOT, LT_DAIR_LEAD);
+      else if (f.action === 'air' && f.vy > -1.5) sDirect = C_DAIR;
+      if (!f.onGround && f.action === 'attack' && f.vy > 0 && !f.fastFalling) sHeld |= press(D);
+      break;
     default: break;
   }
   if ((PLAN_FLAGS[pid] & F_TAIL) !== 0 && t >= PLAN_MIN[pid] && offstage(f, cSi)) recoverStep(f, 1);
@@ -1322,6 +1367,7 @@ interface Pred {
   act1: number;           // the last two actions the opponent started (movement samples left out): the sequence model's key
   act2: number;
   k0: number; k1: number; k2: number;   // context rows of the previous frame, where the choice was made
+  kHold: number;                        // HOLD_* of the previous frame: what the opponent could choose from there
   prevAction: string;
   prevMove: MoveId | null;
   myPrevAction: string;
@@ -1350,7 +1396,7 @@ function newPred(): Pred {
     o1: new Float32Array(PRED_ROWS * NA), t1: new Float32Array(PRED_ROWS),
     o2: new Float32Array(PRED_ROWS * NA), t2: new Float32Array(PRED_ROWS),
     oS: new Float32Array(SEQ_ROWS * NA), tS: new Float32Array(SEQ_ROWS),
-    oR: new Float32Array(RHY_ROWS * NA), tR: new Float32Array(RHY_ROWS), actFrame: 0, kR: 0,
+    oR: new Float32Array(RHY_ROWS * NA), tR: new Float32Array(RHY_ROWS), actFrame: 0, kR: 0, kHold: 0,
     oT: new Float32Array(RHY_ROWS * 2), tT: new Float32Array(RHY_ROWS),
     ex: new Float32Array(N_TR * N_RS), exT: new Float32Array(N_TR),
     last: AC_START, last2: AC_START, act1: AC_START, act2: AC_START, k0: 0, k1: 0, k2: 0,
@@ -1362,7 +1408,7 @@ function newPred(): Pred {
 }
 
 function resetPred(P: Pred): void {
-  P.o0.fill(0); P.t0.fill(0); P.o1.fill(0); P.t1.fill(0); P.o2.fill(0); P.t2.fill(0); P.oS.fill(0); P.tS.fill(0); P.oR.fill(0); P.tR.fill(0); P.oT.fill(0); P.tT.fill(0); P.actFrame = 0; P.kR = 0;
+  P.o0.fill(0); P.t0.fill(0); P.o1.fill(0); P.t1.fill(0); P.o2.fill(0); P.t2.fill(0); P.oS.fill(0); P.tS.fill(0); P.oR.fill(0); P.tR.fill(0); P.oT.fill(0); P.tT.fill(0); P.actFrame = 0; P.kR = 0; P.kHold = 0;
   P.ex.fill(0); P.exT.fill(0);
   P.last = AC_START; P.last2 = AC_START; P.act1 = AC_START; P.act2 = AC_START; P.k0 = 0; P.k1 = 0; P.k2 = 0;
   P.prevAction = ''; P.prevMove = null; P.myPrevAction = ''; P.myPrevMove = null;
@@ -1422,7 +1468,24 @@ const N_COMP = 6;
 const compP = new Float64Array(N_COMP * NA);
 const COMP_DECAY = 0.9;
 
-function predict(P: Pred, k0: number, k1: number, k2: number, kR: number): number {
+/**
+ * What a fighter can choose from right now. Hanging on a ledge or lying down, only a handful of
+ * answers exist (2026-09-29 ledge rules: no held direction climbs), so a guess outside them (the
+ * rhythm and sequence models know nothing of the situation) is masked out of the prediction.
+ */
+const HOLD_FREE = 0;
+const HOLD_LEDGE = 1;
+const HOLD_DOWN = 2;
+const HOLD_OK = [new Uint8Array(NA), new Uint8Array(NA), new Uint8Array(NA)];
+HOLD_OK[HOLD_FREE].fill(1);
+for (const c of [AC_NONE, AC_STAND, AC_ROLL_TO, AC_OUT, AC_JUMP, 17]) HOLD_OK[HOLD_LEDGE][c] = 1;   // 17: ledgeatk
+for (const c of [AC_NONE, AC_STAND, AC_ROLL_TO, AC_ROLL_AWAY, 18]) HOLD_OK[HOLD_DOWN][c] = 1;         // 18: getupatk
+
+function holdOf(o: FighterState): number {
+  return o.action === 'ledgeHang' ? HOLD_LEDGE : o.action === 'downed' ? HOLD_DOWN : HOLD_FREE;
+}
+
+function predict(P: Pred, k0: number, k1: number, k2: number, kR: number, hold: number): number {
   const kS = P.act1 * (NA + 1) + P.act2;
   const n0 = P.t0[k0]; const n1 = P.t1[k1]; const n2 = P.t2[k2]; const nS = P.tS[kS]; const nR = P.tR[kR];
   const b0 = k0 * NA; const b1 = k1 * NA; const b2 = k2 * NA; const bS = kS * NA; const bR = kR * NA;
@@ -1452,6 +1515,10 @@ function predict(P: Pred, k0: number, k1: number, k2: number, kR: number): numbe
     compP[3 * NA + a] = pS;
     compP[4 * NA + a] = n2 > 0 ? l2 * (P.o2[b2 + a] / n2) + (1 - l2) * c1 : c1;
     compP[5 * NA + a] = nR > 0 ? lR * (P.oR[bR + a] / nR) + (1 - lR) * p0 : p0;
+  }
+  if (hold !== HOLD_FREE) {
+    const ok = HOLD_OK[hold];
+    for (let c = 0; c < N_COMP; c++) for (let a = 0; a < NA; a++) if (ok[a] === 0) compP[c * NA + a] = 0;
   }
   let wsum = 0;
   for (let c = 0; c < N_COMP; c++) { const w = P.comp[c] + 0.05; wsum += w * w; }
@@ -1512,7 +1579,7 @@ function respOf(cls: number): number {
 
 /** One observed action: scored against the prediction first (accuracy), then learned. */
 function record(P: Pred, cls: number, frame: number, sampled: boolean): void {
-  predict(P, P.k0, P.k1, P.k2, P.kR);
+  predict(P, P.k0, P.k1, P.k2, P.kR, P.kHold);
   const hit = argmaxPred() === cls ? 1 : 0;
   scoreComponents(P, cls);
   P.total++; P.hits += hit;
@@ -1626,6 +1693,7 @@ function predObserve(state: GameState, meI: number, oi: number, P: Pred, si: Sta
   ctxRows(P, sitOf(o, si), distBucket(me, o), oursOf(me), phaseOf(P, state.frame));
   P.k0 = pk0; P.k1 = pk1; P.k2 = pk2;
   P.kR = rhythmRow(P, state.frame);
+  P.kHold = holdOf(o);
 }
 
 /** Bitmask of the exploit answers (1 << RS_*) the opponent gives to some approach more than EXPLOIT_P of the time. */
@@ -1724,6 +1792,9 @@ interface AmMem {
   planT: number;
   planDir: number;
   planHome: number;
+  /** Ledge trap context of the current plan: the hanger's corner x and the frame its invincibility ends. */
+  planEdge: number;
+  planFire: number;
   lastDecide: number;
   lastSig: number;
   hist: Scratch[];
@@ -1761,7 +1832,7 @@ interface AmMem {
 const memSlots: AmMem[] = [];
 for (let i = 0; i < MAX_PLAYERS; i++) {
   memSlots.push({
-    matchRef: null, lastFrame: -1, prevHeld: 0, plan: -1, planT: 0, planDir: 1, planHome: 1,
+    matchRef: null, lastFrame: -1, prevHeld: 0, plan: -1, planT: 0, planDir: 1, planHome: 1, planEdge: 0, planFire: 0,
     lastDecide: -999, lastSig: -1,
     hist: [], histFrame: new Int32Array(HIST), outHeld: new Int32Array(HIST), outDirect: new Int32Array(HIST),
     perceived: null, work: null,
@@ -1775,7 +1846,7 @@ for (let i = 0; i < MAX_PLAYERS; i++) {
 
 function resetMem(mem: AmMem): void {
   mem.matchRef = null; mem.lastFrame = -1; mem.prevHeld = 0; mem.plan = -1; mem.planT = 0;
-  mem.planDir = 1; mem.planHome = 1; mem.lastDecide = -999; mem.lastSig = -1;
+  mem.planDir = 1; mem.planHome = 1; mem.planEdge = 0; mem.planFire = 0; mem.lastDecide = -999; mem.lastSig = -1;
   mem.histFrame.fill(-1); mem.outHeld.fill(0); mem.outDirect.fill(0);
   mem.oppIdx = -1; mem.oppPrevAction = ''; mem.oppPrevMove = null; mem.oppPrevHitstun = 0; mem.oppEscWatch = 0; mem.oppIdleRun = 0;
   mem.habits.fill(1); mem.recent.fill(-1); mem.recentPos = 0; mem.repetition = 0;
@@ -2285,6 +2356,7 @@ function rollout(from: GameState, work: GameState, meI: number, oppI: number, pi
     const m = fs[meI];
     const o = fs[oppI];
     cPrev = rollPrev[meI];
+    cFrame = work.frame;
     planStep(pid, t, m);
     const mi = rollInputs[meI];
     mi.held = sHeld; mi.pressed = sHeld & ~rollPrev[meI]; mi.released = rollPrev[meI] & ~sHeld; mi.direct = sDirect;
@@ -2391,6 +2463,9 @@ function evaluate(st: GameState, meI: number, oppI: number, frames: number): num
   }
   if (rKoMe > 0) rLost = true;
   if (rKoMe === 0 && m.stocks > 0) {
+    // Orb drain: percent the orb healed back is worth what the same damage taken costs.
+    const healed = base.myPct + rTaken - m.percent;
+    if (healed > 0.01 && m.stocks === base.myStocks) s += healed * 1.25;
     if (launched(m) && projectedKo(m, blast) >= 0.75) rLost = true;
     if (offstage(m, si) && recoverable(m, si) === 0) rLost = true;
     if (launched(m)) {
@@ -2604,7 +2679,7 @@ function pickModels(mem: AmMem, o: FighterState, m: FighterState, si: StageInfo,
     const sit = sitOf(o, si);
     const tech = techCase(o, si);
     ctxRows(P, sit, distBucket(m, o), oursOf(m), phaseOf(P, curFrame));
-    const conf = predict(P, pk0, pk1, pk2, rhythmRow(P, curFrame));
+    const conf = predict(P, pk0, pk1, pk2, rhythmRow(P, curFrame), holdOf(o));
     let hits = 0;
     for (let i = 0; i < P.ringN; i++) hits += P.ring[i];
     const acc = P.ringN >= 10 ? hits / P.ringN : 0.5;
@@ -2820,6 +2895,12 @@ function buildCandidates(st: GameState, meI: number, oppI: number, mem: AmMem, c
 
   // Grounded.
   const oOff = oOffstage || o.action === 'ledgeHang';
+  // Ledge trap: a hanger is out of reach of everything but dtilt, dsmash and dair (hitsLedge), and
+  // an orb only reaches it from under the lip. Examined first, like the edgeguards.
+  if (o.action === 'ledgeHang' && adx < 260 && dy > 0 && dy < 40) {
+    addCand(P_LT_DSMASH, EG_BONUS); addCand(P_LT_DTILT, EG_BONUS);
+    if (m.percent < 150) addCand(P_LT_DAIR, EG_BONUS);
+  }
   // Edgeguards and spike routes first (E3): examined before the generic list, so the step budget
   // never truncates them, and with a bonus when they connect. Rollout-verified as every candidate.
   if (oOff && m.jumpsLeft > 0 && m.percent < 150) {
@@ -3476,6 +3557,9 @@ export function aevalmereInput(state: GameState, slot: number, rand: () => numbe
     const po = P.fighters[oppI];
     cDir = po.x > pm.x ? 1 : po.x < pm.x ? -1 : pm.facing;
     cHome = homeSign(pm.x, pm.y, cSi);
+    // A hanger's feet sit on its corner x; its invincibility (perceived, projected to now) sets the swing time.
+    cEdgeX = po.x;
+    cFireAt = state.frame + (po.action === 'ledgeHang' ? po.invuln : 0);
     const bm = P.fighters[meI];
     base.myPct = bm.percent; base.oppPct = po.percent; base.myStocks = bm.stocks; base.oppStocks = po.stocks;
     const pred = mem.preds[po.slot];
@@ -3491,6 +3575,8 @@ export function aevalmereInput(state: GameState, slot: number, rand: () => numbe
       mem.plan = pid;
       mem.planDir = cDir;
       mem.planHome = cHome;
+      mem.planEdge = cEdgeX;
+      mem.planFire = cFireAt;
     }
   }
 
@@ -3501,6 +3587,9 @@ export function aevalmereInput(state: GameState, slot: number, rand: () => numbe
     cPrev = mem.prevHeld;
     cDir = mem.planDir;
     cHome = mem.planHome;
+    cEdgeX = mem.planEdge;
+    cFireAt = mem.planFire;
+    cFrame = state.frame;
     planStep(mem.plan, mem.planT, me);
     held = sHeld;
     direct = sDirect;

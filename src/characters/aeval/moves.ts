@@ -43,6 +43,28 @@ const JAVELIN_X = 7;
 const JAVELIN_TIP = -106;
 
 /**
+ * A shorter up-javelin: the same column of `r` circles, but the last circle is placed so its
+ * top edge sits exactly on `top` (javelinColumn overshoots the tip by up to half a circle).
+ * uair uses it with top -110, 4 px under javelinColumn's -114.
+ */
+function javelinColumnTo(
+  firstId: number, start: number, end: number, r: number, top: number,
+  damage: number, angle: number, bkb: number, kbg: number, group: number,
+): HitboxDef[] {
+  const out: HitboxDef[] = [];
+  let id = firstId;
+  let y = -44 - r;
+  for (; y - r > top; y -= r) out.push(box(id++, start, end, JAVELIN_X, y, r, damage, angle, bkb, kbg, group));
+  out.push(box(id, start, end, JAVELIN_X, top + r, r, damage, angle, bkb, kbg, group));
+  return out;
+}
+/** uair's javelin top: 4 px short of the utilt and usmash column. */
+const UAIR_TOP = -110;
+
+/** dair hop: a short hop's rise (Aeval's shortHopVel 3.5) and actionable 10 frames after the hit. */
+const DAIR_BOUNCE = { vy: -3.5, actionableIn: 10 };
+
+/**
  * A forward reach: circles of radius `r` every `r` px along y from xFrom out to xTo, and one
  * more on xTo itself when the step lands short of it, same window and same group so a target
  * is hit once. Pass xTo = tip - r to make the outer edge of the chain sit on the tip.
@@ -108,12 +130,12 @@ const orbBurst: ProjectileDef = {
  * the only charge scaling of damage, knockback and strength. `scale` (0.6 to 1.5) still sizes
  * the hit circle and sprite on top of the lerped r.
  *
- * Tap: leaves her hands on frame 11 of a 40-frame move. 48 frames at 3.5 px/frame is 168 px
+ * Tap: leaves her hands on frame 9 of a 31-frame move. 48 frames at 3.5 px/frame is 168 px
  * of travel from a spawn 18 px ahead, so it bursts about 186 px out. Damage 4, bkb 14, kbg 30,
  * r 8 times scale 0.6 = 4.8 px: a slow chip that holds space.
  *
- * Full charge: chargeCastFrames 16 adds 16 frames to both, so it fires on frame 27 of a
- * 56-frame move. 34 frames at 9.5 px/frame is 323 px of travel, a bullet that bursts about
+ * Full charge: chargeCastFrames 12 adds 12 frames to both, so it fires on frame 21 of a
+ * 43-frame move. 34 frames at 9.5 px/frame is 323 px of travel, a bullet that bursts about
  * 341 px out. Damage 16, bkb 40, kbg 36 (full-charge KO about 108 percent on Tidegate
  * calibrate), r 12 times scale 1.5 = 18 px.
  *
@@ -128,7 +150,7 @@ const orbBurst: ProjectileDef = {
  */
 const waterOrb: ProjectileDef = {
   id: 'orb',
-  spawnFrame: 11,
+  spawnFrame: 9,
   x: 18, y: -20,
   vx: 3.5, vy: 0,
   gravity: 0,
@@ -141,6 +163,8 @@ const waterOrb: ProjectileDef = {
   sprite: 'orb',
   animFps: 12,
   burstId: orbBurst.id,
+  // Drain: a direct orb hit heals Aeval 35 percent of the damage it dealt.
+  healFraction: 0.35,
 };
 
 /** Jab throws a bead of water rather than a fist. Short-lived, so short-ranged. */
@@ -206,12 +230,15 @@ const moves: Record<MoveId, MoveDef> = {
     id: 'ftilt', totalFrames: 30, iasa: 26, groundOnly: true,
     hitboxes: forwardChain(1, 10, 14, 12, FTILT_TIP - 10, -18, 10, 8, SAKURAI, 19, 51, 1),
   },
+  // utilt: startup 10 (was 6), active 10-15, 30 frames (was 24), iasa 26. The javelin crop
+  // (uptilt_spike_2) now starts on frame 10 in the anim holds.
   utilt: {
-    id: 'utilt', totalFrames: 24, iasa: 20, groundOnly: true,
-    hitboxes: [box(1, 6, 11, 2, -44, 12, 7, 90, 37, 90, 1), ...javelinColumn(2, 6, 11, 10, 7, 90, 37, 90, 1)],
+    id: 'utilt', totalFrames: 30, iasa: 26, groundOnly: true,
+    hitboxes: [box(1, 10, 15, 2, -44, 12, 7, 90, 37, 90, 1), ...javelinColumn(2, 10, 15, 10, 7, 90, 37, 90, 1)],
   },
+  // Down attacks (dtilt, dsmash, dair) are the only melee that reaches a ledge hanger.
   dtilt: {
-    id: 'dtilt', totalFrames: 22, iasa: 18, groundOnly: true,
+    id: 'dtilt', totalFrames: 22, iasa: 18, groundOnly: true, hitsLedge: true,
     hitboxes: [box(1, 5, 9, 10, -4, 9, 6, 80, 34, 95, 1)],
   },
   // dashatk: circles r 11 from x 14 to 91 at y -16 (edge on the 102 px tip), frames 8 to 18.
@@ -227,12 +254,13 @@ const moves: Record<MoveId, MoveDef> = {
     id: 'fsmash', totalFrames: 48, chargeable: true, groundOnly: true,
     hitboxes: forwardChain(1, 18, 23, 16, SWEEP_TIP - 13, -18, 13, 15, SAKURAI, 19, 46, 1),
   },
+  // usmash: startup 16 (was 12), active 16-22, 46 frames (was 40).
   usmash: {
-    id: 'usmash', totalFrames: 40, chargeable: true, groundOnly: true,
-    hitboxes: [box(1, 12, 18, 2, -44, 15, 14, 88, 30, 74, 1), ...javelinColumn(2, 12, 18, 12, 14, 88, 30, 74, 1)],
+    id: 'usmash', totalFrames: 46, chargeable: true, groundOnly: true,
+    hitboxes: [box(1, 16, 22, 2, -44, 15, 14, 88, 30, 74, 1), ...javelinColumn(2, 16, 22, 12, 14, 88, 30, 74, 1)],
   },
   dsmash: {
-    id: 'dsmash', totalFrames: 42, chargeable: true, groundOnly: true,
+    id: 'dsmash', totalFrames: 42, chargeable: true, groundOnly: true, hitsLedge: true,
     hitboxes: [
       box(1, 12, 15, 18, -6, 14, 12, 30, 21, 52, 1),
       box(2, 12, 15, -18, -6, 14, 12, 30, 21, 52, 1),
@@ -240,33 +268,51 @@ const moves: Record<MoveId, MoveDef> = {
   },
 
   // Aerials. Every one pays landing lag.
+  // nair: a sex kick centred on the body (r 22 covers the 26x40 hurtbox all round). Clean
+  // frames 3-6 deal 8, late frames 7-20 deal 5; one group, so only one of them lands. Low
+  // knockback on both so it leads into tilts. 30 frames, landing lag 5.
   nair: {
-    id: 'nair', totalFrames: 34, landingLag: 8, airOnly: true,
-    hitboxes: [box(1, 5, 22, 6, -20, 16, 7, 60, 21, 63, 1)],
+    id: 'nair', totalFrames: 30, landingLag: 5, airOnly: true,
+    hitboxes: [
+      box(1, 3, 6, 0, -20, 22, 8, 70, 20, 50, 1),
+      box(2, 7, 20, 0, -20, 20, 5, 60, 12, 40, 1),
+    ],
   },
+  // fair: 11.5 damage (was 10). The old circle (x 22 r 13) plus a tip circle at x 29 r 12,
+  // same group: forward reach 41 (was 35), nothing lost up close.
   fair: {
     id: 'fair', totalFrames: 30, landingLag: 12, airOnly: true,
-    hitboxes: [box(1, 9, 13, 22, -20, 13, 10, 45, 18, 54, 1)],
+    hitboxes: [
+      box(1, 9, 13, 22, -20, 13, 11.5, 45, 18, 54, 1),
+      box(2, 9, 13, 29, -20, 12, 11.5, 45, 18, 54, 1),
+    ],
   },
+  // bair: 12.5 damage (was 11). The old circle (x -22 r 12) plus a tip circle at x -29 r 12,
+  // same group: back reach 41 (was 34).
   bair: {
     id: 'bair', totalFrames: 28, landingLag: 12, airOnly: true,
-    hitboxes: [box(1, 7, 10, -22, -20, 12, 11, SAKURAI, 21, 56, 1)],
+    hitboxes: [
+      box(1, 7, 10, -22, -20, 12, 12.5, SAKURAI, 21, 56, 1),
+      box(2, 7, 10, -29, -20, 12, 12.5, SAKURAI, 21, 56, 1),
+    ],
   },
-  // uair: slower than the other aerials on purpose, active 8-12, 30 frames, landing lag 11.
+  // uair: the slowest aerial, active 10-14 (was 8-12), 33 frames, landing lag 12. Damage 8
+  // (was 9) and the javelin tops out at y -110 (was -114).
   uair: {
-    id: 'uair', totalFrames: 30, landingLag: 11, airOnly: true,
-    hitboxes: [box(1, 8, 12, 2, -44, 12, 9, 85, 26, 79, 1), ...javelinColumn(2, 8, 12, 10, 9, 85, 26, 79, 1)],
+    id: 'uair', totalFrames: 33, landingLag: 12, airOnly: true,
+    hitboxes: [box(1, 10, 14, 2, -44, 12, 8, 85, 26, 79, 1), ...javelinColumnTo(2, 10, 14, 10, UAIR_TOP, 8, 85, 26, 79, 1)],
   },
+  // dair: a spike that hops her up on hit (bounceOnHit) and reaches a ledge hanger.
   dair: {
-    id: 'dair', totalFrames: 36, landingLag: 16, airOnly: true,
+    id: 'dair', totalFrames: 36, landingLag: 16, airOnly: true, hitsLedge: true, bounceOnHit: DAIR_BOUNCE,
     hitboxes: [box(1, 12, 16, 4, -2, 12, 12, 270, 30, 85, 1)],
   },
 
   // Specials. Two projectiles, a rising recovery, a multi-hit trap.
-  // Hold special to swell the orb before the throw. 40 frames with no iasa on a tap;
-  // a full charge adds 16 (chargeCastFrames) to both the throw and the move, 56 in all.
+  // Hold special to swell the orb before the throw. 31 frames with no iasa on a tap;
+  // a full charge adds 12 (chargeCastFrames) to both the throw and the move, 43 in all.
   nspecial: {
-    id: 'nspecial', totalFrames: 40, chargeable: true, chargeButton: 'special', chargeCastFrames: 16,
+    id: 'nspecial', totalFrames: 31, chargeable: true, chargeButton: 'special', chargeCastFrames: 12,
     hitboxes: [],
     projectiles: [waterOrb, orbBurst],
   },
