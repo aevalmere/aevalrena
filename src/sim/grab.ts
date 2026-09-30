@@ -33,6 +33,13 @@ const RELEASE_PUSH = 2.5;
 /** Every press that counts toward mashing out. */
 const MASH_BUTTONS = Btn.Left | Btn.Right | Btn.Up | Btn.Down | Btn.Jump | Btn.Attack
   | Btn.Special | Btn.Shield | Btn.Grab | Btn.Dodge;
+/**
+ * Mash-out is rate-limited: at most one fresh bit is credited every this many frames, no
+ * matter how many mash buttons a victim holds down at once (02 14.5, plan section 2 item 3).
+ * Gated on the victim's own actionFrame (0 while freshly grabbed, counting up every frame it
+ * stays 'grabbed'), so no extra per-fighter counter is needed.
+ */
+export const MASH_CREDIT_FRAMES = 2;
 
 /** Actions that belong to a grab, on either side of it. */
 export function isGrabAction(action: ActionId): boolean {
@@ -221,7 +228,13 @@ function throwFor(f: SimFighter, bits: number, up: number, down: number, left: n
 function stepHold(state: GameState, f: SimFighter, def: CharacterDef, victim: SimFighter): void {
   const kit = grabKitOf(def);
   f.grabTimer--;
-  if (!f.grabForce) f.grabTimer -= kit.mashFrames * bitCount(victim.inputPressed & MASH_BUTTONS);
+  // Every simultaneous pressed bit used to count (bitCount(...) * mashFrames), which let a
+  // four-bit masher escape a full grab in about 4 frames. Cap the credit to at most one bit's
+  // worth, and only on every MASH_CREDIT_FRAMESth frame the victim has spent grabbed, so
+  // spamming more buttons or pressing every single frame buys nothing extra.
+  if (!f.grabForce && victim.actionFrame % MASH_CREDIT_FRAMES === 0) {
+    f.grabTimer -= kit.mashFrames * Math.min(1, bitCount(victim.inputPressed & MASH_BUTTONS));
+  }
   if (f.grabTimer <= 0) {
     // A command grab cannot be mashed out of or dropped: it ends in a throw.
     if (f.grabForce) startThrow(state, f, 'fthrow');

@@ -708,18 +708,22 @@ fresh (0%) opponent is KO'd by a full-charge fsmash around 90% from center stage
 | nair | 30 | 3-6 clean, 7-20 late | 8 clean, 5 late | 70 clean, 60 late | 20 / 50 clean, 12 / 40 late | body-centred bubble r 22 (r 20 late), one group, landing lag 5 |
 | fair | 30 | 9-13 | 11.5 | 45 | 18 / 54 | forward wave slash, circles x 22 r 13 and x 29 r 12 (reach 41), landing lag 12 |
 | bair | 28 | 7-10 | 12.5 | 361 | 21 / 56 | back splash, circles x -22 and x -29 r 12 (reach 41), landing lag 12 |
-| uair | 33 | 10-14 | 8 | 85 | 26 / 79 | upward flick, javelin tops out at y -110, landing lag 12 |
-| dair | 36 | 12-16 | 12 | 270 (spike) | 30 / 85 | downward drop, landing lag 16, hitsLedge; on a body hit the attacker hops up (vy -3.5), gets the air dodge back (not the double jump) and is actionable 10 frames after hitlag |
-| nspecial | 31 (43 full charge) | projectile f9 (f21 full charge) | 4 (16 full) | 40 | 14 / 30 (40 / 36 full) | Water Orb: vx 3.5 to 9.5, lifetime 48 to 34, r 8 to 12, clash strength 2 to 10, chargeCastFrames 12; stats lerp on the exponential charge curve, scale 0.6-1.5 on top; destroyOnHit, bursts with the orb's scale; a direct hit heals Aeval 35 percent of the damage dealt (floor 0 percent) |
-| sspecial | 42 | projectile f10 | 9 | 361 | 24 / 44 | Tidal Crescent: vx 3.2, lifetime 146, returns on age 57 (about 202 px out) for half damage, dies about 82 px behind; clash strength 4; pierces (destroyOnHit false); no fighter movement |
+| uair | 37 | 14-18 | 8 | 85 | 26 / 79 | upward flick, javelin tops out at y -110, landing lag 12 |
+| dair | 30 | 6, held through the dive | 14 | 275 (spike) | 50 / 80 | dive smash (`dive`): from frame 6 the move is pinned while she drops at 7 px/frame (fast fall 5) with vx zeroed each frame, invulnerable, until it meets a fighter, a shield or the ground; off stage it runs to the blast zone. On a body hit the attacker hops up (vy -3.5), gets the air dodge back (not the double jump) and is actionable 10 frames after hitlag; off a shield the same hop, actionable 15 frames after hitlag (about -4). Ground with no hit: landing lag 20, not invulnerable. hitsLedge |
+| nspecial | 12 (24 full charge) | projectile f3 (f15 full charge) | 4 (16 full) | 40 | 14 / 30 (40 / 36 full) | Water Orb: vx 3.5 to 9.5, lifetime 48 to 34, r 8 to 12, clash strength 2 to 10, chargeCastFrames 12; stats lerp on the exponential charge curve, scale 0.6-1.5 on top; destroyOnHit, bursts with the orb's scale; a direct hit heals Aeval 35 percent of the damage dealt (floor 0 percent) |
+| sspecial | 30 | projectile f10 | 9 | 361 | 24 / 40 | Tidal Crescent: vx 3.2, lifetime 146, returns on age 57 (about 202 px out) for half damage, dies about 82 px behind; clash strength 4; pierces fighters (destroyOnHit false); no fighter movement; one at a time (`onePerOwner`: a press while hers is alive does nothing and she stays actionable) |
 | uspecial | 48 | 8-20 | 8 | 80 | 55 / 66 | Geyser: velocity setY -6.5 on f8, then +0.3 drift; helplessAfter |
-| dspecial | 50 | 10-46 multi (4 pull windows of 8f, then a 5f launcher) | 2 x5 | 90 then 60 last | 6 / 10, last 68 / 153 | Whirlpool: pulls in, last hit launches |
+| dspecial | 50 | 10-46 multi (4 pull windows of 8f, then a 5f launcher) | 2 x5 | 90 then 60 last | 6 / 10, last 68 / 153 | Whirlpool: pulls in, last hit launches; each hit on a body heals Aeval half its damage (hitbox `healFraction` 0.5) |
 | taunt | 90 | none | | | | small water orb floats above hand |
 | ledgeatk | 40 | 18-24 | 8 | 361 | 20 / 47 | invulnerable frames 0-21 |
 | getupatk | 34 | 14-20 | 7 | 361 | 22 / 51 | |
 
 The bkb / kbg column was resynced from the KO-calibration pass; `src/characters/aeval/moves.ts` is
 authoritative for knockback.
+
+Shields break projectiles (2026-09-30): any projectile that meets a shield deals its shield damage
+and is destroyed, `destroyOnHit` or not (the crescent and both orb sizes included). The orb still
+bursts where it breaks, and the burst skips the shielder the orb already hit.
 
 Physics numbers for Aeval:
 

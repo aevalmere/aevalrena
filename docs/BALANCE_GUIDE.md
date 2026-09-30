@@ -42,6 +42,36 @@ Source of truth is `src/characters/aeval/moves.ts`; `balance/aeval.balance.json`
 Assumptions: dsmash is not an aerial, so it does not bounce. The burst the orb leaves behind does
 not drain; only the orb's direct hit does. Knockout calibration after this pass is in TUNING.md.
 
+## Aeval move pass, 2026-09-30
+Owner requests, same sources of truth (`moves.ts`, `balance/aeval.balance.json` with a
+`change_2026_09_30` note per move).
+
+| Move | Before | After | Why |
+|---|---|---|---|
+| sspecial | any number of crescents | one at a time: while hers is alive a side special press does nothing (no move, no turn, no endlag) and she stays actionable | a screen of crescents was too much lane control for no commitment |
+| sspecial | 42 total, spawn frame 10 | 30 total, spawn frame 10 | she stood in the throw pose 32 frames after the throw; now 20 |
+| crescent | kbg 44 (KO 197, kb at 100 71.2) | kbg 40 (KO 220, kb at 100 66.9) | shorter hitstun and tumble for the victim after the recovery cut |
+| nspecial | tap throw frame 9 of 31; full charge 21 of 43 | tap throw frame 3 of 12; full charge 15 of 24 (chargeCastFrames 12 unchanged) | the zero-charge cast was too slow to use as a quick poke; about one third of the old time |
+| nspecial hold | 60 frames to full charge | 60 frames, unchanged | see the reading below |
+| uair | active 10-14, 33 total | active 14-18, 37 total, endlag and landing lag 12 unchanged | the owner wants it slower again; anim holds [7,7,7,16] put the javelin on frame 14 |
+| dair | a 12-16 spike, 12 dmg, 270, bkb 30 kbg 85, 36 total, landing lag 16 | dive smash: 6 frames startup, then an invulnerable drop at 7 px/frame (fast fall is 5, vx zeroed each frame) that holds the spike out until it meets a fighter, a shield or the ground; 14 dmg, 275, bkb 50 kbg 80; 30 total, landing lag 20 | a committal dive: a strong spike and a bounce on contact, 20 frames of lag with no invulnerability on a whiff, and a self destruct off stage |
+| dair on shield | no bounce | the same hop and air dodge back, but actionable 15 frames after hitlag instead of 10: about -4 against the shielder (14 damage is 10 frames of shield stun) | shielding the dive should pay a little without letting the shield punish the hop for free |
+| every projectile | a crescent (destroyOnHit false) passed through a shield after its hit | any projectile that meets a shield deals its shield damage and is destroyed | shields are the stated counterplay to projectiles |
+| dspecial | no heal | each whirlpool hit that lands on a body heals Aeval 50 percent of its damage (healFraction on the hitbox, the orb drain rule), 5 of a full 10 | a multi-hit trap has to be walked into, so it pays more per point than the orb's 0.35 |
+
+Reading of an ambiguous owner line. "The charge and attack should be equal if not more charge" is
+read as: the hold to a full charge must last at least as long as the charged cast it buys. The hold
+is 60 frames (`TUNING.input.chargeMax`, shared with the smash charge) and the charged cast is
+chargeCastFrames 12 plus the 12-frame throw, 24 frames, so the hold already exceeds it and was not
+lengthened. If the owner meant the opposite (the cast should grow with the charge), raise
+chargeCastFrames instead; the hold is a shared TUNING value and would need a per-move field.
+
+Assumptions: the dive's bounce keeps the existing bounceOnHit values (vy -3.5, air dodge back,
+actionable 10). The dive pins the move on frame 6, so the existing anim shows its strike pose
+(special_dair_2) for the whole drop; the holds are [3,3,3,3,8,10]. The dive landing uses the move's
+landingLag (20), which also applies if she lands during the 6 startup frames or the 10 bounce
+frames. Shield breaking applies to every projectile of every character, not only Aeval's.
+
 ## How to tune a move
 Change one or two knobs at a time.
 

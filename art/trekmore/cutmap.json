@@ -1,0 +1,1053 @@
+{
+ "_readme": "Cut map for tools/sheetcut/cut_trekmore.py (plan docs/TREKMORE_PLAN.md A.3). Coordinates are source pixels, inclusive. rows mode: each row is a y band (optional x range, or parts that are concatenated into one row); frames split by column runs, else by body cores (erosion) grown geodesically through the mask; cells = explicit x ranges per frame. grid mode: grid lines detected from projections, one frame per cell. scaleRef: stand = body height of a standing frame -> 55 game px; sword = pommel p0 to tip p1 in sheet coords, scaled to SWORD_LEN.",
+ "_swordCalibration": {
+  "sheet": "loco",
+  "row": "idle",
+  "idx": 0,
+  "p0": [
+   209,
+   146
+  ],
+  "p1": [
+   258,
+   202
+  ]
+ },
+ "loco": {
+  "file": "locomotion.png",
+  "mode": "rows",
+  "bg": "black",
+  "rows": [
+   {
+    "name": "idle",
+    "y0": 70,
+    "y1": 215,
+    "count": 8
+   },
+   {
+    "name": "walk",
+    "y0": 290,
+    "y1": 430,
+    "count": 10
+   },
+   {
+    "name": "run",
+    "y0": 505,
+    "y1": 645,
+    "count": 7
+   },
+   {
+    "name": "dash",
+    "y0": 720,
+    "y1": 855,
+    "count": 3
+   }
+  ],
+  "scaleRef": {
+   "stand": {
+    "row": "idle",
+    "idx": 0
+   },
+   "sword": {
+    "p0": [
+     209,
+     146
+    ],
+    "p1": [
+     258,
+     202
+    ]
+   }
+  }
+ },
+ "air": {
+  "file": "jump_fall_airdash.png",
+  "mode": "rows",
+  "bg": "black",
+  "rects": [
+   [
+    22,
+    64,
+    18,
+    100
+   ],
+   [
+    278,
+    312,
+    18,
+    96
+   ],
+   [
+    490,
+    546,
+    18,
+    312
+   ],
+   [
+    688,
+    742,
+    18,
+    312
+   ]
+  ],
+  "rows": [
+   {
+    "name": "jump",
+    "y0": 25,
+    "y1": 252,
+    "count": 10
+   },
+   {
+    "name": "fall",
+    "y0": 275,
+    "y1": 482,
+    "count": 10
+   },
+   {
+    "name": "stepR",
+    "y0": 490,
+    "y1": 682,
+    "count": 8,
+    "centers": [
+     170,
+     410,
+     615,
+     815,
+     1045,
+     1250,
+     1450,
+     1665
+    ]
+   },
+   {
+    "name": "stepL",
+    "y0": 688,
+    "y1": 852,
+    "count": 8,
+    "centers": [
+     180,
+     390,
+     610,
+     820,
+     1040,
+     1250,
+     1450,
+     1640
+    ]
+   }
+  ],
+  "scaleRef": {
+   "sword": {
+    "p0": [
+     189,
+     352
+    ],
+    "p1": [
+     190,
+     428
+    ]
+   },
+   "use": "sword"
+  },
+  "pocketMin": 40
+ },
+ "parry": {
+  "file": "parry_counter.png",
+  "mode": "rows",
+  "bg": "black",
+  "rows": [
+   {
+    "name": "parry",
+    "y0": 60,
+    "y1": 300,
+    "count": 4
+   },
+   {
+    "name": "counter",
+    "parts": [
+     {
+      "y0": 445,
+      "y1": 674,
+      "count": 6,
+      "cells": [
+       [
+        24,
+        240
+       ],
+       [
+        241,
+        460
+       ],
+       [
+        461,
+        700
+       ],
+       [
+        701,
+        995
+       ],
+       [
+        996,
+        1250
+       ],
+       [
+        1251,
+        1530
+       ]
+      ]
+     },
+     {
+      "y0": 735,
+      "y1": 946,
+      "count": 3
+     }
+    ]
+   }
+  ],
+  "scaleRef": {
+   "stand": {
+    "row": "parry",
+    "idx": 0
+   },
+   "sword": {
+    "p0": [
+     160,
+     222
+    ],
+    "p1": [
+     215,
+     290
+    ]
+   },
+   "allowDisagree": "the parry sheet draws the sword about 8 percent longer relative to the body than locomotion.png; the stand height is used"
+  },
+  "pocketMin": 40
+ },
+ "heavy": {
+  "file": "heavy_slash.png",
+  "mode": "rows",
+  "bg": "black",
+  "rows": [
+   {
+    "name": "slash",
+    "y0": 300,
+    "y1": 560,
+    "count": 6,
+    "cells": [
+     [
+      10,
+      292
+     ],
+     [
+      294,
+      566
+     ],
+     [
+      570,
+      860
+     ],
+     [
+      864,
+      1164
+     ],
+     [
+      1167,
+      1468
+     ],
+     [
+      1471,
+      1765
+     ]
+    ]
+   }
+  ],
+  "scaleRef": {
+   "pose": {
+    "row": "slash",
+    "idx": 0,
+    "ref": "parry_counter_0"
+   },
+   "sword": {
+    "p0": [
+     196,
+     457
+    ],
+    "p1": [
+     287,
+     527
+    ]
+   }
+  },
+  "pocketMin": 40
+ },
+ "step": {
+  "file": "shadow_step.png",
+  "mode": "rows",
+  "bg": "black",
+  "rects": [
+   [
+    440,
+    476,
+    18,
+    592
+   ],
+   [
+    616,
+    654,
+    18,
+    410
+   ],
+   [
+    834,
+    858,
+    28,
+    58
+   ],
+   [
+    834,
+    858,
+    362,
+    390
+   ],
+   [
+    834,
+    858,
+    816,
+    845
+   ],
+   [
+    834,
+    858,
+    1278,
+    1306
+   ]
+  ],
+  "rows": [
+   {
+    "name": "ground",
+    "y0": 75,
+    "y1": 200,
+    "count": 8,
+    "centers": [
+     100,
+     335,
+     565,
+     775,
+     1005,
+     1250,
+     1485,
+     1705
+    ]
+   },
+   {
+    "name": "front",
+    "y0": 263,
+    "y1": 434,
+    "count": 12,
+    "centers": [
+     95,
+     225,
+     345,
+     470,
+     615,
+     770,
+     930,
+     1090,
+     1255,
+     1395,
+     1555,
+     1680
+    ],
+    "scaleRef": {
+     "stand": {
+      "idx": 0
+     }
+    }
+   },
+   {
+    "name": "side",
+    "y0": 440,
+    "y1": 612,
+    "count": 10,
+    "centers": [
+     100,
+     230,
+     420,
+     600,
+     790,
+     970,
+     1225,
+     1360,
+     1530,
+     1690
+    ]
+   },
+   {
+    "name": "strike",
+    "y0": 616,
+    "y1": 862,
+    "count": 4,
+    "scaleRef": {
+     "sword": {
+      "p0": [
+       222,
+       752
+      ],
+      "p1": [
+       298,
+       806
+      ]
+     }
+    }
+   }
+  ],
+  "scaleRef": {
+   "sword": {
+    "p0": [
+     110,
+     138
+    ],
+    "p1": [
+     158,
+     178
+    ]
+   },
+   "pose": {
+    "row": "ground",
+    "idx": 0,
+    "ref": "loco_dash_0"
+   },
+   "use": "sword"
+  },
+  "pocketMin": 40
+ },
+ "uspec": {
+  "file": "up_special.jpeg",
+  "mode": "grid",
+  "bg": "checker",
+  "rgbMedian": true,
+  "rowName": "g",
+  "grid": {
+   "cols": 5,
+   "rows": 4,
+   "inset": 6,
+   "labelBox": [
+    0,
+    0,
+    44,
+    40
+   ]
+  },
+  "scaleRef": {
+   "stand": {
+    "idx": 11,
+    "top": 718
+   }
+  }
+ },
+ "nspec": {
+  "file": "neutral_special.jpeg",
+  "mode": "grid",
+  "bg": "navy",
+  "rgbMedian": true,
+  "rowName": "g",
+  "grid": {
+   "cols": 5,
+   "rows": 4,
+   "inset": 6
+  },
+  "bodyless": [
+   5,
+   6,
+   7
+  ],
+  "scaleRef": {
+   "stand": {
+    "idx": 0
+   }
+  },
+  "closeR": 5
+ },
+ "clone": {
+  "file": "clone_slashes.jpeg",
+  "mode": "grid",
+  "bg": "navy",
+  "rgbMedian": true,
+  "grid": {
+   "cols": 5,
+   "rows": 4,
+   "inset": 6,
+   "labelBox": [
+    0,
+    0,
+    40,
+    40
+   ]
+  },
+  "split": [
+   "top",
+   "shadow"
+  ],
+  "scaleRef": {
+   "pose": {
+    "row": "top",
+    "idx": 0,
+    "ref": "heavy_slash_0"
+   }
+  }
+ },
+ "conB": {
+  "file": "concept_b.png",
+  "mode": "rows",
+  "bg": "navy",
+  "rules": true,
+  "rows": [
+   {
+    "name": "hero",
+    "y0": 10,
+    "y1": 386,
+    "x0": 168,
+    "x1": 750,
+    "count": 2,
+    "centers": [
+     345,
+     612
+    ],
+    "forceCores": true,
+    "key": {
+     "pocketMin": 1000000000
+    }
+   },
+   {
+    "name": "idle",
+    "y0": 402,
+    "y1": 506,
+    "x0": 24,
+    "x1": 648,
+    "count": 7
+   },
+   {
+    "name": "taunt",
+    "y0": 908,
+    "y1": 992,
+    "x0": 738,
+    "x1": 1102,
+    "count": 4,
+    "scaleRef": {
+     "stand": {
+      "idx": 3
+     }
+    }
+   },
+   {
+    "name": "slash",
+    "y0": 411,
+    "y1": 473,
+    "x0": 1136,
+    "x1": 1510,
+    "count": 4,
+    "scaleRef": {
+     "likeRow": "taunt"
+    }
+   },
+   {
+    "name": "ranged",
+    "y0": 608,
+    "y1": 674,
+    "x0": 1136,
+    "x1": 1510,
+    "count": 3,
+    "scaleRef": {
+     "likeRow": "taunt"
+    }
+   },
+   {
+    "name": "aerial",
+    "y0": 700,
+    "y1": 771,
+    "x0": 1136,
+    "x1": 1510,
+    "count": 3,
+    "scaleRef": {
+     "likeRow": "taunt"
+    }
+   },
+   {
+    "name": "hitLight",
+    "y0": 751,
+    "y1": 794,
+    "x0": 738,
+    "x1": 1102,
+    "count": 3,
+    "scaleRef": {
+     "likeRow": "taunt"
+    }
+   },
+   {
+    "name": "hitStrong",
+    "y0": 817,
+    "y1": 882,
+    "x0": 738,
+    "x1": 1102,
+    "count": 4,
+    "scaleRef": {
+     "likeRow": "taunt"
+    }
+   },
+   {
+    "name": "ledge",
+    "y0": 920,
+    "y1": 982,
+    "x0": 1136,
+    "x1": 1510,
+    "count": 5,
+    "ledgeBlocks": true,
+    "cells": [
+     [
+      1140,
+      1205
+     ],
+     [
+      1206,
+      1270
+     ],
+     [
+      1271,
+      1338
+     ],
+     [
+      1339,
+      1404
+     ],
+     [
+      1405,
+      1478
+     ]
+    ],
+    "scaleRef": {
+     "likeRow": "taunt"
+    }
+   }
+  ],
+  "scaleRef": {
+   "stand": {
+    "row": "idle",
+    "idx": 0
+   }
+  },
+  "rects": [
+   [
+    20,
+    95,
+    60,
+    352
+   ],
+   [
+    908,
+    919,
+    1136,
+    1510
+   ]
+  ],
+  "pocketMin": 150,
+  "_note": "The taunt, hit, attack and ledge panels draw the knight smaller than the idle panel: taunt is scaled on its upright frame (taunt_3), and the other small-sprite rows share that scale (pose matching on 40 to 60 px sprites was unstable, 0.7x to 1.45x)."
+ },
+ "conA": {
+  "file": "concept_a.png",
+  "mode": "rows",
+  "bg": "navy",
+  "rules": true,
+  "rows": [
+   {
+    "name": "idle",
+    "y0": 50,
+    "y1": 232,
+    "x0": 900,
+    "x1": 1492,
+    "count": 4
+   },
+   {
+    "name": "slash",
+    "y0": 486,
+    "y1": 597,
+    "x0": 526,
+    "x1": 826,
+    "count": 3,
+    "cells": [
+     [
+      526,
+      602
+     ],
+     [
+      603,
+      684
+     ],
+     [
+      685,
+      826
+     ]
+    ],
+    "scaleRef": {
+     "pose": {
+      "idx": 0,
+      "ref": "heavy_slash_0"
+     }
+    }
+   },
+   {
+    "name": "summon",
+    "y0": 636,
+    "y1": 745,
+    "x0": 526,
+    "x1": 792,
+    "count": 4,
+    "cells": [
+     [
+      526,
+      592
+     ],
+     [
+      593,
+      652
+     ],
+     [
+      653,
+      712
+     ],
+     [
+      713,
+      792
+     ]
+    ],
+    "scaleRef": {
+     "stand": {
+      "idx": 0
+     }
+    },
+    "key": {
+     "pocketMin": 60
+    }
+   },
+   {
+    "name": "aerial",
+    "y0": 626,
+    "y1": 745,
+    "x0": 1160,
+    "x1": 1360,
+    "count": 1,
+    "cells": [
+     [
+      1160,
+      1360
+     ]
+    ],
+    "scaleRef": {
+     "likeRow": "slash"
+    }
+   },
+   {
+    "name": "erupt",
+    "y0": 626,
+    "y1": 745,
+    "x0": 1364,
+    "x1": 1510,
+    "count": 2,
+    "cells": [
+     [
+      1413,
+      1510
+     ],
+     [
+      1364,
+      1412
+     ]
+    ],
+    "scaleRef": {
+     "likeRow": "slash"
+    },
+    "key": {
+     "pocketMin": 40
+    }
+   },
+   {
+    "name": "cloneIdle",
+    "y0": 790,
+    "y1": 956,
+    "x0": 32,
+    "x1": 306,
+    "count": 3,
+    "cells": [
+     [
+      32,
+      125
+     ],
+     [
+      126,
+      228
+     ],
+     [
+      229,
+      306
+     ]
+    ],
+    "scaleRef": {
+     "stand": {
+      "idx": 1
+     }
+    }
+   },
+   {
+    "name": "emerge",
+    "y0": 782,
+    "y1": 956,
+    "x0": 312,
+    "x1": 604,
+    "count": 3,
+    "cells": [
+     [
+      312,
+      418
+     ],
+     [
+      419,
+      505
+     ],
+     [
+      506,
+      604
+     ]
+    ],
+    "scaleRef": {
+     "stand": {
+      "idx": 1
+     }
+    }
+   },
+   {
+    "name": "hands",
+    "y0": 776,
+    "y1": 956,
+    "x0": 605,
+    "x1": 886,
+    "count": 1,
+    "cells": [
+     [
+      605,
+      886
+     ]
+    ],
+    "scaleRef": {
+     "stand": {
+      "idx": 0
+     }
+    }
+   }
+  ],
+  "scaleRef": {
+   "stand": {
+    "row": "idle",
+    "idx": 0
+   }
+  },
+  "_note": "The attack panel (slash, summon, aerial, erupt) draws the knight at about 0.7 source px per game px against 0.36 for the big idle panel; slash is pose-matched to heavy_slash_0, summon stands on its knight, aerial and erupt share the slash scale."
+ },
+ "pix": {
+  "file": "pixler/downed_raw.png",
+  "mode": "rows",
+  "bg": "alpha",
+  "rows": [
+   {
+    "name": "downed",
+    "y0": 0,
+    "y1": 47,
+    "count": 1,
+    "cells": [
+     [
+      0,
+      95
+     ]
+    ],
+    "targetH": 22,
+    "readable": true,
+    "fallback": [
+     "uspec_g_18",
+     "uspec_g_19"
+    ]
+   }
+  ],
+  "scaleRef": {
+   "fitWidth": {
+    "row": "downed",
+    "idx": 0,
+    "target": 60
+   }
+  },
+  "_note": "pixler generation for the downed pose (plan A.5); lying length 60 game px = standing height 55 plus the cape; targetH 22 = a lying knight at 0.4 of the standing height"
+ },
+ "_winPose": {
+  "src": "conB_hero_0",
+  "heightOf": "public/ui/aeval-win.png",
+  "out": "public/ui/trekmore-win.png"
+ },
+ "_fx": [
+  {
+   "name": "shadowSword0",
+   "src": "nspec_g_5",
+   "keep": "all"
+  },
+  {
+   "name": "shadowSword1",
+   "src": "nspec_g_6",
+   "keep": "all"
+  },
+  {
+   "name": "shadowBurst0",
+   "src": "conA_erupt_0",
+   "minVio": 0.2
+  },
+  {
+   "name": "shadowBurst1",
+   "src": "parry_counter_5",
+   "clip": [
+    1360,
+    440,
+    1530,
+    680
+   ]
+  },
+  {
+   "name": "shadowBurst2",
+   "src": "parry_counter_6",
+   "clip": [
+    160,
+    735,
+    380,
+    946
+   ]
+  },
+  {
+   "name": "shadowBurst3",
+   "src": "parry_counter_6",
+   "from": "shadowBurst2",
+   "alpha": 0.5
+  },
+  {
+   "name": "swordRise0",
+   "src": "uspec_g_3",
+   "anchor": "heel",
+   "clip": [
+    918,
+    50,
+    972,
+    168
+   ],
+   "keep": "all"
+  },
+  {
+   "name": "swordRise1",
+   "src": "uspec_g_4",
+   "anchor": "heel",
+   "clip": [
+    1143,
+    50,
+    1197,
+    168
+   ],
+   "keep": "all"
+  },
+  {
+   "name": "swordRise2",
+   "src": "uspec_g_5",
+   "anchor": "heel",
+   "clip": [
+    105,
+    335,
+    165,
+    472
+   ],
+   "keep": "all"
+  },
+  {
+   "name": "stepTrail0",
+   "src": "step_front_3",
+   "keep": "all"
+  },
+  {
+   "name": "stepTrail1",
+   "src": "step_front_4",
+   "keep": "all"
+  },
+  {
+   "name": "counterFlash0",
+   "src": "parry_parry_2",
+   "from": "counterFlash1",
+   "rescale": 0.7
+  },
+  {
+   "name": "counterFlash1",
+   "src": "parry_parry_2",
+   "clip": [
+    660,
+    60,
+    830,
+    300
+   ],
+   "bodyPad": 4
+  },
+  {
+   "name": "counterFlash2",
+   "src": "parry_parry_2",
+   "from": "counterFlash1",
+   "alpha": 0.5
+  },
+  {
+   "name": "hitspark0",
+   "src": "heavy_slash_3",
+   "from": "hitspark1",
+   "fitMax": 16
+  },
+  {
+   "name": "hitspark1",
+   "src": "heavy_slash_3",
+   "clip": [
+    1070,
+    430,
+    1170,
+    548
+   ],
+   "fitMax": 24
+  },
+  {
+   "name": "hitspark2",
+   "src": "heavy_slash_3",
+   "from": "hitspark1",
+   "fitMax": 24,
+   "alpha": 0.45
+  },
+  {
+   "name": "ko0",
+   "src": "conA_erupt_0",
+   "from": "shadowBurst0",
+   "rescale": 1.5
+  },
+  {
+   "name": "ko1",
+   "src": "parry_counter_5",
+   "from": "shadowBurst1",
+   "rescale": 1.5
+  },
+  {
+   "name": "ko2",
+   "src": "parry_counter_6",
+   "from": "shadowBurst2",
+   "rescale": 1.5
+  },
+  {
+   "name": "ko3",
+   "src": "parry_counter_6",
+   "from": "shadowBurst2",
+   "rescale": 1.5,
+   "alpha": 0.5
+  }
+ ]
+}

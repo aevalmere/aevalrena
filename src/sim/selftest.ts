@@ -1,20 +1,26 @@
 import {
-  AIR_DODGE, FOOTSTOOL, FS_METER, KNOCKDOWN, ROLL, SHIELD_DECAY, SHIELD_MAX, SHORTCUT_REPLACE_FRAMES, TUNING,
+  AIR_DODGE, FOOTSTOOL, FS_METER, KNOCKDOWN, RESPAWN_PLATFORM_FRAMES, ROLL, SHIELD_DECAY, SHIELD_MAX,
+  SHORTCUT_REPLACE_FRAMES, TUNING,
 } from '../core/constants';
-import { Btn, DIRECT_CODES, DIRECT_MOVES } from '../core/types';
+import { Btn, BURST_ONLY, DIRECT_CODES, DIRECT_MOVES } from '../core/types';
 import type {
-  ActionId, CommandAction, DirectMoveId, GameState, InputFrame, MatchConfig, MoveDef, MoveId, ProjectileDef, SimEvent,
+  ActionId, CharacterDef, CommandAction, DirectMoveId, GameState, InputFrame, MatchConfig, MoveDef, MoveId, ProjectileDef,
+  ProjectileState, SimEvent,
 } from '../core/types';
-import { CHARACTER_DEFS } from '../characters/registry';
+import { CHARACTER_DEFS, CHARACTER_LIST, CHARACTER_SPRITES } from '../characters/registry';
+import { grabKitOf } from '../characters/common/grabkit';
 import { STAGE_DEFS } from '../stages/registry';
 import { dodgesHit } from './dodge';
-import { canBeGrabbed, forceGrab } from './grab';
-import { canBeHit, projectileChargeScale } from './hits';
+import { canBeGrabbed, forceGrab, MASH_CREDIT_FRAMES, startGrab, startThrow } from './grab';
+import { applyHit, canBeHit, projectileChargeScale, resolveHits } from './hits';
+import { moveLocked, tryRecall } from './actions';
+import { copyStateInto, newSnapshot } from '../net/snapshot';
 import { cloneGameState, createGameState, stepGame } from './index';
 import { koFighter } from './match';
-import { startMove } from './moves';
-import { PROJECTILE_DEFS, chargedStat, spawnProjectile } from './projectiles';
-import { setAction, simFighters, type SimFighter } from './state';
+import { isDiving, startMove } from './moves';
+import { PROJECTILE_DEFS, chargedStat, rebuildProjectileDefs, spawnProjectile } from './projectiles';
+import { fighterHurtbox, setAction, simFighters, type SimFighter } from './state';
+import { circleRectOverlap } from '../core/math';
 
 declare const process: {
   argv: string[];
@@ -425,11 +431,11 @@ function testChargedOrb(): SelfTestResult {
   // A one frame press fires on its own: nothing is held after the press and the orb
   // still comes out, on the move's own spawn frame, exactly as a charged one does. No
   // hold is needed to make the move happen at all.
-  // A full charge casts chargeCastFrames later (frame 21 rather than 9).
+  // A full charge casts chargeCastFrames later (frame 15 rather than 3).
   const orbSpawnFrame = PROJECTILE_DEFS['orb'].spawnFrame;
   const castFrames = CHARACTER_DEFS['aeval'].moves.nspecial.chargeCastFrames ?? 0;
   const instant = tap.charge === 0 && tap.frame === orbSpawnFrame && full.frame === orbSpawnFrame + castFrames
-    && orbSpawnFrame === 9 && castFrames === 12;
+    && orbSpawnFrame === 3 && castFrames === 12;
   const tapWeakAndSmall = tap.power === 1 && tap.scale === 0.6 && Math.abs(tap.damage - 4) < 1e-9;
   const fullCharged = full.charge === 60;
   const fullStrongAndBig = full.power === 1 && full.scale === 1.5 && Math.abs(full.damage - 16) < 1e-9;
@@ -2966,8 +2972,8 @@ function testLedgeHangerDodgesHighHits(): SelfTestResult {
 
 /**
  * dair reaches a ledge hanger and bounces the attacker: vy set to the short hop's -3.5, air
- * dodge given back, double jump not, and actionable well before the move's 36 frames would
- * have run out.
+ * dodge given back, double jump not, and actionable well before the move's 30 frames would
+ * have run out. Started on frame 5, it enters the dive on the next step and meets the hanger.
  */
 function testDairHitsHangerAndBounces(): SelfTestResult {
   const def = CHARACTER_DEFS['aeval'];
@@ -2976,7 +2982,7 @@ function testDairHitsHangerAndBounces(): SelfTestResult {
   t.o.airDodgeUsed = true;
   t.o.jumpsLeft = 0;
   startMove(t.state, t.o, def, 'dair');
-  t.o.actionFrame = 11;
+  t.o.actionFrame = 5;
   step(t.state, NONE, NONE);
   const hit = t.f.percent > 0;
   const vy = t.o.vy;
@@ -3092,6 +3098,1695 @@ function testNeutralFallGrabsLedge(): SelfTestResult {
   };
 }
 
+/**
+ * How many frames a mashing victim needs to drain a grabTimer of `hold`, crediting
+ * `mashFrames` only on every MASH_CREDIT_FRAMESth frame it spends grabbed (grab.ts stepHold):
+ * one base point every frame, plus one mash credit every MASH_CREDIT_FRAMES frames.
+ */
+function expectedMashEscapeFrames(hold: number, mashFrames: number): number {
+  let remaining = hold;
+  let n = 0;
+  while (remaining > 0) {
+    n++;
+    remaining--;
+    if (n % MASH_CREDIT_FRAMES === 0) remaining -= mashFrames;
+  }
+  return n;
+}
+
+/**
+ * Grabs a fresh victim at `percent`, then mashes from the instant it is caught (actionFrame 0)
+ * until it is free. `bits` is every button pressed each mashed frame; when `everyFrame` is
+ * false the press only lands on the frames MASH_CREDIT_FRAMES apart that the cap actually
+ * credits, so a one-bit masher on that schedule can be compared against a four-bit masher
+ * spamming every single frame.
+ */
+function mashEscapeFrames(percent: number, bits: number, everyFrame: boolean): number {
+  const state = grabPair();
+  const v = simFighters(state)[1];
+  v.percent = percent;
+  step(state, inp(Btn.Grab, Btn.Grab), NONE);
+  while (v.action !== 'grabbed') step(state, NONE, NONE);
+  let i = 0;
+  while (v.action === 'grabbed' && i < 400) {
+    i++;
+    const press = everyFrame || i % MASH_CREDIT_FRAMES === 0 ? inp(bits, bits) : NONE;
+    step(state, NONE, press);
+  }
+  return i;
+}
+
+function testMashCapEscapeTiming(): SelfTestResult {
+  const kit = grabKitOf(CHARACTER_DEFS['aeval']);
+  const fourBits = Btn.Attack | Btn.Special | Btn.Shield | Btn.Grab;
+  const hold0 = Math.round(kit.holdBase + kit.holdPerPercent * 0);
+  const hold100 = Math.round(kit.holdBase + kit.holdPerPercent * 100);
+  const want0 = expectedMashEscapeFrames(hold0, kit.mashFrames);
+  const want100 = expectedMashEscapeFrames(hold100, kit.mashFrames);
+
+  const got0Spam = mashEscapeFrames(0, fourBits, true);
+  const got100Spam = mashEscapeFrames(100, fourBits, true);
+  const got0Capped = mashEscapeFrames(0, Btn.Attack, false);
+
+  return {
+    name: 'ck. mashing every mash bit every frame escapes a grab no faster than one credited bit '
+      + 'every 2 frames allows',
+    pass: got0Spam === want0 && got100Spam === want100 && got0Capped === want0,
+    detail: `0%: ${got0Spam} frames spamming 4 bits (want ${want0}), ${got0Capped} pressing 1 bit every `
+      + `${MASH_CREDIT_FRAMES} frames (want ${want0}) | 100%: ${got100Spam} frames spamming 4 bits (want ${want100})`,
+  };
+}
+
+function testRespawnPlatformDuration(): SelfTestResult {
+  const state = fresh(1, 5);
+  const f = simFighters(state)[0];
+  setAction(f, 'respawn');
+  f.onGround = true;
+  let frames = 0;
+  while (f.action === 'respawn' && frames < RESPAWN_PLATFORM_FRAMES + 20) {
+    step(state, NONE, NONE);
+    frames++;
+  }
+  // The platform is a floor only while action stays 'respawn'; once it lets go the fighter is
+  // physics-driven again, which can land it back on the same stage the very same frame if it
+  // never had any height to fall, so the drop itself (leaving 'respawn') is what is checked.
+  const droppedExactly = frames === RESPAWN_PLATFORM_FRAMES && f.action !== 'respawn';
+
+  const pressed = fresh(2, 5);
+  const p = simFighters(pressed)[0];
+  setAction(p, 'respawn');
+  p.onGround = true;
+  step(pressed, inp(Btn.Jump, Btn.Jump), NONE);
+  const droppedOnPress = p.action !== 'respawn';
+
+  return {
+    name: `cl. a fighter pressing nothing drops off the respawn platform at exactly `
+      + `RESPAWN_PLATFORM_FRAMES (${RESPAWN_PLATFORM_FRAMES}), any press drops it at once`,
+    pass: droppedExactly && droppedOnPress,
+    detail: `no input: dropped after ${frames} frames (want ${RESPAWN_PLATFORM_FRAMES}), then ${f.action} | `
+      + `pressed Jump on frame 0: ${p.action}`,
+  };
+}
+
+/** Fighter 0 on Tidegate at x `x` facing right, fighter 1 parked on the far right edge. */
+function aevalAt(x: number): { state: GameState; me: SimFighter; other: SimFighter; groundY: number } {
+  const state = fresh(1, 60);
+  const fighters = simFighters(state);
+  const me = fighters[0];
+  const other = fighters[1];
+  placeAt(me, x, me.y, 1, true);
+  placeAt(other, mainEdges('tidegate').right - 13, me.y, -1, true);
+  return { state, me, other, groundY: me.y };
+}
+
+function aliveCount(state: GameState, defId: string, owner: number): number {
+  let n = 0;
+  for (let i = 0; i < state.projectiles.length; i++) {
+    const p = state.projectiles[i];
+    if (p.alive && p.defId === defId && p.owner === owner) n++;
+  }
+  return n;
+}
+
+/**
+ * One crescent at a time. While hers is out, side special by button and by its shortcut does
+ * nothing: no move, no second crescent, and the fighter is not put in 'attack'. Once it dies the
+ * same press throws again.
+ */
+function testOneCrescentAtATime(): SelfTestResult {
+  const t = aevalAt(-200);
+  const side = inp(Btn.Special | Btn.Right, Btn.Special);
+  step(t.state, side, NONE);
+  const first = t.me.action === 'attack' && t.me.moveId === 'sspecial';
+  for (let i = 0; i < 40; i++) step(t.state, NONE, NONE);
+  const out = aliveCount(t.state, 'crescent', 0);
+  const actionBefore = t.me.action;
+
+  step(t.state, side, NONE);
+  const buttonIgnored = t.me.action !== 'attack' && t.me.moveId === null;
+  step(t.state, NONE, NONE);
+  step(t.state, directInp('sspecial'), NONE);
+  const shortcutIgnored = t.me.action !== 'attack' && t.me.moveId === null;
+  step(t.state, NONE, NONE);
+  const stillOne = aliveCount(t.state, 'crescent', 0) === 1;
+  // Actionable: a plain jump press goes through on the next frame.
+  step(t.state, inp(Btn.Jump, Btn.Jump), NONE);
+  const jumped = t.me.action === 'jumpsquat';
+
+  for (let i = 0; i < 200 && aliveCount(t.state, 'crescent', 0) > 0; i++) step(t.state, NONE, NONE);
+  const gone = aliveCount(t.state, 'crescent', 0) === 0;
+  for (let i = 0; i < 120 && !t.me.onGround; i++) step(t.state, NONE, NONE);
+  settle(t.state, 10);
+  step(t.state, side, NONE);
+  const again = t.me.action === 'attack' && t.me.moveId === 'sspecial';
+  return {
+    name: 'cm. side special does nothing while its crescent is out, and throws again once it is gone',
+    pass: first && out === 1 && actionBefore !== 'attack' && buttonIgnored && shortcutIgnored && stillOne
+      && jumped && gone && again,
+    detail: `first ${first}, crescents out ${out}, then ${actionBefore} | button ignored ${buttonIgnored}, `
+      + `shortcut ignored ${shortcutIgnored}, still one ${stillOne}, jump went through ${jumped} | `
+      + `after it died: ${gone}, throws again ${again}`,
+  };
+}
+
+/**
+ * A grounded ftilt from fighter 1 sweeps through the column fighter 0 dives down. Diving, she is
+ * inside the active ftilt on at least one frame and takes nothing; falling the same way without
+ * the dive, she is hit.
+ */
+function diveThroughFtilt(dive: boolean): { overlaps: number; percent: number } {
+  const def = CHARACTER_DEFS['aeval'];
+  const t = aevalAt(-40);
+  placeAt(t.other, 0, t.groundY, -1, true);
+  placeAt(t.me, -40, t.groundY - 80, 1, false);
+  startMove(t.state, t.other, def, 'ftilt');
+  if (dive) startMove(t.state, t.me, def, 'dair');
+  else {
+    t.me.vy = 5;
+    t.me.fastFalling = true;
+  }
+  const ftilt = def.moves.ftilt;
+  const hurt = { x: 0, y: 0, w: 0, h: 0 };
+  let overlaps = 0;
+  for (let i = 0; i < 30 && t.me.percent === 0; i++) {
+    step(t.state, NONE, NONE);
+    if (t.other.action !== 'attack' || t.other.moveId !== 'ftilt') continue;
+    if (dive && !isDiving(t.me, def.moves.dair)) continue;
+    fighterHurtbox(t.me, def, hurt);
+    for (let h = 0; h < ftilt.hitboxes.length; h++) {
+      const hb = ftilt.hitboxes[h];
+      if (t.other.actionFrame < hb.start || t.other.actionFrame > hb.end) continue;
+      if (circleRectOverlap(t.other.x + hb.x * t.other.facing, t.other.y + hb.y, hb.r, hurt)) {
+        overlaps++;
+        break;
+      }
+    }
+  }
+  return { overlaps, percent: t.me.percent };
+}
+
+function testDiveInvulnerable(): SelfTestResult {
+  const d = diveThroughFtilt(true);
+  const c = diveThroughFtilt(false);
+  return {
+    name: 'cn. the dair dive is invulnerable: an active ftilt it falls through does nothing (a plain fall is hit)',
+    pass: d.overlaps > 0 && d.percent === 0 && c.percent > 0,
+    detail: `dive: ${d.overlaps} frames inside the ftilt, percent ${d.percent} | plain fall: percent ${c.percent}`,
+  };
+}
+
+/** Fighter 0 dives onto fighter 1 (airborne below her, or shielding on the floor), air dodge spent. */
+function diveOnto(shield: boolean): { t: ReturnType<typeof aevalAt>; hitStep: number; hitlag: number } {
+  const def = CHARACTER_DEFS['aeval'];
+  const t = aevalAt(-4);
+  if (shield) placeAt(t.other, 0, t.groundY, -1, true);
+  else placeAt(t.other, 0, t.groundY - 100, -1, false);
+  placeAt(t.me, -4, t.other.y - 90, 1, false);
+  t.me.airDodgeUsed = true;
+  t.me.jumpsLeft = 0;
+  startMove(t.state, t.me, def, 'dair');
+  let hitStep = -1;
+  let hitlag = 0;
+  for (let i = 0; i < 40 && hitStep < 0; i++) {
+    const victim = !shield ? NONE : i === 0 ? inp(Btn.Shield, Btn.Shield) : inp(Btn.Shield, 0);
+    step(t.state, NONE, victim);
+    if (t.me.hitGroups !== 0) {
+      hitStep = i;
+      hitlag = t.me.hitlag;
+    }
+  }
+  return { t, hitStep, hitlag };
+}
+
+/** The dive spikes: 14 damage and a launch straight down (a touch forward), not up. */
+function testDiveSpikes(): SelfTestResult {
+  const r = diveOnto(false);
+  const v = r.t.other;
+  const down = v.kbDirY > 0.99 && v.vy > 0;
+  return {
+    name: 'co. a dair dive that meets a fighter spikes it downward for 14',
+    pass: r.hitStep >= 0 && Math.abs(v.percent - 14) < 1e-9 && down && (v.action === 'tumble' || v.action === 'hitstun'),
+    detail: `hit on step ${r.hitStep}, victim percent ${v.percent}, kbDir (${v.kbDirX.toFixed(3)}, ${v.kbDirY.toFixed(3)}) `
+      + `vy ${v.vy.toFixed(2)} ${v.action}`,
+  };
+}
+
+/** The bounce off a landed dive gives the air dodge back and hops her up, actionable 10 frames after hitlag. */
+function testDiveBounceRestoresAirDodge(): SelfTestResult {
+  const r = diveOnto(false);
+  const me = r.t.me;
+  const vy = me.vy;
+  const dodgeBack = !me.airDodgeUsed;
+  let free = -1;
+  for (let i = 1; i <= 40 && free < 0; i++) {
+    step(r.t.state, NONE, NONE);
+    if (me.action !== 'attack') free = i;
+  }
+  const want = r.hitlag + 10;
+  return {
+    name: 'cp. a landed dive bounces her up with the air dodge back, actionable 10 frames after hitlag',
+    pass: r.hitStep >= 0 && vy === -3.5 && dodgeBack && free === want && me.action === 'air',
+    detail: `vy ${vy}, air dodge back ${dodgeBack}, actionable after ${free} steps (want ${want}), now ${me.action}`,
+  };
+}
+
+/**
+ * A dive that meets a shield bounces the same way but acts after the shielder does: 14 damage is
+ * 10 frames of shield stun, the dive acts 15 frames after the shared hitlag.
+ */
+function testDiveShielded(): SelfTestResult {
+  const r = diveOnto(true);
+  const me = r.t.me;
+  const v = r.t.other;
+  const shieldHit = v.percent === 0 && v.shieldHp < SHIELD_MAX;
+  const bounced = me.vy === -3.5 && !me.airDodgeUsed;
+  let meFree = -1;
+  let vFree = -1;
+  for (let i = 1; i <= 60 && (meFree < 0 || vFree < 0); i++) {
+    step(r.t.state, NONE, inp(Btn.Shield, 0));
+    if (meFree < 0 && me.action !== 'attack') meFree = i;
+    if (vFree < 0 && v.action !== 'shieldStun') vFree = i;
+  }
+  return {
+    name: 'cq. a shielded dive bounces off the shield and is actionable a few frames after the shielder',
+    pass: r.hitStep >= 0 && shieldHit && bounced && meFree === r.hitlag + 15 && meFree > vFree && meFree - vFree <= 6,
+    detail: `shield ${v.shieldHp.toFixed(2)}, bounced ${bounced}, dive free after ${meFree} (want ${r.hitlag + 15}), `
+      + `shielder out of stun after ${vFree}`,
+  };
+}
+
+/**
+ * A dive that reaches the ground with no hit lands into 20 frames of landing lag with no
+ * invulnerability. Off the stage it keeps going and never grabs the ledge: it ends in a KO.
+ */
+function testDiveLandingLagAndOffstage(): SelfTestResult {
+  const def = CHARACTER_DEFS['aeval'];
+  const t = aevalAt(-100);
+  placeAt(t.me, -100, t.groundY - 120, 1, false);
+  startMove(t.state, t.me, def, 'dair');
+  let landed = false;
+  for (let i = 0; i < 60 && !landed; i++) {
+    step(t.state, NONE, NONE);
+    landed = t.me.action === 'land';
+  }
+  step(t.state, NONE, NONE);
+  const hittable = canBeHit(t.me) && t.me.invuln === 0;
+  let lag = 1;
+  while (t.me.action === 'land' && lag < 60) {
+    step(t.state, NONE, NONE);
+    lag++;
+  }
+  const want = def.moves.dair.landingLag ?? -1;
+
+  const o = aevalAt(-100);
+  const edge = mainEdges('tidegate').right;
+  placeAt(o.me, edge + 40, o.groundY - 60, -1, false);
+  const stocks = o.me.stocks;
+  startMove(o.state, o.me, def, 'dair');
+  let grabbedLedge = false;
+  for (let i = 0; i < 400 && o.me.stocks === stocks; i++) {
+    step(o.state, NONE, NONE);
+    if (o.me.action === 'ledgeHang' || o.me.action === 'ledgeGrab') grabbedLedge = true;
+  }
+  const koed = o.me.stocks === stocks - 1;
+  return {
+    name: 'cr. a dive that lands takes 20 frames of landing lag with no invulnerability; off stage it runs to the blast zone',
+    pass: landed && hittable && lag === want && want === 20 && koed && !grabbedLedge,
+    detail: `landed ${landed}, hittable on lag frame 1 ${hittable}, lag ${lag} (want ${want}) | `
+      + `off stage: KO ${koed}, grabbed ledge ${grabbedLedge}`,
+  };
+}
+
+/**
+ * A shield breaks every projectile it blocks: the crescent (destroyOnHit false) dies on the
+ * shield after dealing its shield damage, and so does a full-charge orb.
+ */
+function testShieldBreaksProjectiles(): SelfTestResult {
+  function blocked(defId: 'crescent' | 'orb'): { shieldLoss: number; alive: boolean; met: boolean } {
+    const t = aevalAt(-120);
+    placeAt(t.other, -40, t.groundY, -1, true);
+    const def = PROJECTILE_DEFS[defId];
+    if (defId === 'orb') spawnProjectile(t.state, t.me, def, 1, 1.5, 1);
+    else spawnProjectile(t.state, t.me, def);
+    let shot = t.state.projectiles[0];
+    for (let i = 0; i < t.state.projectiles.length; i++) {
+      if (t.state.projectiles[i].alive && t.state.projectiles[i].defId === defId) shot = t.state.projectiles[i];
+    }
+    const id = shot.id;
+    step(t.state, NONE, inp(Btn.Shield, Btn.Shield));
+    let met = false;
+    let loss = 0;
+    for (let i = 0; i < 60 && !met; i++) {
+      const before = t.other.shieldHp;
+      step(t.state, NONE, inp(Btn.Shield, 0));
+      for (let e = 0; e < t.state.events.length; e++) {
+        if (t.state.events[e].type === 'shieldHit') met = true;
+      }
+      if (met) loss = before - t.other.shieldHp;
+    }
+    const alive = shot.alive && shot.id === id;
+    return { shieldLoss: loss, alive, met };
+  }
+  const c = blocked('crescent');
+  const o = blocked('orb');
+  // The shield also decays SHIELD_DECAY on the frame it is hit.
+  const cOk = c.met && !c.alive && Math.abs(c.shieldLoss - 9 - SHIELD_DECAY) < 1e-6;
+  const oOk = o.met && !o.alive && Math.abs(o.shieldLoss - 16 - SHIELD_DECAY) < 1e-6;
+  return {
+    name: 'cs. a shield breaks the crescent and a full orb it blocks, after taking their shield damage',
+    pass: cOk && oOk,
+    detail: `crescent: met ${c.met}, alive after ${c.alive}, shield loss ${c.shieldLoss.toFixed(2)} | `
+      + `full orb: met ${o.met}, alive after ${o.alive}, shield loss ${o.shieldLoss.toFixed(2)}`,
+  };
+}
+
+/** Every whirlpool hit that lands heals the caster half the damage it dealt. */
+function testWhirlpoolLifesteal(): SelfTestResult {
+  const def = CHARACTER_DEFS['aeval'];
+  const t = aevalAt(-40);
+  placeAt(t.other, -20, t.groundY, -1, true);
+  t.me.percent = 50;
+  startMove(t.state, t.me, def, 'dspecial');
+  let hits = 0;
+  let healedEachHit = true;
+  let last = t.other.percent;
+  let lastMe = t.me.percent;
+  for (let i = 0; i < 60; i++) {
+    step(t.state, NONE, NONE);
+    const dealt = t.other.percent - last;
+    if (dealt > 0) {
+      hits++;
+      if (Math.abs((lastMe - t.me.percent) - dealt * 0.5) > 1e-9) healedEachHit = false;
+    }
+    last = t.other.percent;
+    lastMe = t.me.percent;
+  }
+  const total = t.other.percent;
+  return {
+    name: 'ct. each whirlpool hit heals the caster half the damage it dealt',
+    pass: hits >= 2 && healedEachHit && Math.abs(t.me.percent - (50 - total * 0.5)) < 1e-9,
+    detail: `${hits} hits for ${total}, caster ${t.me.percent} (want ${50 - total * 0.5}), healed on each hit ${healedEachHit}`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Trekmore mechanics (plan B.3). A synthetic def built from Aeval's with the new fields,
+// registered under a test id, stands in for the real Trekmore def until W1 lands.
+// ---------------------------------------------------------------------------
+
+const TREK_ID = 'selftestTrek';
+
+const ST_SWORD: ProjectileDef = {
+  id: 'stSword', spawnFrame: 14, x: 20, y: -26, vx: 5, vy: 0, gravity: 0, lifetime: 28, r: 10,
+  damage: 7, angle: 40, bkb: 30, kbg: 55, strength: 3, destroyOnHit: true, sprite: 'shadowSword',
+  burstId: 'stBurst', aim: true, fixedScale: true, onePerOwner: true,
+  charged: { vx: 6, lifetime: 62, damage: 12, bkb: 40, kbg: 62, strength: 6 },
+};
+
+const ST_BURST: ProjectileDef = {
+  id: 'stBurst', spawnFrame: BURST_ONLY, x: 0, y: 0, vx: 0, vy: 0, gravity: 0, lifetime: 12, r: 22,
+  damage: 5, angle: 60, bkb: 30, kbg: 50, strength: 3, destroyOnHit: false, sprite: 'shadowBurst',
+  charged: { damage: 9 },
+};
+
+/** Registers the test def (optionally with crit) and rescans the projectile defs. */
+function registerTrek(crit?: { chance: number; scale: number }): CharacterDef {
+  const base = CHARACTER_DEFS['aeval'];
+  const moves: Record<MoveId, MoveDef> = { ...base.moves };
+  moves.jab = {
+    id: 'jab', totalFrames: 26, groundOnly: true,
+    // A flat 25 knockback: 10 frames of hitstun and a short slide, so the echo 8 frames later still reaches and combos.
+    hitboxes: [{ id: 1, start: 4, end: 6, x: 24, y: -24, r: 20, damage: 4, angle: 361, bkb: 25, kbg: 0, group: 1 }],
+    echo: { delayFrames: 8, damageScale: 0.5, offsetX: -6, groups: [1] },
+  };
+  moves.nspecial = {
+    id: 'nspecial', totalFrames: 30, chargeable: true, chargeButton: 'special', chargeCastFrames: 8,
+    hitboxes: [], projectiles: [ST_SWORD, ST_BURST],
+    recall: { projectileId: 'stSword', footOffsetY: 26, invulnFrames: 12, oncePerAir: true },
+    branch: { start: 40, end: 54 },
+  };
+  moves.sspecial = {
+    id: 'sspecial', totalFrames: 46,
+    hitboxes: [{ id: 1, start: 19, end: 24, x: 30, y: -26, r: 16, damage: 13, angle: 40, bkb: 40, kbg: 60, group: 1 }],
+    shadowStep: {
+      startFrame: 8, travelFrames: 6, distance: 96, invuln: [6, 16], turnIfPassed: true, stopAtEdge: true, oncePerAir: true,
+    },
+  };
+  moves.dspecial = {
+    id: 'dspecial', totalFrames: 50, invuln: [60, 72],
+    hitboxes: [
+      { id: 1, start: 70, end: 73, x: 24, y: -34, r: 20, damage: 0, angle: 45, bkb: 60, kbg: 70, group: 1, fromCounter: true, noCrit: true },
+      { id: 2, start: 78, end: 81, x: 38, y: -8, r: 18, damage: 0, angle: 45, bkb: 60, kbg: 70, group: 1, fromCounter: true, noCrit: true },
+    ],
+    counter: { windowStart: 5, windowEnd: 22, scale: 1.3, minDamage: 10, maxDamage: 30, attackerFreeze: 14 },
+    branch: { start: 60, end: 104 },
+  };
+  const def: CharacterDef = { ...base, id: TREK_ID, name: 'Selftest Trek', moves, crit, finalSmash: undefined };
+  CHARACTER_DEFS[TREK_ID] = def;
+  rebuildProjectileDefs();
+  return def;
+}
+
+interface TrekRig { state: GameState; me: SimFighter; other: SimFighter; g: number; def: CharacterDef }
+
+/** Fighter 0 is the test def, fighter 1 Aeval, both settled on Tidegate. */
+function trekRig(crit?: { chance: number; scale: number }, seed = 1): TrekRig {
+  const def = registerTrek(crit);
+  const config = matchConfig(seed);
+  config.players[0].charId = TREK_ID;
+  const state = createGameState(config);
+  settle(state, 60);
+  const [me, other] = simFighters(state);
+  return { state, me, other, g: me.y, def };
+}
+
+function hitEvents(state: GameState): Extract<SimEvent, { type: 'hit' }>[] {
+  const out: Extract<SimEvent, { type: 'hit' }>[] = [];
+  for (let i = 0; i < state.events.length; i++) {
+    const e = state.events[i];
+    if (e.type === 'hit') out.push(e);
+  }
+  return out;
+}
+
+function eventOf<T extends SimEvent['type']>(state: GameState, type: T): Extract<SimEvent, { type: T }> | null {
+  for (let i = 0; i < state.events.length; i++) {
+    const e = state.events[i];
+    if (e.type === type) return e as Extract<SimEvent, { type: T }>;
+  }
+  return null;
+}
+
+function aliveOf(state: GameState, defId: string): ProjectileState | null {
+  for (let i = 0; i < state.projectiles.length; i++) {
+    const p = state.projectiles[i];
+    if (p.alive && p.defId === defId) return p;
+  }
+  return null;
+}
+
+/** Jab with echo into a standing Aeval: hits with the owner's move frame at each. */
+function echoJab(cancel: boolean): { hits: { frame: number; ev: Extract<SimEvent, { type: 'hit' }> }[]; combo: number; echoGone: boolean } {
+  const t = trekRig();
+  placeAt(t.me, -30, t.g, 1, true);
+  placeAt(t.other, 0, t.g, -1, true);
+  const hits: { frame: number; ev: Extract<SimEvent, { type: 'hit' }> }[] = [];
+  step(t.state, inp(Btn.Attack, Btn.Attack), NONE);
+  let echoGone = true;
+  for (let i = 0; i < 60; i++) {
+    step(t.state, NONE, NONE);
+    const hs = hitEvents(t.state);
+    for (let k = 0; k < hs.length; k++) if (hs[k].attacker === 0) hits.push({ frame: t.me.actionFrame, ev: hs[k] });
+    if (cancel && hits.length === 1 && t.me.action === 'attack') {
+      // Aeval hits the owner before the echo's active frame: the shadow dies.
+      applyHit(t.state, t.me, 1, -1, 5, 45, 30, 50, 1, 5, t.me.x, t.me.y - 20);
+      echoGone = t.me.echoMove === null;
+    }
+  }
+  return { hits, combo: t.other.comboCount, echoGone };
+}
+
+function testEcho(): SelfTestResult {
+  const r = echoJab(false);
+  const [a, b] = r.hits;
+  const ok = r.hits.length === 2 && b.frame - a.frame === 8
+    && Math.abs(b.ev.damage - a.ev.damage * 0.5) < 1e-9 && a.ev.echo !== true && b.ev.echo === true && r.combo === 2;
+  return {
+    name: 'tk1. an echoed jab hits twice, 8 move frames apart, the echo at half damage, flagged echo, combo 2',
+    pass: ok,
+    detail: `${r.hits.length} hits` + (r.hits.length >= 2
+      ? ` at move frames ${a.frame} and ${b.frame}, damage ${a.ev.damage} then ${b.ev.damage}, echo flags ${a.ev.echo} ${b.ev.echo}`
+      : '') + `, combo ${r.combo}`,
+  };
+}
+
+function testEchoCancel(): SelfTestResult {
+  const r = echoJab(true);
+  return {
+    name: 'tk2. hitting the owner before the echo is active cancels the echo hit',
+    pass: r.hits.length === 1 && r.echoGone,
+    detail: `${r.hits.length} hits, echo cleared on the hit ${r.echoGone}`,
+  };
+}
+
+function testAevalNoEchoNoRng(): SelfTestResult {
+  const state = createGameState(matchConfig(7));
+  settle(state, 60);
+  const [a, b] = simFighters(state);
+  a.x = -20;
+  b.x = 20;
+  const rng0 = state.rng.s;
+  let lcg = 12345;
+  const nextBits = (): number => {
+    lcg = (lcg * 1103515245 + 12345) & 0x7fffffff;
+    return lcg >>> 8;
+  };
+  let prevA = 0;
+  let prevB = 0;
+  let hits = 0;
+  let echo = false;
+  for (let i = 0; i < 1200; i++) {
+    const x = nextBits() & 0x3ff;
+    const y = nextBits() & 0x3ff;
+    step(state, inp(x, x & ~prevA), inp(y, y & ~prevB));
+    prevA = x;
+    prevB = y;
+    hits += hitEvents(state).length;
+    if (a.echoMove !== null || b.echoMove !== null) echo = true;
+  }
+  return {
+    name: 'tk3. an Aeval mirror of 1200 frames never echoes and never advances state.rng',
+    pass: hits > 0 && !echo && state.rng.s === rng0,
+    detail: `${hits} hits, echo seen ${echo}, rng ${rng0} to ${state.rng.s}`,
+  };
+}
+
+interface CritRun { n: number; crits: number; seq: string; dmgN: number; dmgC: number; kbN: number; kbC: number }
+
+/** n landed jab (or echo) hits on a fresh 0 percent Aeval, resolved directly. */
+function critRun(n: number, echo: boolean, seed: number): CritRun {
+  const t = trekRig({ chance: 0.12, scale: 1.3 }, seed);
+  const out: CritRun = { n, crits: 0, seq: '', dmgN: 0, dmgC: 0, kbN: 0, kbC: 0 };
+  for (let i = 0; i < n; i++) {
+    placeAt(t.other, 0, t.g, -1, true);
+    t.other.percent = 0;
+    t.other.hitlag = 0;
+    t.other.hitstun = 0;
+    t.other.invuln = 0;
+    placeAt(t.me, -30, t.g, 1, true);
+    t.me.hitlag = 0;
+    t.me.echoMove = null;
+    if (echo) {
+      t.me.echoMove = 'jab';
+      t.me.echoAge = 4;
+      t.me.echoX = -36;
+      t.me.echoY = t.g;
+      t.me.echoFacing = 1;
+      t.me.echoHitGroups = 0;
+    } else {
+      setAction(t.me, 'attack');
+      t.me.moveId = 'jab';
+      t.me.actionFrame = 4;
+      t.me.hitGroups = 0;
+    }
+    t.state.events.length = 0;
+    resolveHits(t.state);
+    const h = hitEvents(t.state);
+    if (h.length !== 1) continue;
+    if (h[0].crit === true) {
+      out.crits++;
+      out.dmgC = h[0].damage;
+      out.kbC = h[0].kb;
+      out.seq += '1';
+    } else {
+      out.dmgN = h[0].damage;
+      out.kbN = h[0].kb;
+      out.seq += '0';
+    }
+  }
+  return out;
+}
+
+function testCritRate(): SelfTestResult {
+  const a = critRun(2000, false, 5);
+  const b = critRun(2000, false, 5);
+  const rate = a.crits / a.seq.length;
+  const exact = Math.abs(a.dmgC - a.dmgN * 1.3) < 1e-9;
+  return {
+    name: 'tk4. crits land at 0.10 to 0.14 of 2000 hits at chance 0.12, deal exactly 1.3x, launch harder, same seed same sequence',
+    pass: a.seq.length === 2000 && rate >= 0.10 && rate <= 0.14 && exact && a.kbC > a.kbN && a.seq === b.seq,
+    detail: `${a.crits}/${a.seq.length} crits (${rate.toFixed(3)}), damage ${a.dmgN} vs ${a.dmgC}, kb ${a.kbN.toFixed(2)} vs `
+      + `${a.kbC.toFixed(2)}, repeat identical ${a.seq === b.seq}`,
+  };
+}
+
+function testEchoCritRate(): SelfTestResult {
+  const a = critRun(4000, true, 9);
+  const rate = a.crits / a.seq.length;
+  return {
+    name: 'tk5. echo hits crit at half chance: 0.045 to 0.075 of 4000',
+    pass: a.seq.length === 4000 && rate >= 0.045 && rate <= 0.075,
+    detail: `${a.crits}/${a.seq.length} crits (${rate.toFixed(4)})`,
+  };
+}
+
+/** Aeval ftilt meets the test def's dspecial at move frame `frame`, resolved directly. */
+function counterAt(frame: number): { t: TrekRig; absorbed: boolean; want: number } {
+  const t = trekRig();
+  const aev = CHARACTER_DEFS['aeval'];
+  placeAt(t.me, 0, t.g, 1, true);
+  placeAt(t.other, -30, t.g, 1, true);
+  setAction(t.me, 'attack');
+  t.me.moveId = 'dspecial';
+  t.me.actionFrame = frame;
+  setAction(t.other, 'attack');
+  t.other.moveId = 'ftilt';
+  t.other.actionFrame = aev.moves.ftilt.hitboxes[0].start;
+  t.other.hitGroups = 0;
+  t.state.events.length = 0;
+  resolveHits(t.state);
+  const raw = aev.moves.ftilt.hitboxes[0].damage;
+  const want = Math.min(30, Math.max(10, raw * 1.3));
+  return { t, absorbed: eventOf(t.state, 'counter') !== null, want };
+}
+
+function testCounterMelee(): SelfTestResult {
+  const inside = counterAt(22);
+  const i = inside.t;
+  const absorbedOk = inside.absorbed && i.me.percent === 0 && i.me.onBranch && i.me.actionFrame === 60
+    && i.other.hitlag === 14 && i.me.facing === -1 && Math.abs(i.me.counterDamage - inside.want) < 1e-9;
+  let counterHit = -1;
+  let lastFrame = -1;
+  for (let k = 0; k < 80; k++) {
+    step(i.state, NONE, NONE);
+    const h = hitEvents(i.state);
+    for (let e = 0; e < h.length; e++) if (h[e].attacker === 0 && counterHit < 0) counterHit = h[e].damage;
+    if (i.me.action === 'attack') lastFrame = i.me.actionFrame;
+  }
+  const dealt = Math.abs(i.other.percent - inside.want * TUNING.knockback.damageMul) < 1e-9
+    && Math.abs(counterHit - inside.want * TUNING.knockback.damageMul) < 1e-9;
+
+  const outside = counterAt(23);
+  const o = outside.t;
+  const lands = !outside.absorbed && o.me.percent > 0 && !o.me.onBranch;
+
+  const w = trekRig();
+  startMove(w.state, w.me, w.def, 'dspecial');
+  let whiff = 0;
+  while (w.me.action === 'attack' && whiff < 200) {
+    step(w.state, NONE, NONE);
+    whiff++;
+  }
+  return {
+    name: 'tk6. a melee hit inside the counter window is absorbed and repaid, one frame late it lands, a whiff ends at totalFrames',
+    pass: absorbedOk && dealt && lastFrame === 103 && i.me.action === 'idle' && lands && whiff === 50 && w.me.action === 'idle',
+    detail: `inside: absorbed as specified ${absorbedOk}, counterDamage ${i.me.counterDamage} (want ${inside.want}), counter hit `
+      + `${counterHit}, Aeval at ${i.other.percent}, last branch frame ${lastFrame} | frame 23: absorbed ${outside.absorbed}, `
+      + `percent ${o.me.percent} | whiff ${whiff} frames to ${w.me.action}`,
+  };
+}
+
+function testCounterProjectile(): SelfTestResult {
+  const t = trekRig();
+  placeAt(t.me, 0, t.g, 1, true);
+  placeAt(t.other, -120, t.g, 1, true);
+  setAction(t.me, 'attack');
+  t.me.moveId = 'dspecial';
+  t.me.actionFrame = 10;
+  spawnProjectile(t.state, t.other, PROJECTILE_DEFS['orb'], 1, 1, 0);
+  const orb = aliveOf(t.state, 'orb');
+  if (orb === null) return { name: 'tk7. counter projectile', pass: false, detail: 'no orb spawned' };
+  orb.x = t.me.x - 8;
+  orb.y = t.me.y - 20;
+  t.state.events.length = 0;
+  resolveHits(t.state);
+  let burst = false;
+  for (let e = 0; e < t.state.events.length; e++) {
+    const ev = t.state.events[e];
+    if (ev.type === 'projectileSpawn' && ev.defId === 'orbBurst') burst = true;
+  }
+  const countered = eventOf(t.state, 'counter') !== null;
+  return {
+    name: 'tk7. an orb inside the counter window dies with no burst and the counter fires',
+    pass: countered && !orb.alive && !burst && aliveOf(t.state, 'orbBurst') === null && t.me.percent === 0
+      && t.me.onBranch && t.me.facing === -1,
+    detail: `counter ${countered}, orb alive ${orb.alive}, burst ${burst}, percent ${t.me.percent}, branch ${t.me.onBranch}, facing ${t.me.facing}`,
+  };
+}
+
+function testCounterVsGrab(): SelfTestResult {
+  const t = trekRig();
+  placeAt(t.me, 0, t.g, -1, true);
+  placeAt(t.other, -22, t.g, 1, true);
+  startMove(t.state, t.me, t.def, 'dspecial');
+  startGrab(t.state, t.other, CHARACTER_DEFS['aeval']);
+  let countered = false;
+  let caughtAt = -1;
+  for (let i = 0; i < 30 && caughtAt < 0; i++) {
+    step(t.state, NONE, NONE);
+    if (eventOf(t.state, 'counter') !== null) countered = true;
+    if (t.me.action === 'grabbed') caughtAt = i + 1;
+  }
+  return {
+    name: 'tk8. a grab beats the counter',
+    pass: caughtAt > 0 && !countered && t.other.action !== 'attack',
+    detail: `caught on frame ${caughtAt} (defender frame then in window 5 to 22), counter fired ${countered}, grabber ${t.other.action}`,
+  };
+}
+
+function testBranchInvariant(): SelfTestResult {
+  registerTrek();
+  const bad: string[] = [];
+  let checked = 0;
+  const ids = Object.keys(CHARACTER_DEFS);
+  for (let c = 0; c < ids.length; c++) {
+    const moves = CHARACTER_DEFS[ids[c]].moves;
+    const mids = Object.keys(moves) as MoveId[];
+    for (let m = 0; m < mids.length; m++) {
+      const mv = moves[mids[m]];
+      if (mv.branch === undefined) continue;
+      checked++;
+      if (mv.branch.start < mv.totalFrames + (mv.chargeCastFrames ?? 0) || mv.branch.end <= mv.branch.start) {
+        bad.push(`${ids[c]}.${mids[m]}`);
+      }
+    }
+  }
+  return {
+    name: 'tk9. every branch starts at or after totalFrames + chargeCastFrames',
+    pass: checked >= 2 && bad.length === 0,
+    detail: `${checked} branches checked, bad: ${bad.join(', ') || 'none'}`,
+  };
+}
+
+/** A tap sword thrown with `held` on the stick. */
+function aimShot(held: number): { vx: number; vy: number; facing: number } {
+  const t = trekRig();
+  placeAt(t.me, -150, t.g, 1, true);
+  placeAt(t.other, -240, t.g, 1, true);
+  step(t.state, directHeldInp('nspecial', held), NONE);
+  for (let i = 0; i < 20; i++) {
+    step(t.state, inp(held, 0), NONE);
+    const p = aliveOf(t.state, 'stSword');
+    if (p !== null) return { vx: p.vx, vy: p.vy, facing: t.me.facing };
+  }
+  return { vx: NaN, vy: NaN, facing: t.me.facing };
+}
+
+/** Travel of a sword from spawn to death, tapped or held to full charge. */
+function swordTravel(full: boolean): number {
+  const t = trekRig();
+  placeAt(t.me, -150, t.g, 1, true);
+  placeAt(t.other, -240, t.g, 1, true);
+  if (full) step(t.state, inp(Btn.Special, Btn.Special), NONE);
+  else step(t.state, directInp('nspecial'), NONE);
+  let from = NaN;
+  let to = NaN;
+  for (let i = 0; i < 200 && Number.isNaN(to); i++) {
+    step(t.state, full && i < 70 ? inp(Btn.Special, 0) : NONE, NONE);
+    for (let e = 0; e < t.state.events.length; e++) {
+      const ev = t.state.events[e];
+      if (ev.type === 'projectileSpawn' && ev.defId === 'stSword') from = ev.x;
+      if (ev.type === 'projectileDie' && ev.defId === 'stSword') to = ev.x;
+    }
+  }
+  return to - from;
+}
+
+function testAim(): SelfTestResult {
+  const up = aimShot(Btn.Up);
+  const df = aimShot(Btn.Down | Btn.Right);
+  const back = aimShot(Btn.Left);
+  const tap = swordTravel(false);
+  const full = swordTravel(true);
+  const upOk = Math.abs(up.vx) < 1e-9 && up.vy < 0;
+  const dfOk = df.vx > 0 && df.vy > 0;
+  const backOk = back.facing === -1 && back.vx < 0 && Math.abs(back.vy) < 1e-9;
+  return {
+    name: 'tk10. the aimed sword flies up, down-forward, turns on back, tap travels 140 and full 372',
+    pass: upOk && dfOk && backOk && Math.abs(tap - 140) <= 5 && Math.abs(full - 372) <= 10,
+    detail: `up ${up.vx.toFixed(2)},${up.vy.toFixed(2)} | down-forward ${df.vx.toFixed(2)},${df.vy.toFixed(2)} | back facing `
+      + `${back.facing} vx ${back.vx.toFixed(2)} | tap ${tap.toFixed(1)} px, full ${full.toFixed(1)} px`,
+  };
+}
+
+/** Puts a live test sword owned by fighter 0 at (x, y). */
+function swordAt(t: TrekRig, x: number, y: number): ProjectileState | null {
+  spawnProjectile(t.state, t.me, ST_SWORD, 1, 1, 0);
+  const p = aliveOf(t.state, 'stSword');
+  if (p === null) return null;
+  p.x = x;
+  p.y = y;
+  p.vx = 0;
+  p.vy = 0;
+  return p;
+}
+
+function testRecall(): SelfTestResult {
+  const SPECIAL_PRESS = inp(Btn.Special, Btn.Special);
+  // A real throw on the ground, then a second press once the move is over.
+  const g = trekRig();
+  placeAt(g.me, -150, g.g, 1, true);
+  placeAt(g.other, -240, g.g, 1, true);
+  step(g.state, directInp('nspecial'), NONE);
+  for (let i = 0; i < 32; i++) step(g.state, NONE, NONE);
+  const sw = aliveOf(g.state, 'stSword');
+  const px = sw === null ? NaN : sw.x;
+  const py = sw === null ? NaN : sw.y;
+  step(g.state, SPECIAL_PRESS, NONE);
+  const tp = eventOf(g.state, 'teleport');
+  let burst = false;
+  for (let e = 0; e < g.state.events.length; e++) {
+    const ev = g.state.events[e];
+    if (ev.type === 'projectileSpawn' && ev.defId === 'stBurst') burst = true;
+  }
+  const groundOk = tp !== null && tp.kind === 'recall' && g.me.x === px && g.me.y === g.g
+    && g.me.onBranch && g.me.actionFrame === 40 && g.me.invuln === 12 && sw !== null && !sw.alive && !burst
+    && aliveOf(g.state, 'stBurst') === null;
+  let inv = 0;
+  for (let i = 0; i < 20; i++) {
+    step(g.state, NONE, NONE);
+    if (g.me.invuln > 0) inv++;
+  }
+
+  // In the air: a recall whose feet point falls inside the stage snaps onto it.
+  const f = trekRig();
+  placeAt(f.me, -150, -150, 1, false);
+  placeAt(f.other, -240, f.g, 1, true);
+  swordAt(f, 50, -10);
+  step(f.state, SPECIAL_PRESS, NONE);
+  const snapped = f.me.x === 50 && f.me.y === 0 && f.me.onGround;
+
+  // In the air: the second air recall before landing is dropped.
+  const a = trekRig();
+  placeAt(a.me, -150, -300, 1, false);
+  placeAt(a.other, -240, a.g, 1, true);
+  swordAt(a, 0, -250);
+  step(a.state, SPECIAL_PRESS, NONE);
+  const first = eventOf(a.state, 'teleport') !== null && a.me.x === 0 && (a.me.airLock & 2) !== 0;
+  for (let i = 0; i < 16; i++) step(a.state, NONE, NONE);
+  swordAt(a, 120, -250);
+  const beforeX = a.me.x;
+  step(a.state, SPECIAL_PRESS, NONE);
+  const dropped = eventOf(a.state, 'teleport') === null && a.me.x !== 120 && Math.abs(a.me.x - beforeX) < 3
+    && a.me.action !== 'attack' && !a.me.onGround;
+  return {
+    name: 'tk11. recall teleports to the sword with no burst and 12 invulnerable frames, snaps onto the floor, once per air',
+    pass: groundOk && inv === 11 && snapped && first && dropped,
+    detail: `ground: teleport ${tp !== null}, at ${g.me.x.toFixed(1)},${g.me.y} (sword ${px.toFixed(1)},${py}), branch frame `
+      + `${g.me.actionFrame}, burst ${burst}, invulnerable ${inv} more frames | floor snap ${snapped} (${f.me.x},${f.me.y}) | `
+      + `air: first ${first}, second dropped ${dropped} (${a.me.action}, x ${a.me.x.toFixed(1)})`,
+  };
+}
+
+function testCrescentLockUnchanged(): SelfTestResult {
+  const t = aevalAt(-200);
+  const def = CHARACTER_DEFS['aeval'];
+  const side = inp(Btn.Special | Btn.Right, Btn.Special);
+  step(t.state, side, NONE);
+  for (let i = 0; i < 40; i++) step(t.state, NONE, NONE);
+  const locked = moveLocked(t.state, t.me, def, 'sspecial');
+  step(t.state, side, NONE);
+  const noTeleport = eventOf(t.state, 'teleport') === null && t.me.action !== 'attack';
+  return {
+    name: 'tk12. Aeval crescent lock is unchanged: locked while out, no recall',
+    pass: locked && noTeleport && !tryRecall(t.state, t.me, def, 'sspecial'),
+    detail: `locked ${locked}, press ignored without a teleport ${noTeleport}`,
+  };
+}
+
+function testShadowStep(): SelfTestResult {
+  const SIDE = inp(Btn.Special | Btn.Right, Btn.Special);
+  // Air: full distance, not helpless after.
+  const a = trekRig();
+  placeAt(a.me, -150, -300, 1, false);
+  placeAt(a.other, 200, a.g, -1, true);
+  step(a.state, SIDE, NONE);
+  let tp: Extract<SimEvent, { type: 'teleport' }> | null = null;
+  let ended = '';
+  for (let i = 0; i < 60; i++) {
+    step(a.state, NONE, NONE);
+    const e = eventOf(a.state, 'teleport');
+    if (e !== null) tp = e;
+    if (ended === '' && a.me.action !== 'attack') ended = a.me.action;
+  }
+  const airTravel = tp === null ? NaN : tp.x - tp.fromX;
+  const airOk = tp !== null && tp.kind === 'step' && Math.abs(airTravel - 96) <= 1 && ended === 'air';
+  // Second air use is dropped until landing.
+  const airborne = !a.me.onGround;
+  step(a.state, SIDE, NONE);
+  const secondDropped = a.me.action !== 'attack';
+  for (let i = 0; i < 200 && !a.me.onGround; i++) step(a.state, NONE, NONE);
+  settle(a.state, 10);
+  step(a.state, SIDE, NONE);
+  const againOnGround = a.me.action === 'attack' && a.me.moveId === 'sspecial';
+
+  // Ground: stops at the edge.
+  const edge = mainEdges('tidegate').right;
+  const g = trekRig();
+  placeAt(g.me, edge - 30, g.g, 1, true);
+  placeAt(g.other, -200, g.g, 1, true);
+  step(g.state, SIDE, NONE);
+  for (let i = 0; i < 20; i++) step(g.state, NONE, NONE);
+  const edgeOk = g.me.x === edge && g.me.onGround;
+
+  // Crossing the opponent turns the fighter around.
+  const c = trekRig();
+  placeAt(c.me, -100, c.g, 1, true);
+  placeAt(c.other, -50, c.g, -1, true);
+  step(c.state, SIDE, NONE);
+  for (let i = 0; i < 16; i++) step(c.state, NONE, NONE);
+  const turned = c.me.facing === -1 && c.me.x > -50;
+  return {
+    name: 'tk13. shadow step travels 96 in the air, stops at the edge, turns after crossing, once per air',
+    pass: airOk && airborne && secondDropped && againOnGround && edgeOk && turned,
+    detail: `air travel ${airTravel.toFixed(2)} then ${ended} | second air use dropped ${secondDropped} (airborne ${airborne}), `
+      + `again after landing ${againOnGround} | edge ${g.me.x} (edge ${edge}) | crossed: facing ${c.me.facing} at x ${c.me.x}`,
+  };
+}
+
+function testFixedScale(): SelfTestResult {
+  const t = trekRig();
+  spawnProjectile(t.state, t.me, ST_SWORD, 1, 1.5, 1);
+  const p = aliveOf(t.state, 'stSword');
+  return {
+    name: 'tk14. a fixedScale projectile spawned at full charge keeps scale 1',
+    pass: p !== null && p.scale === 1 && p.charge === 1,
+    detail: `scale ${p === null ? 'none' : p.scale}`,
+  };
+}
+
+/** Clone mid-mechanic, step both 180 frames with the same inputs, compare. */
+function rollbackCheck(state: GameState): { cloneEqual: boolean; snapEqual: boolean; afterEqual: boolean } {
+  const copy = cloneGameState(state);
+  const snap = newSnapshot();
+  copyStateInto(snap, state);
+  const cloneEqual = JSON.stringify(copy) === JSON.stringify(state);
+  const snapEqual = JSON.stringify(snap) === JSON.stringify(state);
+  for (let i = 0; i < 180; i++) {
+    const a = inp(i % 40 < 3 ? Btn.Attack : 0, i % 40 === 0 ? Btn.Attack : 0);
+    step(state, a, NONE);
+    step(copy, a, NONE);
+  }
+  return { cloneEqual, snapEqual, afterEqual: JSON.stringify(copy) === JSON.stringify(state) };
+}
+
+function testTrekRollback(): SelfTestResult {
+  const parts: string[] = [];
+  let ok = true;
+  const record = (label: string, s: GameState, mid: boolean): void => {
+    const r = rollbackCheck(s);
+    const pass = mid && r.cloneEqual && r.snapEqual && r.afterEqual;
+    if (!pass) ok = false;
+    parts.push(`${label}: mid ${mid}, clone ${r.cloneEqual}, snapshot ${r.snapEqual}, after 180 ${r.afterEqual}`);
+  };
+  const e = trekRig();
+  placeAt(e.me, -30, e.g, 1, true);
+  placeAt(e.other, 0, e.g, -1, true);
+  step(e.state, inp(Btn.Attack, Btn.Attack), NONE);
+  for (let i = 0; i < 6; i++) step(e.state, NONE, NONE);
+  record('echo', e.state, e.me.echoMove !== null && e.me.echoAge < 4);
+
+  const b = counterAt(15).t;
+  record('branch', b.state, b.me.onBranch);
+
+  const r = trekRig();
+  placeAt(r.me, -150, -300, 1, false);
+  swordAt(r, 0, -250);
+  step(r.state, inp(Btn.Special, Btn.Special), NONE);
+  record('recall', r.state, r.me.onBranch && r.me.invuln > 0);
+
+  const s = trekRig();
+  placeAt(s.me, -150, -300, 1, false);
+  step(s.state, inp(Btn.Special | Btn.Right, Btn.Special), NONE);
+  for (let i = 0; i < 9; i++) step(s.state, NONE, NONE);
+  record('step', s.state, s.me.moveId === 'sspecial' && s.me.actionFrame > 8 && s.me.actionFrame < 14);
+  return {
+    name: 'tk15. clones and snapshots taken mid-echo, mid-branch, mid-recall and mid-step step identically',
+    pass: ok,
+    detail: parts.join(' | '),
+  };
+}
+
+function testHitSource(): SelfTestResult {
+  const r = echoJab(false);
+  const melee = r.hits.length === 2 && r.hits[0].ev.source === 'jab' && r.hits[1].ev.source === 'echo:jab';
+
+  const p = trekRig();
+  placeAt(p.me, -60, p.g, 1, true);
+  placeAt(p.other, 0, p.g, -1, true);
+  step(p.state, directInp('nspecial'), NONE);
+  let shot = '';
+  for (let i = 0; i < 40 && shot === ''; i++) {
+    step(p.state, NONE, NONE);
+    const h = hitEvents(p.state);
+    if (h.length > 0) shot = h[0].source ?? 'none';
+  }
+
+  const t = trekRig();
+  placeAt(t.me, 0, t.g, -1, true);
+  placeAt(t.other, -22, t.g, 1, true);
+  const aev = CHARACTER_DEFS['aeval'];
+  startGrab(t.state, t.other, aev);
+  for (let i = 0; i < 20 && t.other.action !== 'grabHold'; i++) step(t.state, NONE, NONE);
+  startThrow(t.state, t.other, 'fthrow');
+  let thrown = '';
+  for (let i = 0; i < 60 && thrown === ''; i++) {
+    step(t.state, NONE, NONE);
+    const h = hitEvents(t.state);
+    if (h.length > 0) thrown = h[0].source ?? 'none';
+  }
+  return {
+    name: "tk16. 'hit' events carry their source: move, echo:move, projectile and throw ids",
+    pass: melee && shot === 'stSword' && thrown === 'fthrow',
+    detail: `melee ${r.hits.map((h) => h.ev.source).join(', ')} | projectile ${shot} | throw ${thrown}`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Trekmore def (plan F W1-char). The real registered Trekmore against Aeval.
+// ---------------------------------------------------------------------------
+
+const TREK = 'trekmore';
+
+interface TkRig { state: GameState; me: SimFighter; other: SimFighter; g: number; def: CharacterDef }
+
+/** Fighter 0 Trekmore, fighter 1 `otherId` (Aeval by default), both settled on `stageId`. */
+function tkRig(stageId = 'tidegate', otherId = 'aeval', seed = 1): TkRig {
+  const config = matchConfig(seed, stageId);
+  config.players[0].charId = TREK;
+  config.players[1].charId = otherId;
+  const state = createGameState(config);
+  settle(state, 60);
+  const [me, other] = simFighters(state);
+  return { state, me, other, g: STAGE_DEFS[stageId].platforms[0].y, def: CHARACTER_DEFS[TREK] };
+}
+
+/** Sum of an anim's holds, or -1 when the sheet lacks it. */
+function holdSum(name: string): number {
+  const a = CHARACTER_SPRITES[TREK].anims[name];
+  if (a === undefined || a.holds === undefined) return -1;
+  let t = 0;
+  for (let i = 0; i < a.holds.length; i++) t += a.holds[i];
+  return t;
+}
+
+/** True when `frame` is where one of the anim's drawn frames begins. */
+function animBoundary(name: string, frame: number): boolean {
+  const a = CHARACTER_SPRITES[TREK].anims[name];
+  if (a === undefined || a.holds === undefined) return false;
+  let t = 0;
+  for (let i = 0; i < a.holds.length; i++) {
+    if (t === frame) return true;
+    t += a.holds[i];
+  }
+  return false;
+}
+
+/**
+ * First active frame of each attack, from plan A.4 (the "hit at" marks). Each must be the first
+ * start among the move's hitboxes (uspecial: the top swing, group 2) and the first frame of a
+ * drawn slash frame in the sheetmap.
+ */
+const TK_HIT_FRAMES: Partial<Record<MoveId, number>> = {
+  jab: 7, ftilt: 13, utilt: 13, dtilt: 8, dashatk: 11, fsmash: 23, usmash: 21, dsmash: 17,
+  nair: 6, fair: 12, bair: 10, uair: 16, dair: 14, sspecial: 19, uspecial: 40, ledgeatk: 22, getupatk: 16,
+};
+
+function testTrekDefShape(): SelfTestResult {
+  const def = CHARACTER_DEFS[TREK];
+  const sprites = CHARACTER_SPRITES[TREK];
+  const bad: string[] = [];
+  const ids = Object.keys(CHARACTER_DEFS['aeval'].moves) as MoveId[];
+  const probe = { onGround: true, airJumped: false, actionFrame: 0 } as unknown as Parameters<typeof sprites.animFor>[2];
+  for (let m = 0; m < ids.length; m++) {
+    const id = ids[m];
+    const mv = def.moves[id];
+    if (mv === undefined || mv.id !== id) {
+      bad.push(`${id}: no def`);
+      continue;
+    }
+    const anim = sprites.animFor('attack', id, probe);
+    if (anim === 'idle' || sprites.anims[anim] === undefined) bad.push(`${id}: no anim`);
+    if (holdSum(anim) !== mv.totalFrames) bad.push(`${id}: holds ${holdSum(anim)} vs total ${mv.totalFrames}`);
+    const br = mv.branch;
+    if (br !== undefined && holdSum(`${anim}Branch`) !== br.end - br.start) {
+      bad.push(`${id}: branch holds ${holdSum(`${anim}Branch`)} vs ${br.end - br.start}`);
+    }
+    if (mv.chargeable === true && sprites.anims[`${anim}Charge`] === undefined) bad.push(`${id}: no Charge anim`);
+    for (let h = 0; h < mv.hitboxes.length; h++) {
+      const hb = mv.hitboxes[h];
+      const inMain = hb.end < mv.totalFrames;
+      const inBranch = br !== undefined && hb.start >= br.start && hb.end < br.end;
+      if (!inMain && !inBranch) bad.push(`${id}#${hb.id}: ${hb.start}-${hb.end} outside the move`);
+    }
+    const want = TK_HIT_FRAMES[id];
+    if (want !== undefined) {
+      let first = Infinity;
+      for (let h = 0; h < mv.hitboxes.length; h++) {
+        const hb = mv.hitboxes[h];
+        if (id === 'uspecial' && hb.group !== 2) continue;
+        if (hb.start < first) first = hb.start;
+      }
+      if (first !== want) bad.push(`${id}: first active ${first}, plan ${want}`);
+      if (!animBoundary(anim, want)) bad.push(`${id}: frame ${want} is not a drawn frame start`);
+    }
+  }
+  const air = sprites.animFor('attack', 'sspecial', { ...probe, onGround: false } as typeof probe);
+  if (air !== 'sspecialAir' || holdSum(air) !== def.moves.sspecial.totalFrames) bad.push(`sspecial air anim ${air}`);
+  const acts: ActionId[] = ['idle', 'walk', 'run', 'air', 'airHelpless', 'shield', 'roll', 'airDodge', 'hitstun', 'tumble',
+    'ledgeHang', 'grab', 'grabHold', 'pummel', 'throw', 'grabbed', 'downed', 'finalSmashVictim'];
+  for (let i = 0; i < acts.length; i++) {
+    const a = sprites.animFor(acts[i], null, probe);
+    if (sprites.anims[a] === undefined) bad.push(`action ${acts[i]}: no anim`);
+  }
+  const listed = CHARACTER_LIST.some((c) => c.id === TREK) && CHARACTER_SPRITES[TREK] !== undefined;
+  return {
+    name: 'tkd1. Trekmore: every move has a def and an anim, holds sum to totalFrames (branches to their length), '
+      + 'hitboxes sit inside the move or its branch, first active frames match the drawn slash frames',
+    pass: bad.length === 0 && listed && def.crit !== undefined && def.weight === 110,
+    detail: bad.length === 0 ? `${ids.length} moves checked, registered ${listed}` : bad.join('; '),
+  };
+}
+
+/** Steps until fighter 0 leaves `attack` (or `limit`), returning the frames taken. */
+function runOut(state: GameState, f: SimFighter, limit: number, input: InputFrame = NONE): number {
+  let n = 0;
+  while (f.action === 'attack' && n < limit) {
+    step(state, input, NONE);
+    n++;
+  }
+  return n;
+}
+
+function finiteFighter(f: SimFighter): boolean {
+  return Number.isFinite(f.x) && Number.isFinite(f.y) && Number.isFinite(f.vx) && Number.isFinite(f.vy)
+    && Number.isFinite(f.percent);
+}
+
+/**
+ * Every move started directly (ground moves on the floor, aerials 80 px up) on both stages, then
+ * every direct code and every button with every direction, from the floor and from the air: no
+ * throw, the move ends, the fighter stays finite.
+ */
+function testTrekSweep(): SelfTestResult {
+  const bad: string[] = [];
+  let runs = 0;
+  const ids = Object.keys(CHARACTER_DEFS[TREK].moves) as MoveId[];
+  const inputs: { label: string; frame: InputFrame }[] = [];
+  for (let c = 0; c < DIRECT_CODES.length; c++) {
+    inputs.push({ label: DIRECT_CODES[c], frame: { held: 0, pressed: 0, released: 0, direct: c + 1 } });
+  }
+  const buttons: [string, number][] = [['A', Btn.Attack], ['B', Btn.Special], ['Z', Btn.Grab], ['T', Btn.Taunt], ['S', Btn.Shield]];
+  const dirs: [string, number][] = [['', 0], ['up', Btn.Up], ['down', Btn.Down], ['left', Btn.Left], ['right', Btn.Right]];
+  for (let b = 0; b < buttons.length; b++) {
+    for (let d = 0; d < dirs.length; d++) {
+      inputs.push({ label: `${buttons[b][0]}${dirs[d][0]}`, frame: inp(buttons[b][1] | dirs[d][1], buttons[b][1]) });
+    }
+  }
+  for (let s = 0; s < STAGE_IDS.length; s++) {
+    const stageId = STAGE_IDS[s];
+    for (let m = 0; m < ids.length; m++) {
+      const id = ids[m];
+      const mv = CHARACTER_DEFS[TREK].moves[id];
+      try {
+        const t = tkRig(stageId);
+        const air = mv.airOnly === true;
+        placeAt(t.me, 0, air ? t.g - 80 : t.g, 1, !air);
+        placeAt(t.other, 60, t.g, -1, true);
+        startMove(t.state, t.me, t.def, id);
+        const n = runOut(t.state, t.me, 400);
+        runs++;
+        if (t.me.action === 'attack' || !finiteFighter(t.me)) bad.push(`${stageId} ${id}: ${t.me.action} after ${n}`);
+      } catch (e) {
+        bad.push(`${stageId} ${id}: threw ${String(e)}`);
+      }
+    }
+    for (let k = 0; k < inputs.length; k++) {
+      for (let air = 0; air < 2; air++) {
+        try {
+          const t = tkRig(stageId);
+          placeAt(t.me, 0, air === 1 ? t.g - 80 : t.g, 1, air === 0);
+          placeAt(t.other, 40, t.g, -1, true);
+          step(t.state, inputs[k].frame, NONE);
+          const held = inp(inputs[k].frame.held, 0);
+          // Hold the input 10 frames (charges, shield), then let go and let the move play out.
+          for (let i = 0; i < 10; i++) step(t.state, held, NONE);
+          for (let i = 0; i < 300 && t.me.action === 'attack'; i++) step(t.state, NONE, NONE);
+          runs++;
+          if (t.me.action === 'attack' || !finiteFighter(t.me)) {
+            bad.push(`${stageId} ${inputs[k].label}${air === 1 ? ' air' : ''}: ${t.me.action}`);
+          }
+        } catch (e) {
+          bad.push(`${stageId} ${inputs[k].label}${air === 1 ? ' air' : ''}: threw ${String(e)}`);
+        }
+      }
+    }
+  }
+  return {
+    name: 'tkd2. Trekmore: every move, direct code and button with each direction starts and ends on both stages, ground and air',
+    pass: bad.length === 0 && runs > 0,
+    detail: bad.length === 0 ? `${runs} runs on ${STAGE_IDS.join(', ')}` : bad.slice(0, 8).join('; '),
+  };
+}
+
+/** Grab, pummel, the four throws and ledge and getup attacks through real inputs. */
+function testTrekGrabKitAndUtility(): SelfTestResult {
+  const bad: string[] = [];
+  const kit = grabKitOf(CHARACTER_DEFS[TREK]);
+  const throws: ('fthrow' | 'bthrow' | 'uthrow' | 'dthrow')[] = ['fthrow', 'bthrow', 'uthrow', 'dthrow'];
+  const got: string[] = [];
+  for (let k = 0; k < throws.length; k++) {
+    const t = tkRig();
+    placeAt(t.me, 0, t.g, 1, true);
+    placeAt(t.other, 30, t.g, -1, true);
+    step(t.state, inp(Btn.Grab, Btn.Grab), NONE);
+    for (let i = 0; i < 20 && t.me.action !== 'grabHold'; i++) step(t.state, NONE, NONE);
+    if (t.me.action !== 'grabHold') {
+      bad.push(`${throws[k]}: no catch (${t.me.action})`);
+      continue;
+    }
+    step(t.state, cmdInp('pummel', 0, 0), NONE);
+    let pummel = false;
+    for (let i = 0; i < kit.pummel.totalFrames + 2; i++) {
+      step(t.state, NONE, NONE);
+      if (hitEvents(t.state).some((h) => h.attacker === 0)) pummel = true;
+    }
+    const before = t.other.percent;
+    step(t.state, cmdInp(throws[k], 0, 0), NONE);
+    let src = '';
+    for (let i = 0; i < 60 && src === ''; i++) {
+      step(t.state, NONE, NONE);
+      const h = hitEvents(t.state);
+      for (let e = 0; e < h.length; e++) if (h[e].attacker === 0 && h[e].source !== undefined) src = h[e].source as string;
+    }
+    const dealt = t.other.percent - before;
+    const want = kit.throws[throws[k]].damage * TUNING.knockback.damageMul;
+    got.push(`${throws[k]} ${dealt.toFixed(1)}`);
+    if (!pummel) bad.push(`${throws[k]}: pummel did not land`);
+    if (src !== throws[k] || Math.abs(dealt - want) > 1e-9) bad.push(`${throws[k]}: source ${src}, dealt ${dealt}`);
+  }
+  const utility: MoveId[] = ['ledgeatk', 'getupatk', 'taunt', 'taunt2', 'taunt3'];
+  for (let u = 0; u < utility.length; u++) {
+    const id = utility[u];
+    const t = tkRig();
+    placeAt(t.me, 0, t.g, 1, true);
+    placeAt(t.other, 30, t.g, -1, true);
+    startMove(t.state, t.me, t.def, id);
+    let frozen = 0;
+    let n = 0;
+    while (t.me.action === 'attack' && n < 200) {
+      if (t.me.hitlag > 0) frozen++;
+      step(t.state, NONE, NONE);
+      n++;
+    }
+    const hit = t.other.percent > 0;
+    const wantHit = t.def.moves[id].hitboxes.length > 0;
+    // A landed hit freezes the attacker for its hitlag, which lengthens the move by as much.
+    if (n - frozen !== t.def.moves[id].totalFrames || hit !== wantHit) bad.push(`${id}: ${n} frames (${frozen} hitlag), hit ${hit}`);
+  }
+  return {
+    name: 'tkd3. Trekmore grab kit: shadow hand catches, pummel lands, four throws deal their damage with their source; '
+      + 'ledge and getup attacks hit, taunts run 90 frames',
+    pass: bad.length === 0,
+    detail: bad.length === 0 ? got.join(', ') : bad.join('; '),
+  };
+}
+
+/** Trekmore jabs a standing Aeval `gap` px away (centre to centre): owner and echo hits. */
+function tkJabAt(gap: number): { jab: boolean; echo: boolean; source: string } {
+  const t = tkRig();
+  placeAt(t.me, -30, t.g, 1, true);
+  placeAt(t.other, -30 + gap, t.g, -1, true);
+  step(t.state, inp(Btn.Attack, Btn.Attack), NONE);
+  const out = { jab: false, echo: false, source: '' };
+  for (let i = 0; i < 40; i++) {
+    step(t.state, NONE, NONE);
+    const h = hitEvents(t.state);
+    for (let e = 0; e < h.length; e++) {
+      if (h[e].attacker !== 0) continue;
+      if (h[e].echo === true) {
+        out.echo = true;
+        out.source = h[e].source ?? '';
+      } else {
+        out.jab = true;
+      }
+    }
+  }
+  return out;
+}
+
+function testTrekJabEcho(): SelfTestResult {
+  const misses: number[] = [];
+  let checked = 0;
+  for (let gap = 16; gap <= 56; gap += 4) {
+    const r = tkJabAt(gap);
+    checked++;
+    if (!r.jab || !r.echo || r.source !== 'echo:jab') misses.push(gap);
+  }
+  // The far edge of the jab and of jab plus echo, for the record.
+  let jabMax = 0;
+  let echoMax = 0;
+  for (let gap = 40; gap <= 90; gap++) {
+    const r = tkJabAt(gap);
+    if (r.jab) jabMax = gap;
+    if (r.jab && r.echo) echoMax = gap;
+  }
+  return {
+    name: 'tkd4. Trekmore jab echo connects on a standing Aeval at every jab spacing from 16 to 56 px',
+    pass: misses.length === 0 && checked > 0,
+    detail: `misses at ${misses.join(', ') || 'none'} | jab reaches ${jabMax} px, jab plus echo to ${echoMax} px`,
+  };
+}
+
+/** Travel of a real shadow sword from spawn to death, tapped or held to full charge. */
+function tkSwordTravel(full: boolean): number {
+  const t = tkRig();
+  placeAt(t.me, -150, t.g, 1, true);
+  placeAt(t.other, -240, t.g, 1, true);
+  if (full) step(t.state, inp(Btn.Special, Btn.Special), NONE);
+  else step(t.state, directInp('nspecial'), NONE);
+  let from = NaN;
+  let to = NaN;
+  for (let i = 0; i < 200 && Number.isNaN(to); i++) {
+    step(t.state, full && i < 70 ? inp(Btn.Special, 0) : NONE, NONE);
+    for (let e = 0; e < t.state.events.length; e++) {
+      const ev = t.state.events[e];
+      if (ev.type === 'projectileSpawn' && ev.defId === 'shadowSword') from = ev.x;
+      if (ev.type === 'projectileDie' && ev.defId === 'shadowSword') to = ev.x;
+    }
+  }
+  return to - from;
+}
+
+function testTrekSwordAndRecall(): SelfTestResult {
+  const tap = tkSwordTravel(false);
+  const full = tkSwordTravel(true);
+  // Air, aimed up-forward, recalled once the throw is over.
+  const t = tkRig();
+  placeAt(t.me, -150, t.g - 150, 1, false);
+  placeAt(t.other, 200, t.g, -1, true);
+  step(t.state, directHeldInp('nspecial', Btn.Up | Btn.Right), NONE);
+  let sword: ProjectileState | null = null;
+  for (let i = 0; i < 40 && sword === null; i++) {
+    step(t.state, inp(Btn.Up | Btn.Right, 0), NONE);
+    sword = aliveOf(t.state, 'shadowSword');
+  }
+  // Let the throw finish (a press during it is buffered to its end), then recall.
+  runOut(t.state, t.me, 40);
+  const sx = sword === null ? NaN : sword.x;
+  const sy = sword === null ? NaN : sword.y;
+  const risingOk = sword !== null && sword.vx > 0 && sword.vy < 0;
+  step(t.state, inp(Btn.Special, Btn.Special), NONE);
+  const tp = eventOf(t.state, 'teleport');
+  // The teleport event carries the landing point; the same frame's air physics then moves the feet a little.
+  const landed = tp !== null && tp.kind === 'recall' && tp.x === sx && tp.y === sy + 26 && t.me.onBranch
+    && t.me.invuln === 12 && sword !== null && !sword.alive && aliveOf(t.state, 'shadowBurst') === null;
+  const inv = t.me.invuln;
+  const n = runOut(t.state, t.me, 60);
+  return {
+    name: 'tkd5. Trekmore sword: tap travels 140 px, full 372 px; the recall lands the feet 26 px under the sword with 12 '
+      + 'invulnerable frames and 14 frames of branch',
+    pass: Math.abs(tap - 140) <= 5 && Math.abs(full - 372) <= 10 && risingOk && landed && n === 14,
+    detail: `tap ${tap.toFixed(1)} px, full ${full.toFixed(1)} px | up-forward ${risingOk} | recall to `
+      + `${tp === null ? 'none' : `${tp.x.toFixed(1)},${tp.y.toFixed(1)}`} `
+      + `(sword ${sx.toFixed(1)},${sy.toFixed(1)}) as specified ${landed} (invulnerable ${inv}), branch ran ${n} more frames`,
+  };
+}
+
+function testTrekShadowStepThrough(): SelfTestResult {
+  const out: string[] = [];
+  let ok = true;
+  for (let s = 0; s < STAGE_IDS.length; s++) {
+    const t = tkRig(STAGE_IDS[s]);
+    placeAt(t.me, -100, t.g, 1, true);
+    placeAt(t.other, -50, t.g, -1, true);
+    step(t.state, inp(Btn.Special | Btn.Right, Btn.Special), NONE);
+    let tp: Extract<SimEvent, { type: 'teleport' }> | null = null;
+    let strike: Extract<SimEvent, { type: 'hit' }> | null = null;
+    let touchedEarly = false;
+    for (let i = 0; i < 60 && t.me.action === 'attack'; i++) {
+      step(t.state, NONE, NONE);
+      const e = eventOf(t.state, 'teleport');
+      if (e !== null) tp = e;
+      const h = hitEvents(t.state);
+      for (let k = 0; k < h.length; k++) {
+        if (h[k].attacker !== 0) continue;
+        if (tp === null) touchedEarly = true;
+        else if (strike === null) strike = h[k];
+      }
+    }
+    const pass = tp !== null && tp.fromX < -50 && tp.x > -50 && t.me.facing === -1 && !touchedEarly
+      && strike !== null && strike.source === 'sspecial' && t.other.percent > 0;
+    if (!pass) ok = false;
+    out.push(`${STAGE_IDS[s]}: ${tp === null ? 'no step' : `${tp.fromX.toFixed(0)} to ${tp.x.toFixed(0)}`}, facing ${t.me.facing}, `
+      + `backstrike ${strike === null ? 'missed' : `${strike.damage} (${strike.source})`}`);
+  }
+  return {
+    name: 'tkd6. Trekmore shadow step passes through a standing Aeval, turns, and the backstrike hits her',
+    pass: ok,
+    detail: out.join(' | '),
+  };
+}
+
+function testTrekCounters(): SelfTestResult {
+  // Aeval ftilt and Trekmore dspecial pressed on the same frame: her swing (frame 10) meets the window.
+  const m = tkRig();
+  placeAt(m.me, 0, m.g, 1, true);
+  placeAt(m.other, 50, m.g, -1, true);
+  step(m.state, directInp('dspecial'), directInp('ftilt'));
+  let counter = false;
+  let repay: Extract<SimEvent, { type: 'hit' }> | null = null;
+  for (let i = 0; i < 120; i++) {
+    step(m.state, NONE, NONE);
+    if (eventOf(m.state, 'counter') !== null) counter = true;
+    const h = hitEvents(m.state);
+    for (let k = 0; k < h.length; k++) if (h[k].attacker === 0 && repay === null) repay = h[k];
+  }
+  const aevFtilt = CHARACTER_DEFS['aeval'].moves.ftilt.hitboxes[0].damage;
+  const want = Math.min(30, Math.max(10, aevFtilt * 1.3)) * TUNING.knockback.damageMul;
+  const meleeOk = counter && m.me.percent === 0 && repay !== null && Math.abs(repay.damage - want) < 1e-9
+    && repay.crit !== true && repay.source === 'dspecial';
+
+  // A tap orb: parry once it is close.
+  const p = tkRig();
+  placeAt(p.me, 0, p.g, 1, true);
+  placeAt(p.other, 130, p.g, -1, true);
+  step(p.state, NONE, directInp('nspecial'));
+  let pressed = false;
+  let pc = false;
+  let burst = false;
+  let orbDead = false;
+  for (let i = 0; i < 80; i++) {
+    const orb = aliveOf(p.state, 'orb');
+    const press = !pressed && orb !== null && orb.x - p.me.x < 45;
+    if (press) pressed = true;
+    step(p.state, press ? directInp('dspecial') : NONE, NONE);
+    if (eventOf(p.state, 'counter') !== null) pc = true;
+    for (let e = 0; e < p.state.events.length; e++) {
+      const ev = p.state.events[e];
+      if (ev.type === 'projectileSpawn' && ev.defId === 'orbBurst') burst = true;
+      if (ev.type === 'projectileDie' && ev.defId === 'orb') orbDead = true;
+    }
+  }
+  const orbOk = pressed && pc && orbDead && !burst && p.me.percent === 0;
+  return {
+    name: 'tkd7. Trekmore dspecial counters a real Aeval ftilt (repaid at 1.3x, no crit) and a tap orb (no burst)',
+    pass: meleeOk && orbOk,
+    detail: `ftilt: counter ${counter}, Trekmore at ${m.me.percent}, repaid ${repay === null ? 'none' : repay.damage} (want ${want}) `
+      + `| orb: pressed ${pressed}, counter ${pc}, orb died ${orbDead}, burst ${burst}, Trekmore at ${p.me.percent}`,
+  };
+}
+
+/** Highest point an up special lifts `charId` from rest in the air, px. */
+function upSpecialRise(charId: string): number {
+  const config = matchConfig(1);
+  config.players[0].charId = charId;
+  const state = createGameState(config);
+  settle(state, 30);
+  const f = simFighters(state)[0];
+  placeAt(f, 0, -200, 1, false);
+  const y0 = f.y;
+  let min = f.y;
+  step(state, inp(Btn.Up | Btn.Special, Btn.Special), NONE);
+  for (let i = 0; i < 200 && f.action === 'attack'; i++) {
+    step(state, NONE, NONE);
+    if (f.y < min) min = f.y;
+  }
+  return y0 - min;
+}
+
+/**
+ * Recovery starts for the ledge check: feet `dx` px out from the right corner and `depth` px
+ * under the platform top, at rest, no jumps left, holding toward the stage: up special at once.
+ */
+const TK_RECOVERY_STARTS: { dx: number; depth: number }[] = [
+  { dx: 20, depth: 60 }, { dx: 40, depth: 100 }, { dx: 60, depth: 120 }, { dx: 80, depth: 130 },
+];
+
+function tkRecovers(stageId: string, charId: string, dx: number, depth: number): boolean {
+  const config = matchConfig(1, stageId);
+  config.players[0].charId = charId;
+  const state = createGameState(config);
+  settle(state, 30);
+  const [f, o] = simFighters(state);
+  const p = STAGE_DEFS[stageId].platforms[0];
+  placeAt(o, p.x + 40, p.y, 1, true);
+  placeAt(f, p.x + p.w + dx, p.y + depth, -1, false);
+  f.jumpsLeft = 0;
+  step(state, inp(Btn.Left | Btn.Up | Btn.Special, Btn.Special), NONE);
+  for (let i = 0; i < 240; i++) {
+    step(state, inp(Btn.Left, 0), NONE);
+    if (f.action === 'ledgeHang' || f.action === 'ledgeGrab' || f.onGround) return true;
+    if (f.action === 'dead') return false;
+  }
+  return false;
+}
+
+function testTrekUpSpecial(): SelfTestResult {
+  const trek = upSpecialRise(TREK);
+  const aeval = upSpecialRise('aeval');
+  const ratio = trek / aeval;
+  const fails: string[] = [];
+  for (let s = 0; s < STAGE_IDS.length; s++) {
+    for (let k = 0; k < TK_RECOVERY_STARTS.length; k++) {
+      const r = TK_RECOVERY_STARTS[k];
+      if (!tkRecovers(STAGE_IDS[s], TREK, r.dx, r.depth)) fails.push(`${STAGE_IDS[s]} ${r.dx},${r.depth}`);
+    }
+  }
+  let deepest = -1;
+  for (let d = 0; d <= 200; d += 5) if (tkRecovers('tidegate', TREK, 60, d)) deepest = d;
+  let aevalDeepest = -1;
+  for (let d = 0; d <= 200; d += 5) if (tkRecovers('tidegate', 'aeval', 60, d)) aevalDeepest = d;
+  return {
+    name: "tkd8. Trekmore up special rises at least 1.0x Aeval's and reaches the ledge from every recovery start on both stages",
+    pass: ratio >= 1.0 && fails.length === 0,
+    detail: `rise ${trek.toFixed(1)} px vs Aeval ${aeval.toFixed(1)} (${ratio.toFixed(3)}x) | failed starts: ${fails.join(', ') || 'none'} `
+      + `| deepest start 60 px out: Trekmore ${deepest}, Aeval ${aevalDeepest}`,
+  };
+}
+
+/** One fixed hit on a still victim of `charId` at centre stage at `percent`: kb and whether it KOs. */
+function tkLaunch(charId: string, percent: number): { kb: number; ko: boolean } {
+  const config = matchConfig(1);
+  config.players[1].charId = charId;
+  const state = createGameState(config);
+  settle(state, 30);
+  const [a, v] = simFighters(state);
+  placeAt(a, -200, 0, 1, true);
+  placeAt(v, 0, 0, -1, true);
+  v.percent = percent;
+  state.events.length = 0;
+  // A fixed heavy hit: 22 damage at 40 degrees, bkb 26, kbg 50.
+  applyHit(state, v, a.slot, 1, 22, 40, 26, 50, 1, 22, v.x, v.y - 20);
+  const first = hitEvents(state);
+  const kb = first.length > 0 ? first[0].kb : NaN;
+  let ko = false;
+  for (let i = 0; i < 240 && !ko; i++) {
+    step(state, NONE, NONE);
+    for (let e = 0; e < state.events.length; e++) {
+      const ev = state.events[e];
+      if (ev.type === 'ko' && ev.slot === v.slot) ko = true;
+    }
+  }
+  return { kb, ko };
+}
+
+function tkKoPercent(charId: string): number {
+  let lo = 0;
+  let hi = 300;
+  if (!tkLaunch(charId, hi).ko) return -1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (tkLaunch(charId, mid).ko) hi = mid;
+    else lo = mid + 1;
+  }
+  return lo;
+}
+
+function testTrekWeight(): SelfTestResult {
+  const kbA = tkLaunch('aeval', 100).kb;
+  const kbT = tkLaunch(TREK, 100).kb;
+  const ratio = kbT / kbA;
+  const koA = tkKoPercent('aeval');
+  const koT = tkKoPercent(TREK);
+  const survives = !tkLaunch(TREK, koA).ko && tkLaunch('aeval', koA).ko;
+  return {
+    name: 'tkd9. weight 110 vs 88: the same hit launches Trekmore about 10 percent less and he survives the percent it KOs Aeval at',
+    pass: ratio >= 0.85 && ratio <= 0.95 && survives && koT > koA,
+    detail: `kb at 100 percent ${kbA.toFixed(1)} vs ${kbT.toFixed(1)} (${ratio.toFixed(3)}x) | KO percent Aeval ${koA}, `
+      + `Trekmore ${koT} | Trekmore at ${koA} survives ${survives}`,
+  };
+}
+
+/**
+ * Scripted play for fighter `me` against `them`: walks toward them, and about every fifth frame
+ * presses Attack, Special, Grab, Jump or Shield with a random direction, holding it 1 to 24
+ * frames so smashes and the sword charge. Driven by an LCG and the positions, so a replay of the
+ * same state and seed gives the same inputs.
+ */
+interface TkBot { lcg: number; button: number; dir: number; left: number; prev: number }
+
+function tkBotInput(bot: TkBot, me: SimFighter, them: SimFighter): InputFrame {
+  const next = (): number => {
+    bot.lcg = (bot.lcg * 1103515245 + 12345) & 0x7fffffff;
+    return bot.lcg >>> 8;
+  };
+  const r = next();
+  const toward = them.x > me.x ? Btn.Right : Btn.Left;
+  const away = toward === Btn.Right ? Btn.Left : Btn.Right;
+  if (bot.left <= 0 && r % 5 === 0) {
+    const buttons = [Btn.Attack, Btn.Special, Btn.Grab, Btn.Jump, Btn.Shield, Btn.Attack, Btn.Special];
+    const dirs = [0, Btn.Up, Btn.Down, toward, away, 0];
+    bot.button = buttons[(r >>> 3) % buttons.length];
+    bot.dir = dirs[(r >>> 7) % dirs.length];
+    bot.left = 1 + ((r >>> 11) % 24);
+  }
+  let held = 0;
+  if (bot.left > 0) {
+    held = bot.button | bot.dir;
+    bot.left--;
+  } else if (Math.abs(them.x - me.x) > 40 && (r & 3) !== 0) {
+    held = toward;
+  }
+  const out = inp(held, held & ~bot.prev);
+  bot.prev = held;
+  return out;
+}
+
+/** A scripted Trekmore vs Aeval match of `frames` frames on `stageId`, recording every input pair. */
+function tkScripted(stageId: string, frames: number, log: InputFrame[][]): GameState {
+  const config = matchConfig(3, stageId);
+  config.players[0].charId = TREK;
+  const state = createGameState(config);
+  const [a, b] = simFighters(state);
+  const botA: TkBot = { lcg: 24681357, button: 0, dir: 0, left: 0, prev: 0 };
+  const botB: TkBot = { lcg: 13579246, button: 0, dir: 0, left: 0, prev: 0 };
+  for (let i = 0; i < frames; i++) {
+    const ia = tkBotInput(botA, a, b);
+    const ib = tkBotInput(botB, b, a);
+    log.push([ia, ib]);
+    step(state, ia, ib);
+  }
+  return state;
+}
+
+function testTrekDeterminism(): SelfTestResult {
+  const parts: string[] = [];
+  let ok = true;
+  for (let s = 0; s < STAGE_IDS.length; s++) {
+    const stageId = STAGE_IDS[s];
+    const log: InputFrame[][] = [];
+    const one = tkScripted(stageId, 1200, []);
+    const two = tkScripted(stageId, 1200, log);
+    one.events.length = 0;
+    two.events.length = 0;
+    const ref = JSON.stringify(one);
+    const same = ref === JSON.stringify(two);
+    // Rollback: snapshot and clone at 600, both replay the recorded inputs to 1200.
+    const half = tkScripted(stageId, 600, []);
+    const snap = newSnapshot();
+    copyStateInto(snap, half);
+    const clone = cloneGameState(half);
+    for (let i = 600; i < 1200; i++) {
+      step(snap, log[i][0], log[i][1]);
+      step(clone, log[i][0], log[i][1]);
+    }
+    snap.events.length = 0;
+    clone.events.length = 0;
+    const rolled = JSON.stringify(snap) === ref && JSON.stringify(clone) === ref;
+    const fs = simFighters(one);
+    const hits = fs[0].stats.totalHits;
+    if (!same || !rolled || hits === 0) ok = false;
+    parts.push(`${stageId}: repeat ${same}, snapshot and clone at 600 ${rolled}, Trekmore landed ${hits} hits, `
+      + `stocks ${fs.map((f) => f.stocks).join('/')}, rng ${one.rng.s}`);
+  }
+  return {
+    name: 'tkd10. a 1200-frame scripted Trekmore vs Aeval match is deterministic and survives a snapshot round trip at 600',
+    pass: ok,
+    detail: parts.join(' | '),
+  };
+}
+
 export function runSimSelfTest(): SelfTestResult[] {
   return [
     testLanding(),
@@ -3186,6 +4881,44 @@ export function runSimSelfTest(): SelfTestResult[] {
     testDrainFloor(),
     testLedgeButtonsOnly(),
     testNeutralFallGrabsLedge(),
+    testMashCapEscapeTiming(),
+    testRespawnPlatformDuration(),
+    testOneCrescentAtATime(),
+    testDiveInvulnerable(),
+    testDiveSpikes(),
+    testDiveBounceRestoresAirDodge(),
+    testDiveShielded(),
+    testDiveLandingLagAndOffstage(),
+    testShieldBreaksProjectiles(),
+    testWhirlpoolLifesteal(),
+    // Trekmore mechanics
+    testEcho(),
+    testEchoCancel(),
+    testAevalNoEchoNoRng(),
+    testCritRate(),
+    testEchoCritRate(),
+    testCounterMelee(),
+    testCounterProjectile(),
+    testCounterVsGrab(),
+    testBranchInvariant(),
+    testAim(),
+    testRecall(),
+    testCrescentLockUnchanged(),
+    testShadowStep(),
+    testFixedScale(),
+    testTrekRollback(),
+    testHitSource(),
+    // Trekmore def
+    testTrekDefShape(),
+    testTrekSweep(),
+    testTrekGrabKitAndUtility(),
+    testTrekJabEcho(),
+    testTrekSwordAndRecall(),
+    testTrekShadowStepThrough(),
+    testTrekCounters(),
+    testTrekUpSpecial(),
+    testTrekWeight(),
+    testTrekDeterminism(),
   ];
 }
 

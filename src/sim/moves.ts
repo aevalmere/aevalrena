@@ -1,7 +1,8 @@
-import { TUNING } from '../core/constants';
+import { ECHO_TAIL, TUNING } from '../core/constants';
 import { Btn } from '../core/types';
-import type { CharacterDef, GameState, MoveDef, MoveId } from '../core/types';
-import { setAction, type SimFighter } from './state';
+import type { AimDir, CharacterDef, GameState, MoveDef, MoveId, ShadowStepDef } from '../core/types';
+import { heldDir, heldDown, heldUp } from './input';
+import { sameTeam, setAction, simFighters, stageOf, type SimFighter } from './state';
 import { spawnProjectile } from './projectiles';
 import { chargeFraction, projectileChargePower, projectileChargeScale } from './hits';
 
@@ -95,7 +96,84 @@ export function startMove(state: GameState, f: SimFighter, def: CharacterDef, id
   f.charge = 0;
   f.chargeMask = chargeMaskFor(f, mv, id);
   f.charging = mv.chargeable === true && chargeHeld(f);
+  const echo = mv.echo;
+  if (echo !== undefined) {
+    // A new echo replaces a running one. It stays where the move started.
+    f.echoMove = id;
+    f.echoAge = -echo.delayFrames;
+    f.echoX = f.x + echo.offsetX * f.facing;
+    f.echoY = f.y;
+    f.echoFacing = f.facing;
+    f.echoHitGroups = 0;
+  }
+  if (mv.shadowStep !== undefined && mv.shadowStep.oncePerAir && !f.onGround) f.airLock |= 1;
+  if (movesAims(mv)) latchAim(f);
   if (!f.charging) applyMoveFrame(state, f, mv, 0);
+}
+
+/** True when the move throws an aimed projectile. */
+function movesAims(mv: MoveDef): boolean {
+  const shots = mv.projectiles;
+  if (shots === undefined) return false;
+  for (let i = 0; i < shots.length; i++) {
+    if (shots[i].aim === true) return true;
+  }
+  return false;
+}
+
+/**
+ * Reads the aim from the held stick (plan B.2 14): up plus a side = 1, up = 2, down plus a side
+ * = 3, down = 4, else 0. A side held behind the fighter turns it first, so it always fires forward.
+ */
+function latchAim(f: SimFighter): void {
+  const dir = heldDir(f);
+  if (dir !== 0 && dir !== f.facing) f.facing = dir > 0 ? 1 : -1;
+  let aim: AimDir = 0;
+  if (heldUp(f)) aim = dir !== 0 ? 1 : 2;
+  else if (heldDown(f)) aim = dir !== 0 ? 3 : 4;
+  f.aimDir = aim;
+}
+
+/**
+ * Jumps the current move to its branch frames (a counter trigger or a recall): the move now ends
+ * at branch.end, its hit groups are fresh, and the branch's first frame is applied at once.
+ */
+export function enterBranch(state: GameState, f: SimFighter, mv: MoveDef): void {
+  const br = mv.branch;
+  if (br === undefined) return;
+  f.onBranch = true;
+  f.charging = false;
+  f.actionFrame = br.start;
+  f.hitGroups = 0;
+  applyMoveFrame(state, f, mv, br.start);
+}
+
+/**
+ * One frame of the shadow echo, run on every frame the owner is not in hitlag. It ends
+ * ECHO_TAIL frames after the last replayed hitbox's last active frame.
+ */
+export function stepEcho(f: SimFighter, def: CharacterDef): void {
+  if (f.echoMove === null) return;
+  const mv = def.moves[f.echoMove];
+  const echo = mv === undefined ? undefined : mv.echo;
+  if (echo === undefined) {
+    f.echoMove = null;
+    return;
+  }
+  f.echoAge++;
+  if (f.echoAge > echoLastEnd(mv) + ECHO_TAIL) f.echoMove = null;
+}
+
+/** Last active frame among the hitboxes an echo replays. */
+export function echoLastEnd(mv: MoveDef): number {
+  const echo = mv.echo;
+  let last = 0;
+  if (echo === undefined) return last;
+  for (let i = 0; i < mv.hitboxes.length; i++) {
+    const hb = mv.hitboxes[i];
+    if (echo.groups.indexOf(hb.group) >= 0 && hb.end > last) last = hb.end;
+  }
+  return last;
 }
 
 export function endMove(f: SimFighter, mv: MoveDef): void {
@@ -112,6 +190,8 @@ export function advanceMove(state: GameState, f: SimFighter, def: CharacterDef):
 
   if (f.charging) {
     f.actionFrame = 0;
+    // The aim follows the stick for the whole charge, so the direction held at release wins.
+    if (movesAims(mv)) latchAim(f);
     const holding = chargeHeld(f);
     if (holding && f.charge < TUNING.input.chargeMax) {
       f.charge++;
@@ -122,10 +202,100 @@ export function advanceMove(state: GameState, f: SimFighter, def: CharacterDef):
     return false;
   }
 
-  if (f.actionFrame >= mv.totalFrames + castDelay(f, mv)) {
+  // On a branch the move ends at branch.end; otherwise the normal path ends first, so frames
+  // that only the branch reaches never run without it.
+  const end = f.onBranch && mv.branch !== undefined ? mv.branch.end : mv.totalFrames + castDelay(f, mv);
+  if (f.actionFrame >= end) {
     endMove(f, mv);
     return true;
   }
+  if (mv.dive !== undefined) stepDive(f, mv.dive);
   applyMoveFrame(state, f, mv, f.actionFrame);
+  if (mv.shadowStep !== undefined) stepShadow(state, f, mv.shadowStep);
   return false;
+}
+
+/**
+ * One frame of a shadow step (plan B.2 18 to 21). From startFrame the fighter moves
+ * distance / travelFrames px a frame along facing, written straight to x so neither friction nor
+ * air drift eats it, with vy held at 0 and gravity skipped. A ground step stops at the platform
+ * edge. On the last travel frame, crossing the nearest living opponent turns the fighter around.
+ */
+function stepShadow(state: GameState, f: SimFighter, st: ShadowStepDef): void {
+  const fr = f.actionFrame;
+  if (fr >= st.invuln[0] && fr <= st.invuln[1] && f.invuln < 2) f.invuln = 2;
+  if (fr < st.startFrame || fr >= st.startFrame + st.travelFrames) return;
+  if (fr === st.startFrame) f.stepStartX = f.x;
+  let nx = f.x + (st.distance / st.travelFrames) * f.facing;
+  if (f.onGround && st.stopAtEdge) {
+    const stage = stageOf(state);
+    for (let i = 0; i < stage.platforms.length; i++) {
+      const p = stage.platforms[i];
+      if (Math.abs(f.y - p.y) > 0.5 || f.x < p.x || f.x > p.x + p.w) continue;
+      if (nx < p.x) nx = p.x;
+      else if (nx > p.x + p.w) nx = p.x + p.w;
+      break;
+    }
+  }
+  f.x = nx;
+  f.vx = 0;
+  if (!f.onGround) {
+    f.vy = 0;
+    f.fastFalling = false;
+    f.skipGravity = true;
+  }
+  if (fr !== st.startFrame + st.travelFrames - 1) return;
+  if (st.turnIfPassed) {
+    const fighters = simFighters(state);
+    let best: SimFighter | null = null;
+    let bestD = Infinity;
+    for (let i = 0; i < fighters.length; i++) {
+      const o = fighters[i];
+      if (o === f || !inPlay(o) || sameTeam(state, f.slot, o.slot)) continue;
+      const d = Math.abs(o.x - f.x);
+      if (d < bestD) {
+        bestD = d;
+        best = o;
+      }
+    }
+    if (best !== null) {
+      const lo = Math.min(f.stepStartX, f.x);
+      const hi = Math.max(f.stepStartX, f.x);
+      if (best.x > lo && best.x < hi) f.facing = f.facing === 1 ? -1 : 1;
+    }
+  }
+  state.events.push({ type: 'teleport', slot: f.slot, fromX: f.stepStartX, fromY: f.y, x: f.x, y: f.y, kind: 'step' });
+}
+
+/** A living fighter in play: stocks left, not dead or respawning. Invulnerable still counts. */
+function inPlay(o: SimFighter): boolean {
+  return o.stocks > 0 && o.action !== 'dead' && o.action !== 'respawn';
+}
+
+/**
+ * True while a dive move is in its dive: past the dive frame, airborne, and nothing hit yet
+ * (a landed hit, body or shield, sets hitGroups). Everything it reads is fighter state the
+ * snapshot already carries, so the dive needs no field of its own.
+ */
+export function isDiving(f: SimFighter, mv: MoveDef): boolean {
+  const dive = mv.dive;
+  return dive !== undefined && f.action === 'attack' && f.actionFrame >= dive.frame
+    && f.hitGroups === 0 && !f.onGround;
+}
+
+/**
+ * One dive frame: the move is pinned on the dive frame (like a held charge is pinned on 0), the
+ * fall speed is set outright with gravity skipped, horizontal speed is zeroed (air acceleration
+ * can add one frame's worth, a small drift) and the fighter is invulnerable. invuln is topped up
+ * to 1, not 2: it covers this frame's hit pass and runs out on the next frame's decrement, so a
+ * dive that lands carries no invulnerability into its landing lag.
+ */
+function stepDive(f: SimFighter, dive: NonNullable<MoveDef['dive']>): void {
+  if (f.actionFrame < dive.frame || f.hitGroups !== 0 || f.onGround) return;
+  f.actionFrame = dive.frame;
+  f.vy = dive.vy;
+  f.vx = 0;
+  f.fastFalling = false;
+  f.skipGravity = true;
+  if (f.invuln < 1) f.invuln = 1;
 }

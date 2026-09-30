@@ -1,0 +1,20 @@
+{
+  "$comment": "Hand overrides for Trekmore's AI profile (docs/cpu-guide/04 sections 4 and 8; heavy playstyle defaults, docs/TREKMORE_PLAN.md F W3b). tags: ftilt and dtilt are his spacing pokes at sword reach (neutral role; the derive gave him only the sword there); dsmash is not an edgeguard tool (the sword and dair are). spacingMul 0.95 holds spacing just inside the ftilt tip. preferredHolds: tap, half and full sword. slots, read by src/ai/characters/trekmore.ts: approachStep (approach with the Shadow Step instead of the run, bonus weight), dthrowEcho (dthrow into the table's echo follow-up, bonus weight), edgeguardSword and edgeguardDair (edgeguard plans on), counterKillAtFloor and counterKillAtCap (percent at which the counter's repaid hit kills a fresh Aeval at the counter floor and cap, balance loop 0 in moves.ts), counterComboBelow (percent under which the counter launch is followable), counterWhiffLoss (damage a whiffed counter concedes, for the break-even).",
+  "tags": {
+    "ftilt": { "add": ["poke"] },
+    "dtilt": { "add": ["poke"] },
+    "dsmash": { "remove": ["gimpTool"] }
+  },
+  "spacingMul": 0.95,
+  "preferredHolds": [0, 30, 60],
+  "slots": {
+    "approachStep": 1,
+    "dthrowEcho": 1,
+    "edgeguardSword": 1,
+    "edgeguardDair": 1,
+    "counterKillAtFloor": 130,
+    "counterKillAtCap": 57,
+    "counterComboBelow": 60,
+    "counterWhiffLoss": 14
+  }
+}

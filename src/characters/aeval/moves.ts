@@ -65,6 +65,15 @@ const UAIR_TOP = -110;
 const DAIR_BOUNCE = { vy: -3.5, actionableIn: 10 };
 
 /**
+ * dair dive: from frame 6 she drops at 7 px/frame (fast fall is 5), invulnerable, until the
+ * spike meets a fighter, a shield or the ground. Off stage it runs to the blast zone. Off a
+ * shield she bounces like a hit but acts 15 frames after the hitlag instead of 10, about 4
+ * frames after the shielder (14 damage is 10 frames of shield stun), so blocking it pays a
+ * little.
+ */
+const DAIR_DIVE = { frame: 6, vy: 7, shieldActionableIn: 15 };
+
+/**
  * A forward reach: circles of radius `r` every `r` px along y from xFrom out to xTo, and one
  * more on xTo itself when the step lands short of it, same window and same group so a target
  * is hit once. Pass xTo = tip - r to make the outer edge of the chain sit on the tip.
@@ -130,12 +139,13 @@ const orbBurst: ProjectileDef = {
  * the only charge scaling of damage, knockback and strength. `scale` (0.6 to 1.5) still sizes
  * the hit circle and sprite on top of the lerped r.
  *
- * Tap: leaves her hands on frame 9 of a 31-frame move. 48 frames at 3.5 px/frame is 168 px
+ * Tap: leaves her hands on frame 3 of a 12-frame move. 48 frames at 3.5 px/frame is 168 px
  * of travel from a spawn 18 px ahead, so it bursts about 186 px out. Damage 4, bkb 14, kbg 30,
  * r 8 times scale 0.6 = 4.8 px: a slow chip that holds space.
  *
- * Full charge: chargeCastFrames 12 adds 12 frames to both, so it fires on frame 21 of a
- * 43-frame move. 34 frames at 9.5 px/frame is 323 px of travel, a bullet that bursts about
+ * Full charge: chargeCastFrames 12 adds 12 frames to both, so it fires on frame 15 of a
+ * 24-frame move, after a 60-frame hold (TUNING.input.chargeMax): the hold is longer than the
+ * whole charged cast. 34 frames at 9.5 px/frame is 323 px of travel, a bullet that bursts about
  * 341 px out. Damage 16, bkb 40, kbg 36 (full-charge KO about 108 percent on Tidegate
  * calibrate), r 12 times scale 1.5 = 18 px.
  *
@@ -150,7 +160,7 @@ const orbBurst: ProjectileDef = {
  */
 const waterOrb: ProjectileDef = {
   id: 'orb',
-  spawnFrame: 9,
+  spawnFrame: 3,
   x: 18, y: -20,
   vx: 3.5, vy: 0,
   gravity: 0,
@@ -191,6 +201,9 @@ const jabDrop: ProjectileDef = {
  * and dies about 82 px behind it. 146 frames at 3.2 px/frame is 467 px of travel,
  * 4/3 of the old 82 at 4.25 (348 px). sspecial no longer moves her (the old +2 vx on frame 8 is
  * gone), so these distances are from where she stands.
+ *
+ * One at a time (onePerOwner): sspecial cannot start while her crescent is out; the press is
+ * dropped and she stays actionable. A shield breaks it like any projectile.
  */
 const tidalCrescent: ProjectileDef = {
   id: 'crescent',
@@ -200,23 +213,30 @@ const tidalCrescent: ProjectileDef = {
   gravity: 0,
   lifetime: 146,
   r: 13,
-  damage: 9, angle: SAKURAI, bkb: 24, kbg: 44,
+  // kbg 40 (was 44): a shorter tumble for the victim.
+  damage: 9, angle: SAKURAI, bkb: 24, kbg: 40,
   // 2/5 of a full-charge orb (10): it breaks a tap orb (2), loses to one charged past c 0.25.
   strength: 4,
   destroyOnHit: false,
+  onePerOwner: true,
   sprite: 'crescent',
   animFps: 10,
   returnFrame: 57,
 };
 
-/** Whirlpool: four pulling hits in 8-frame windows, then a launching fifth. */
+/**
+ * Whirlpool: four pulling hits in 8-frame windows, then a launching fifth. Every hit that lands
+ * on a body heals Aeval half the damage it dealt (healFraction 0.5, the orb drain's rule): 5 of
+ * the 10 a full trap deals.
+ */
+const WHIRLPOOL_HEAL = 0.5;
 const whirlpoolHits: HitboxDef[] = [
   box(1, 10, 17, 4, -20, 18, 2, 90, 6, 10, 1),
   box(2, 18, 25, 4, -20, 18, 2, 90, 6, 10, 2),
   box(3, 26, 33, 4, -20, 18, 2, 90, 6, 10, 3),
   box(4, 34, 41, 4, -20, 18, 2, 90, 6, 10, 4),
   box(5, 42, 46, 4, -20, 20, 2, 60, 68, 153, 5),
-];
+].map((hb) => ({ ...hb, healFraction: WHIRLPOOL_HEAL }));
 
 const moves: Record<MoveId, MoveDef> = {
   // Ground normals. Jab is fast and safe, tilts commit a little more.
@@ -296,28 +316,34 @@ const moves: Record<MoveId, MoveDef> = {
       box(2, 7, 10, -29, -20, 12, 12.5, SAKURAI, 21, 56, 1),
     ],
   },
-  // uair: the slowest aerial, active 10-14 (was 8-12), 33 frames, landing lag 12. Damage 8
-  // (was 9) and the javelin tops out at y -110 (was -114).
+  // uair: the slowest aerial, active 14-18 (was 10-14), 37 frames (was 33), landing lag 12.
+  // Damage 8 and the javelin tops out at y -110.
   uair: {
-    id: 'uair', totalFrames: 33, landingLag: 12, airOnly: true,
-    hitboxes: [box(1, 10, 14, 2, -44, 12, 8, 85, 26, 79, 1), ...javelinColumnTo(2, 10, 14, 10, UAIR_TOP, 8, 85, 26, 79, 1)],
+    id: 'uair', totalFrames: 37, landingLag: 12, airOnly: true,
+    hitboxes: [box(1, 14, 18, 2, -44, 12, 8, 85, 26, 79, 1), ...javelinColumnTo(2, 14, 18, 10, UAIR_TOP, 8, 85, 26, 79, 1)],
   },
-  // dair: a spike that hops her up on hit (bounceOnHit) and reaches a ledge hanger.
+  // dair: a dive smash. 6 frames of startup, then an invulnerable straight drop (DAIR_DIVE)
+  // pinned on frame 6 with the spike out under her feet until it meets a fighter, a shield or
+  // the ground. On a fighter: 14 damage at 275 (down, a touch forward), bkb 50 kbg 80, and she
+  // hops up (bounceOnHit, air dodge back). On the ground with no hit: 20 frames of landing lag,
+  // not invulnerable. Reaches a ledge hanger.
   dair: {
-    id: 'dair', totalFrames: 36, landingLag: 16, airOnly: true, hitsLedge: true, bounceOnHit: DAIR_BOUNCE,
-    hitboxes: [box(1, 12, 16, 4, -2, 12, 12, 270, 30, 85, 1)],
+    id: 'dair', totalFrames: 30, landingLag: 20, airOnly: true, hitsLedge: true,
+    bounceOnHit: DAIR_BOUNCE, dive: DAIR_DIVE,
+    hitboxes: [box(1, 6, 6, 4, -2, 12, 14, 275, 50, 80, 1)],
   },
 
   // Specials. Two projectiles, a rising recovery, a multi-hit trap.
-  // Hold special to swell the orb before the throw. 31 frames with no iasa on a tap;
-  // a full charge adds 12 (chargeCastFrames) to both the throw and the move, 43 in all.
+  // Hold special to swell the orb before the throw. 12 frames with no iasa on a tap, the orb out
+  // on frame 3; a full charge adds 12 (chargeCastFrames) to both the throw and the move, 24 in all.
   nspecial: {
-    id: 'nspecial', totalFrames: 31, chargeable: true, chargeButton: 'special', chargeCastFrames: 12,
+    id: 'nspecial', totalFrames: 12, chargeable: true, chargeButton: 'special', chargeCastFrames: 12,
     hitboxes: [],
     projectiles: [waterOrb, orbBurst],
   },
+  // 30 frames (was 42): the crescent still leaves on frame 10, she is free 12 frames sooner.
   sspecial: {
-    id: 'sspecial', totalFrames: 42,
+    id: 'sspecial', totalFrames: 30,
     hitboxes: [],
     // Not a movement move: she throws from where she stands.
     projectiles: [tidalCrescent],

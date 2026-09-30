@@ -2,13 +2,14 @@ import {
   AIR_DODGE, ROLL, SHIELD_BREAK_STUN, SHIELD_DECAY, SHIELD_MAX, SHORTCUT_REPLACE_FRAMES, SPOT_DODGE,
 } from '../core/constants';
 import { Btn, DIRECT_MOVES } from '../core/types';
-import type { CharacterDef, CommandAction, Facing, GameState, MoveId } from '../core/types';
+import type { CharacterDef, CommandAction, Facing, GameState, MoveId, ProjectileState } from '../core/types';
 import {
   C_STICK, clearBuffer, commandOf, heldDir, heldDown, heldShield, heldUp, heldWalk, peekBufferedDirect,
   takeBuffered, takeBufferedDirect, TECH_BUTTONS, TECH_CODE, wantsSmash, wantsVerticalSmash,
 } from './input';
 import { enterAction, setAction, stageOf, type SimFighter } from './state';
-import { advanceMove, moveOf, startMove } from './moves';
+import { advanceMove, enterBranch, moveOf, startMove, stepEcho } from './moves';
+import { killProjectile, PROJECTILE_DEFS } from './projectiles';
 import { isLedgeAction, stepLedge } from './ledge';
 import { stepRespawn } from './match';
 import { isGrabAction, startGrab, stepGrabAction } from './grab';
@@ -152,15 +153,108 @@ function airAttack(f: SimFighter): MoveId {
   return dir === f.facing ? 'fair' : 'bair';
 }
 
-function specialAttack(f: SimFighter): MoveId {
+/** The special the held direction picks, without turning the fighter. */
+function specialFor(f: SimFighter): MoveId {
   if (heldUp(f)) return 'uspecial';
   if (heldDown(f)) return 'dspecial';
-  const dir = heldDir(f);
-  if (dir !== 0) {
-    face(f, dir);
-    return 'sspecial';
+  return heldDir(f) !== 0 ? 'sspecial' : 'nspecial';
+}
+
+function specialAttack(f: SimFighter): MoveId {
+  const id = specialFor(f);
+  if (id === 'sspecial') face(f, heldDir(f));
+  return id;
+}
+
+/**
+ * True when `id` spawns a onePerOwner projectile (the crescent) and one of that def owned by
+ * this fighter is still alive, or is a oncePerAir shadow step already spent this airborne period.
+ * Such a move cannot start: the input is dropped, nothing turns the fighter, and it stays
+ * actionable. A locked move with `recall` still teleports through tryRecall.
+ */
+export function moveLocked(state: GameState, f: SimFighter, def: CharacterDef, id: MoveId): boolean {
+  const mv = def.moves[id];
+  // One air shadow step per airborne period: a second one is dropped the same way.
+  const step = mv.shadowStep;
+  if (step !== undefined && step.oncePerAir && !f.onGround && (f.airLock & 1) !== 0) return true;
+  const shots = mv.projectiles;
+  if (shots === undefined) return false;
+  for (let i = 0; i < shots.length; i++) {
+    if (shots[i].onePerOwner !== true) continue;
+    for (let k = 0; k < state.projectiles.length; k++) {
+      const p = state.projectiles[k];
+      if (p.alive && p.owner === f.slot && p.defId === shots[i].id) return true;
+    }
   }
-  return 'nspecial';
+  return false;
+}
+
+/** Distance the recall keeps the feet inside the blast zone. */
+const RECALL_BLAST_MARGIN = 40;
+
+/**
+ * Recall (plan B.2 16 to 17): a special press whose move is locked by its own live projectile
+ * teleports the fighter to that projectile instead, when the move has `recall`. The feet land
+ * footOffsetY below the shot (kept 40 px inside the blast zone, snapped onto a solid platform the
+ * point falls inside), speed is zeroed, the shot dies with no burst, and the move starts on its
+ * branch (the reappear lag) with invulnFrames of invulnerability. One air recall per airborne
+ * period when oncePerAir. Returns true when it teleported.
+ */
+export function tryRecall(state: GameState, f: SimFighter, def: CharacterDef, id: MoveId): boolean {
+  const mv = def.moves[id];
+  const rc = mv.recall;
+  if (rc === undefined || mv.branch === undefined) return false;
+  if (rc.oncePerAir && !f.onGround && (f.airLock & 2) !== 0) return false;
+  let shot: ProjectileState | null = null;
+  for (let k = 0; k < state.projectiles.length; k++) {
+    const p = state.projectiles[k];
+    if (p.alive && p.owner === f.slot && p.defId === rc.projectileId) {
+      shot = p;
+      break;
+    }
+  }
+  if (shot === null) return false;
+  const pdef = PROJECTILE_DEFS[shot.defId];
+  if (pdef === undefined) return false;
+
+  const stage = stageOf(state);
+  const b = stage.blast;
+  const fromX = f.x;
+  const fromY = f.y;
+  let x = shot.x;
+  let y = shot.y + rc.footOffsetY;
+  x = Math.min(b.x + b.w - RECALL_BLAST_MARGIN, Math.max(b.x + RECALL_BLAST_MARGIN, x));
+  y = Math.min(b.y + b.h - RECALL_BLAST_MARGIN, Math.max(b.y + RECALL_BLAST_MARGIN, y));
+  let grounded = false;
+  for (let i = 0; i < stage.platforms.length; i++) {
+    const p = stage.platforms[i];
+    if (!p.solid) continue;
+    if (x < p.x || x > p.x + p.w || y < p.y || y > p.y + p.h) continue;
+    y = p.y;
+    grounded = true;
+    break;
+  }
+  killProjectile(state, shot, pdef, false);
+  state.events.push({ type: 'teleport', slot: f.slot, fromX, fromY, x, y, kind: 'recall' });
+
+  f.x = x;
+  f.y = y;
+  f.prevY = y;
+  f.vx = 0;
+  f.vy = 0;
+  f.onGround = grounded;
+  f.fastFalling = false;
+  f.ledge = -1;
+  setAction(f, 'attack');
+  f.moveId = id;
+  f.hitGroups = 0;
+  f.charge = 0;
+  f.chargeMask = 0;
+  f.charging = false;
+  enterBranch(state, f, mv);
+  if (f.invuln < rc.invulnFrames) f.invuln = rc.invulnFrames;
+  if (!grounded) f.airLock |= 2;
+  return true;
 }
 
 /**
@@ -284,8 +378,13 @@ function tryBufferedAction(state: GameState, f: SimFighter, def: CharacterDef): 
   }
   const code = takeBufferedDirect(f);
   if (code > 0 && code <= DIRECT_MOVES.length) {
-    startMove(state, f, def, directMove(f, DIRECT_MOVES[code - 1]));
-    return true;
+    // directMove only remaps normals, so a special's own id is the one that would start. A
+    // locked one is dropped and the rest of the buffer still runs.
+    if (!moveLocked(state, f, def, DIRECT_MOVES[code - 1])) {
+      startMove(state, f, def, directMove(f, DIRECT_MOVES[code - 1]));
+      return true;
+    }
+    if (tryRecall(state, f, def, DIRECT_MOVES[code - 1])) return true;
   }
   // A command that does nothing here is gone from the buffer and the buttons still run.
   const cmd = commandOf(code);
@@ -308,6 +407,7 @@ function tryBufferedAction(state: GameState, f: SimFighter, def: CharacterDef): 
   if (takeBuffered(f, Btn.Special)) {
     // A full meter under the rule spends the press on the Final Smash, on the ground or in the air.
     if (canFinalSmash(state, f, def)) startFinalSmash(state, f, def);
+    else if (moveLocked(state, f, def, specialFor(f))) return tryRecall(state, f, def, specialFor(f));
     else startMove(state, f, def, specialAttack(f));
     return true;
   }
@@ -601,6 +701,10 @@ function locomotion(state: GameState, f: SimFighter, def: CharacterDef): void {
 
 /** Step 4a of the frame: one state machine transition for one fighter. */
 export function stepAction(state: GameState, f: SimFighter, def: CharacterDef): void {
+  // The shadow echo ages on every frame its owner is not in hitlag (this runs only then).
+  stepEcho(f, def);
+  // Standing, hanging on a ledge or respawning gives the air shadow step and air recall back.
+  if (f.onGround || isLedgeAction(f.action) || f.action === 'respawn') f.airLock = 0;
   if (isGrabAction(f.action)) {
     stepGrabAction(state, f, def);
     return;
@@ -679,8 +783,11 @@ export function stepAction(state: GameState, f: SimFighter, def: CharacterDef): 
         const code = peekBufferedDirect(f);
         if (code > 0 && code <= DIRECT_MOVES.length) {
           takeBufferedDirect(f);
-          startMove(state, f, def, directMove(f, DIRECT_MOVES[code - 1]));
-          return;
+          // A locked shortcut (a second crescent) is dropped and the button's move runs on.
+          if (!moveLocked(state, f, def, DIRECT_MOVES[code - 1])) {
+            startMove(state, f, def, directMove(f, DIRECT_MOVES[code - 1]));
+            return;
+          }
         }
       }
       if (!advanceMove(state, f, def)) {

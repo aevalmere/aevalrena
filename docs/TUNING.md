@@ -108,15 +108,23 @@ dsmash       40     0     134         92       91.1
 nair         26     0    none          -       69.2
 fair         40     0     135          -       88.3
 bair          0     0     124          -       99.1
-uair          0    44     202          -      103.8
-dair         26     0    none          -      144.6
+uair          0     0     220          -      103.8
+dair         26     0    none          -      173.1
 nspecial     40     0    none        108       33.3
-sspecial     40     0     197          -       71.2
+sspecial     40     0     220          -       66.9
 uspecial     26     0     127          -      156.6
 dspecial     26     0     194          -      145.7
 ledgeatk     40     0     214          -       66.3
 getupatk     40     0     213          -       67.8
 ```
+
+Rerun on 2026-09-30 after the second Aeval move pass (see BALANCE_GUIDE.md). What moved: uair 202
+to 220 (the 4 extra startup frames change where the harness finds a hit: it now connects from lift 0
+rather than 44, same knockback), dair kb at 100 144.6 to 173.1 (14 damage, bkb 50; still none
+because a spike on a grounded victim never leaves the stage), sspecial 197 to 220 and kb at 100
+71.2 to 66.9 (kbg 44 to 40). nspecial and dspecial are unchanged: the orb's timing moved but not its
+knockback, and the whirlpool heal does not touch the victim. Every other row is identical to the
+2026-09-29 run.
 
 Rerun on 2026-09-29 after the Aeval move pass (see BALANCE_GUIDE.md). The same harness at the
 commit before that pass already read differently from the targets below for moves the pass did not
@@ -167,5 +175,14 @@ TUNING defaults.
   [5,5,7,16] put the javelin crop (uptilt_spike_2) on the first active frame (10, 16, 10); nair
   [3,6,6,6,9] starts the swing on frame 3; nspecial [5,4,4,9,9] shows the push on frame 9.
 - dair bounce: `bounceOnHit` on the move def (vy -3.5, actionableIn 10).
+- 2026-09-30 holds: uair [7,7,7,16] (javelin on frame 14), nspecial [2,1,3,3,3] (push on frame 3),
+  sspecial [5,5,4,6,4,6] (30 frames, throw pose on frame 10 as before), dair [3,3,3,3,8,10] (strike
+  pose special_dair_2 on frame 6, where the dive pins the move; the bounce cut lands on frame 20,
+  special_dair_5).
+- dair dive: `dive` on the move def (frame 6, vy 7, shieldActionableIn 15); landing lag is the
+  move's `landingLag` (20).
+- Whirlpool lifesteal: `healFraction` on each dspecial hitbox (0.5).
+- One crescent at a time: `onePerOwner` on the crescent projectile def.
+- Projectiles break on shields: a rule in `resolveHits` (`src/sim/hits.ts`), no knob.
 - Orb drain: `healFraction` on the orb projectile def (0.35).
 - Ledge hang hurtbox: `LEDGE_HANG_HURT_TOP` in `src/sim/state.ts` (2 px under the platform top).

@@ -109,6 +109,15 @@ export interface HitboxDef {
   shieldDamage?: number;  // default = damage
   low?: boolean;          // counts as a low hit, so rolls do not dodge it
   grab?: GrabSpec;        // catches the victim instead of hitting
+  /**
+   * Lifesteal: on a hit that lands on a fighter (not a shield), the attacker's percent drops by
+   * this fraction of the damage dealt, floored at 0, the same rule as ProjectileDef.healFraction.
+   */
+  healFraction?: number;
+  /** Damage is the fighter's stored counterDamage instead of `damage` (counter branch hitboxes). */
+  fromCounter?: boolean;
+  /** Never crits. Counter hitboxes set it; throws and projectiles never crit anyway. */
+  noCrit?: boolean;
 }
 
 /**
@@ -164,6 +173,73 @@ export interface ProjectileDef {
    * fraction of the damage dealt, floored at 0. Omitted means no heal.
    */
   healFraction?: number;
+  /**
+   * One at a time: the move that spawns this projectile cannot start while a projectile of this
+   * def owned by the same fighter is alive. The input that would have started it is dropped and
+   * the fighter stays actionable.
+   */
+  onePerOwner?: boolean;
+  /**
+   * Aimed: the spawn velocity is the (charged) vx speed rotated by AIM_ANGLES[aimDir], where
+   * aimDir is latched from the held stick on the release frame. vy is ignored.
+   */
+  aim?: boolean;
+  /** Ignore the charge scale curve for the hit circle and sprite: every instance has scale 1. */
+  fixedScale?: boolean;
+}
+
+/** Shadow echo: a translucent copy replays chosen hitbox groups of this move later. */
+export interface EchoDef {
+  delayFrames: number;       // echo move frame 0 = owner move frame delayFrames
+  damageScale: number;       // damage and shield damage multiplier, about 0.5
+  offsetX: number;           // fighter-local x offset of the echo, facing right (negative = behind)
+  groups: number[];          // hitbox groups replayed; others are not
+}
+
+/** Counter: a hit inside the window is absorbed and the move jumps to its branch. */
+export interface CounterDef {
+  windowStart: number; windowEnd: number;   // move frames, inclusive
+  scale: number;             // counter damage = clamp(absorbed * scale, minDamage, maxDamage)
+  minDamage: number; maxDamage: number;
+  attackerFreeze: number;    // hitlag frames the countered attacker is frozen for
+}
+
+/** Frames reached only by a branch (counter trigger or recall teleport). */
+export interface BranchDef { start: number; end: number }   // move ends when actionFrame >= end
+
+/** Recall: pressing the special again while the owner's projectile lives teleports to it. */
+export interface RecallDef {
+  projectileId: string;      // the def whose live instance is the target
+  footOffsetY: number;       // feet land this far below the projectile centre (px, positive = down)
+  invulnFrames: number;      // from the teleport frame
+  oncePerAir: boolean;       // one recall per airborne period
+}
+
+/** Shadow step: vanish, travel, reappear. */
+export interface ShadowStepDef {
+  startFrame: number; travelFrames: number; distance: number;   // px along facing
+  invuln: [number, number];  // move frames
+  turnIfPassed: boolean;     // reappearing past the nearest opponent turns the fighter around
+  stopAtEdge: boolean;       // ground use stops at the platform edge
+  oncePerAir: boolean;       // one air use per airborne period
+}
+
+/** Aimed projectile: direction read at release from the held stick. */
+export type AimDir = 0 | 1 | 2 | 3 | 4;   // forward, up-forward, up, down-forward, down
+export const AIM_ANGLES: readonly number[] = [0, 45, 90, -45, -90];
+
+/**
+ * A dive (the dair smash). From move frame `frame` the attacker is pinned on that frame, falls
+ * straight down at `vy` px/frame (gravity skipped, horizontal speed zeroed every frame so only
+ * one frame of air acceleration drifts it) and is invulnerable, until a hitbox of the move lands
+ * (hitGroups non-zero) or the attacker touches the ground (the move's landingLag applies, with no
+ * invulnerability). A landed hit ends the dive through bounceOnHit; a shielded one bounces the
+ * same way but actionable `shieldActionableIn` frames after the hitlag instead.
+ */
+export interface DiveDef {
+  frame: number;
+  vy: number;
+  shieldActionableIn: number;
 }
 
 export interface MoveDef {
@@ -198,6 +274,18 @@ export interface MoveDef {
    * comes back (the double jump does not) and the move ends `actionableIn` frames later.
    */
   bounceOnHit?: { vy: number; actionableIn: number };
+  /** Dive: see DiveDef. Needs a hitbox active on `dive.frame` and a bounceOnHit. */
+  dive?: DiveDef;
+  /** Shadow echo of this move (see EchoDef). */
+  echo?: EchoDef;
+  /** Counter window (see CounterDef). Needs a `branch`. */
+  counter?: CounterDef;
+  /** Frames only a branch reaches; `start >= totalFrames + (chargeCastFrames ?? 0)`. */
+  branch?: BranchDef;
+  /** Second press teleports to the live projectile (see RecallDef). Needs a `branch`. */
+  recall?: RecallDef;
+  /** Shadow step travel (see ShadowStepDef). */
+  shadowStep?: ShadowStepDef;
 }
 
 export type ThrowId = 'fthrow' | 'bthrow' | 'uthrow' | 'dthrow';
@@ -247,6 +335,8 @@ export interface CharacterDef {
   grabKit?: GrabKit;
   /** Final Smash data. Undefined = no Final Smash: Special stays a special, the meter still fills. */
   finalSmash?: FinalSmashDef;
+  /** Critical hits: melee only, rolled on landed body hits; echo hits roll at chance / 2. */
+  crit?: { chance: number; scale: number };
 }
 
 /**
@@ -395,6 +485,16 @@ export interface FighterState {
   stats: FighterStats;
   /** Colour variant 0..3 (blue, purple, white, pink). Cosmetic: only the renderer reads it. */
   variant: number;
+  /** Move being echoed, null when no echo. The sim always writes it; optional for hand-built states. */
+  echoMove?: MoveId | null;
+  /** Echo move frame; negative while waiting out delayFrames. */
+  echoAge?: number;
+  /** Echo position and facing, latched at owner move frame 0. */
+  echoX?: number; echoY?: number; echoFacing?: Facing;
+  /** The current move is running its branch frames. */
+  onBranch?: boolean;
+  /** Latched aim of the current aimed move. */
+  aimDir?: AimDir;
 }
 
 /**
@@ -455,7 +555,12 @@ export interface ProjectileState {
 }
 
 export type SimEvent =
-  | { type: 'hit'; x: number; y: number; attacker: number; victim: number; damage: number; kb: number; angle: number }
+  | {
+    type: 'hit'; x: number; y: number; attacker: number; victim: number; damage: number; kb: number; angle: number;
+    crit?: boolean; echo?: boolean;
+    /** Move id, 'echo:<move id>', projectile def id, or throw id (balance metrics). */
+    source?: string;
+  }
   | { type: 'shieldHit'; x: number; y: number; victim: number }
   | { type: 'ko'; x: number; y: number; slot: number; side: 'left' | 'right' | 'top' | 'bottom' }
   | { type: 'land'; x: number; y: number; slot: number; hard: boolean }
@@ -477,7 +582,9 @@ export type SimEvent =
    * phases[] name as it begins, then 'launch'.
    */
   | { type: 'finalSmash'; x: number; y: number; attacker: number; victim: number; phase: string }
-  | { type: 'matchEnd'; winner: number };
+  | { type: 'matchEnd'; winner: number }
+  | { type: 'teleport'; slot: number; fromX: number; fromY: number; x: number; y: number; kind: 'step' | 'recall' }
+  | { type: 'counter'; x: number; y: number; slot: number; attacker: number };
 
 export interface MatchConfig {
   stageId: string;

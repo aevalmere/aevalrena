@@ -1,0 +1,4 @@
+{
+  "$comment": "Hand overrides for Aeval's AI profile (docs/cpu-guide/04 sections 4 and 8). Hand values win over derived ones; a number more than 10% away from the derived value is reported. Tags and numbers are keyed by move id; see src/ai/charprofile/overrides.ts.",
+  "preferredHolds": [0, 15, 30, 45, 60]
+}

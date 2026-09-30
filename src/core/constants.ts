@@ -40,6 +40,8 @@ export const FS_METER = { max: 300, perDamageDealt: 1.0, perDamageTaken: 0.6 }; 
 export const LEDGE_HANG_INVULN = 40;
 export const LEDGE_MAX_REGRABS = 3;
 export const RESPAWN_INVULN = 120;
-export const RESPAWN_PLATFORM_FRAMES = 180;
+export const RESPAWN_PLATFORM_FRAMES = 100;
 export const SAKURAI_WEAK_ANGLE = 0;
 export const SAKURAI_STRONG_ANGLE = 40;
+/** Frames a shadow echo lingers (and the renderer fades it) after its last replayed hitbox ends. */
+export const ECHO_TAIL = 8;

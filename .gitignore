@@ -6,3 +6,5 @@ dist
 art/aeval/frames/**/*.json
 art/aeval/fx/**/*.json
 art/aeval/sheets/.tmp/
+art/trekmore/qa/*.png
+*.cpuprofile

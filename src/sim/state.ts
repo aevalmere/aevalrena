@@ -1,7 +1,7 @@
 import { SHIELD_MAX } from '../core/constants';
 import { createRng } from '../core/rng';
 import type {
-  ActionId, CharacterDef, FighterState, FighterStats, GameState, MatchConfig, ProjectileState, Rect, StageDef, ThrowDef, ThrowId,
+  ActionId, AimDir, CharacterDef, Facing, MoveId, FighterState, FighterStats, GameState, MatchConfig, ProjectileState, Rect, StageDef, ThrowDef, ThrowId,
 } from '../core/types';
 import { CHARACTER_DEFS } from '../characters/registry';
 import { STAGE_DEFS } from '../stages/registry';
@@ -50,6 +50,18 @@ export interface SimFighter extends FighterState {
   comboCount: number;      // hits in that chain so far
   statX: number;           // x at the last stats tick, for distanceRun
   moveCounted: boolean;    // the current attack's start is already in stats.mostUsedMove
+  // Trekmore mechanics (plan B.1). Required here, optional on FighterState.
+  echoMove: MoveId | null; // move being echoed, null when no echo
+  echoAge: number;         // echo move frame; negative while waiting out delayFrames
+  echoX: number;           // echo feet position and facing, latched at owner move frame 0
+  echoY: number;
+  echoFacing: Facing;
+  onBranch: boolean;       // the current move is running its branch frames
+  aimDir: AimDir;          // latched aim of the current aimed move
+  echoHitGroups: number;   // groups the echo already landed
+  counterDamage: number;   // absorbed damage stored at the counter trigger
+  airLock: number;         // bit 1 = air shadow step used, bit 2 = air recall used
+  stepStartX: number;      // x where the current shadow step's travel began
 }
 
 /** Frames after a hit in which the hitter still gets the KO credit. */
@@ -143,6 +155,12 @@ export function setAction(f: SimFighter, action: ActionId): void {
   f.action = action;
   f.actionFrame = 0;
   f.airJumped = false;
+  f.onBranch = false;
+  // Hitting the owner (or taking it out of play) kills its shadow echo.
+  if (action === 'hitstun' || action === 'tumble' || action === 'grabbed' || action === 'shieldBreak'
+    || action === 'dead' || action === 'respawn' || action === 'finalSmashVictim') {
+    f.echoMove = null;
+  }
   if (action !== 'attack') {
     f.moveId = null;
     f.charge = 0;
@@ -256,6 +274,17 @@ function makeFighter(
     statX: x,
     moveCounted: true,
     variant: 0,
+    echoMove: null,
+    echoAge: 0,
+    echoX: 0,
+    echoY: 0,
+    echoFacing: 1,
+    onBranch: false,
+    aimDir: 0,
+    echoHitGroups: 0,
+    counterDamage: 0,
+    airLock: 0,
+    stepStartX: 0,
   };
 }
 
@@ -360,6 +389,17 @@ function cloneFighter(src: SimFighter): SimFighter {
     statX: src.statX,
     moveCounted: src.moveCounted,
     variant: src.variant,
+    echoMove: src.echoMove,
+    echoAge: src.echoAge,
+    echoX: src.echoX,
+    echoY: src.echoY,
+    echoFacing: src.echoFacing,
+    onBranch: src.onBranch,
+    aimDir: src.aimDir,
+    echoHitGroups: src.echoHitGroups,
+    counterDamage: src.counterDamage,
+    airLock: src.airLock,
+    stepStartX: src.stepStartX,
   };
 }
 

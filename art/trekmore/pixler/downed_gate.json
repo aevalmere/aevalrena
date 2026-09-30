@@ -1,0 +1,17 @@
+{
+ "glowHueMedian": 270.0,
+ "glowPx": 51,
+ "glowHueInBand10": true,
+ "bodyHueMedian": 236.3636474609375,
+ "bodyHueInClothBand10": false,
+ "inkOutlineFrac": 0.492,
+ "inkOutlinePass": false,
+ "partialAlphaRaw": 0.0,
+ "partialAlphaCrop": 0.411,
+ "crispPass": true,
+ "heightPx": 22,
+ "targetH": 22,
+ "heightPass": true,
+ "helmetCapeReadable": true,
+ "pass": false
+}

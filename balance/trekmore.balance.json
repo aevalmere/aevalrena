@@ -1,0 +1,1833 @@
+{
+  "schemaVersion": 1,
+  "characterId": "trekmore",
+  "name": "Trekmore",
+  "archetype": "heavy_shadow_bruiser",
+  "design_goal": "A slow heavy knight whose shadow repeats his basic attacks. Wins with single big hits, crits and reads (counter, step through), pays with speed and frame advantage.",
+  "base_stats": {
+    "weight": 110,
+    "walkSpeed": 1.3,
+    "runSpeed": 2.5,
+    "dashSpeed": 2.8,
+    "dashFrames": 14,
+    "groundAccel": 0.34,
+    "groundFriction": 0.24,
+    "airSpeed": 1.7,
+    "airAcceleration": 0.11,
+    "airFriction": 0.035,
+    "gravity": 0.17,
+    "maxFall": 3.7,
+    "fastFall": 5.75,
+    "jumpVelocity": 5.2,
+    "shortHopVelocity": 3.3,
+    "doubleJumpVelocity": 4.8,
+    "jumps": 2,
+    "jumpSquat": 4,
+    "hurtbox": {
+      "w": 32,
+      "h": 46
+    },
+    "crouchHurtbox": {
+      "w": 32,
+      "h": 30
+    },
+    "ledgeGrabBox": {
+      "w": 22,
+      "h": 26,
+      "yOff": -35
+    }
+  },
+  "crit": {
+    "chance": 0.12,
+    "scale": 1.3,
+    "rule": "melee body hits only; echo hits at half chance; throws, pummels, projectiles and counter hitboxes never crit. Crit scales damage and knockback."
+  },
+  "balance_targets": {
+    "fresh_target_full_charge_fsmash_center_stage_ko_percent": 72,
+    "aeval_full_charge_fsmash_on_trekmore_ko_percent": 104,
+    "uspecial_rise_vs_aeval": 1.1,
+    "identity": "heavy, slow, one hit can take a stock; a shadow that repeats his normals; a counter and two teleports",
+    "budget": {
+      "speed": 0.8,
+      "weight": 1.2,
+      "range": 1.05,
+      "frameAdvantage": 0.8,
+      "killPower": 1.2,
+      "comboPower": 1.1,
+      "recovery": 1,
+      "disadvantageEscape": 0.95
+    },
+    "counterplay": [
+      "bait the counter and grab it",
+      "punish the 28-frame counter whiff",
+      "shield the sword and punish the recall landing",
+      "stay out of echo range after a jab or nair"
+    ],
+    "red_flags": [
+      "counter kills at low percent",
+      "jab or nair echo loops",
+      "recall plus uspecial making him unedgeguardable",
+      "crit deciding games"
+    ]
+  },
+  "moves": {
+    "jab": {
+      "role": "close check with a shadow follow-up",
+      "animation": "jab",
+      "total": 26,
+      "startup": 7,
+      "iasa": 22,
+      "hitboxes": [
+        {
+          "id": 1,
+          "active": [
+            7,
+            9
+          ],
+          "x": 16,
+          "y": -24,
+          "r": 10,
+          "damage": 4.5,
+          "angle": 361,
+          "bkb": 24,
+          "kbg": 42,
+          "group": 1
+        },
+        {
+          "id": 2,
+          "active": [
+            7,
+            9
+          ],
+          "x": 26,
+          "y": -24,
+          "r": 10,
+          "damage": 4.5,
+          "angle": 361,
+          "bkb": 24,
+          "kbg": 42,
+          "group": 1
+        },
+        {
+          "id": 3,
+          "active": [
+            7,
+            9
+          ],
+          "x": 36,
+          "y": -24,
+          "r": 10,
+          "damage": 4.5,
+          "angle": 361,
+          "bkb": 24,
+          "kbg": 42,
+          "group": 1
+        },
+        {
+          "id": 4,
+          "active": [
+            7,
+            9
+          ],
+          "x": 40,
+          "y": -24,
+          "r": 10,
+          "damage": 4.5,
+          "angle": 361,
+          "bkb": 24,
+          "kbg": 42,
+          "group": 1
+        }
+      ],
+      "echo": {
+        "delayFrames": 8,
+        "damageScale": 0.5,
+        "offsetX": 12,
+        "groups": [
+          1
+        ]
+      },
+      "why": "Starts on 7 (Aeval 4) so it loses a jab trade, but the echo 8 frames later adds a second hit that holds the victim. The echo sits 12 px ahead of him (the plan had -6 behind): 4.5 damage at bkb 24 slides a standing Aeval about 20 px before the echo is active, and from behind the replayed chain missed her past 35 px. From +12 it lands at every spacing to 56 px; the jab reaches 63."
+    },
+    "ftilt": {
+      "role": "long sword poke",
+      "animation": "ftilt",
+      "total": 38,
+      "startup": 13,
+      "iasa": 34,
+      "hitboxes": [
+        {
+          "id": 1,
+          "active": [
+            13,
+            17
+          ],
+          "x": 14,
+          "y": -26,
+          "r": 11,
+          "damage": 12,
+          "angle": 361,
+          "bkb": 22,
+          "kbg": 48,
+          "group": 1
+        },
+        {
+          "id": 2,
+          "active": [
+            13,
+            17
+          ],
+          "x": 25,
+          "y": -26,
+          "r": 11,
+          "damage": 12,
+          "angle": 361,
+          "bkb": 22,
+          "kbg": 48,
+          "group": 1
+        },
+        {
+          "id": 3,
+          "active": [
+            13,
+            17
+          ],
+          "x": 36,
+          "y": -26,
+          "r": 11,
+          "damage": 12,
+          "angle": 361,
+          "bkb": 22,
+          "kbg": 48,
+          "group": 1
+        },
+        {
+          "id": 4,
+          "active": [
+            13,
+            17
+          ],
+          "x": 47,
+          "y": -26,
+          "r": 11,
+          "damage": 12,
+          "angle": 361,
+          "bkb": 22,
+          "kbg": 48,
+          "group": 1
+        },
+        {
+          "id": 5,
+          "active": [
+            13,
+            17
+          ],
+          "x": 58,
+          "y": -26,
+          "r": 11,
+          "damage": 12,
+          "angle": 361,
+          "bkb": 22,
+          "kbg": 48,
+          "group": 1
+        },
+        {
+          "id": 6,
+          "active": [
+            13,
+            17
+          ],
+          "x": 62,
+          "y": -26,
+          "r": 11,
+          "damage": 12,
+          "angle": 361,
+          "bkb": 22,
+          "kbg": 48,
+          "group": 1
+        }
+      ],
+      "echo": {
+        "delayFrames": 10,
+        "damageScale": 0.5,
+        "offsetX": -8,
+        "groups": [
+          1
+        ]
+      },
+      "why": "The crescent tip at 72 px is his safest spacing tool; 12 damage and a 13-frame startup make it a commitment. The echo at half damage covers a roll behind the first swing.",
+      "change_loop0": "kbg 58 to 48: KO on a fresh Aeval from centre 110 to 139, inside the 130 to 170 tilt band"
+    },
+    "utilt": {
+      "role": "anti-air column",
+      "animation": "utilt",
+      "total": 38,
+      "startup": 13,
+      "iasa": 34,
+      "hitboxes": [
+        {
+          "id": 1,
+          "active": [
+            13,
+            18
+          ],
+          "x": 2,
+          "y": -52,
+          "r": 13,
+          "damage": 10.5,
+          "angle": 90,
+          "bkb": 38,
+          "kbg": 98,
+          "group": 1
+        },
+        {
+          "id": 2,
+          "active": [
+            13,
+            18
+          ],
+          "x": 4,
+          "y": -65,
+          "r": 11,
+          "damage": 10.5,
+          "angle": 90,
+          "bkb": 38,
+          "kbg": 98,
+          "group": 1
+        },
+        {
+          "id": 3,
+          "active": [
+            13,
+            18
+          ],
+          "x": 4,
+          "y": -76,
+          "r": 11,
+          "damage": 10.5,
+          "angle": 90,
+          "bkb": 38,
+          "kbg": 98,
+          "group": 1
+        },
+        {
+          "id": 4,
+          "active": [
+            13,
+            18
+          ],
+          "x": 4,
+          "y": -87,
+          "r": 11,
+          "damage": 10.5,
+          "angle": 90,
+          "bkb": 38,
+          "kbg": 98,
+          "group": 1
+        },
+        {
+          "id": 5,
+          "active": [
+            13,
+            18
+          ],
+          "x": 4,
+          "y": -98,
+          "r": 11,
+          "damage": 10.5,
+          "angle": 90,
+          "bkb": 38,
+          "kbg": 98,
+          "group": 1
+        },
+        {
+          "id": 6,
+          "active": [
+            13,
+            18
+          ],
+          "x": 4,
+          "y": -107,
+          "r": 11,
+          "damage": 10.5,
+          "angle": 90,
+          "bkb": 38,
+          "kbg": 98,
+          "group": 1
+        }
+      ],
+      "echo": {
+        "delayFrames": 10,
+        "damageScale": 0.5,
+        "offsetX": -6,
+        "groups": [
+          1
+        ]
+      },
+      "why": "The raised sword reaches y -118; the head circle covers someone landing on him. 13-frame startup keeps it from being a reaction answer to every jump.",
+      "change_loop0": "kbg 92 to 98: KO 177 to 165, inside the tilt band"
+    },
+    "dtilt": {
+      "role": "low sweep, ledge poke",
+      "animation": "dtilt",
+      "total": 30,
+      "startup": 8,
+      "iasa": 26,
+      "hitsLedge": true,
+      "hitboxes": [
+        {
+          "id": 1,
+          "active": [
+            8,
+            12
+          ],
+          "x": 18,
+          "y": -5,
+          "r": 12,
+          "damage": 9,
+          "angle": 10,
+          "bkb": 20,
+          "kbg": 100,
+          "group": 1,
+          "low": true
+        },
+        {
+          "id": 2,
+          "active": [
+            8,
+            12
+          ],
+          "x": 34,
+          "y": -5,
+          "r": 10,
+          "damage": 9,
+          "angle": 10,
+          "bkb": 20,
+          "kbg": 100,
+          "group": 1,
+          "low": true
+        }
+      ],
+      "echo": {
+        "delayFrames": 4,
+        "damageScale": 0.5,
+        "offsetX": 20,
+        "groups": [
+          1
+        ]
+      },
+      "why": "Low (beats rolls) and hitsLedge like every down attack. A flat sweep: at 10 degrees it slides a grounded victim along the floor below 80 kb, and the echo 4 frames later and 20 px ahead of where he started sweeps her again. Past 80 kb it launches low and flat.",
+      "change_loop0": "angle 75 to 10, bkb 36 to 20, kbg 90 to 100, echo delay 8 to 4 and offsetX -6 to 20: the 75 degree launch lifted her out of the echo, now she slides below 80 kb and the echo lands on a standing Aeval at every spacing at 0 percent (11 of 11 spacings, 10 of 11 at 30); KO 161 to 162"
+    },
+    "dashatk": {
+      "role": "lunge punish",
+      "animation": "dashatk",
+      "total": 44,
+      "startup": 11,
+      "velocity": [
+        {
+          "frame": 6,
+          "vx": 3.5
+        }
+      ],
+      "hitboxes": [
+        {
+          "id": 1,
+          "active": [
+            11,
+            18
+          ],
+          "x": 14,
+          "y": -20,
+          "r": 12,
+          "damage": 13,
+          "angle": 55,
+          "bkb": 36,
+          "kbg": 58,
+          "group": 1
+        },
+        {
+          "id": 2,
+          "active": [
+            11,
+            18
+          ],
+          "x": 26,
+          "y": -20,
+          "r": 12,
+          "damage": 13,
+          "angle": 55,
+          "bkb": 36,
+          "kbg": 58,
+          "group": 1
+        },
+        {
+          "id": 3,
+          "active": [
+            11,
+            18
+          ],
+          "x": 38,
+          "y": -20,
+          "r": 12,
+          "damage": 13,
+          "angle": 55,
+          "bkb": 36,
+          "kbg": 58,
+          "group": 1
+        },
+        {
+          "id": 4,
+          "active": [
+            11,
+            18
+          ],
+          "x": 50,
+          "y": -20,
+          "r": 12,
+          "damage": 13,
+          "angle": 55,
+          "bkb": 36,
+          "kbg": 58,
+          "group": 1
+        },
+        {
+          "id": 5,
+          "active": [
+            11,
+            18
+          ],
+          "x": 62,
+          "y": -20,
+          "r": 12,
+          "damage": 13,
+          "angle": 55,
+          "bkb": 36,
+          "kbg": 58,
+          "group": 1
+        },
+        {
+          "id": 6,
+          "active": [
+            11,
+            18
+          ],
+          "x": 74,
+          "y": -20,
+          "r": 12,
+          "damage": 13,
+          "angle": 55,
+          "bkb": 36,
+          "kbg": 58,
+          "group": 1
+        },
+        {
+          "id": 7,
+          "active": [
+            11,
+            18
+          ],
+          "x": 80,
+          "y": -20,
+          "r": 12,
+          "damage": 13,
+          "angle": 55,
+          "bkb": 36,
+          "kbg": 58,
+          "group": 1
+        }
+      ],
+      "echo": {
+        "delayFrames": 10,
+        "damageScale": 0.5,
+        "offsetX": -10,
+        "groups": [
+          1
+        ]
+      },
+      "why": "Long thrust with a push on frame 6; no iasa and 44 frames total make a whiff punishable."
+    },
+    "fsmash": {
+      "role": "hard read kill move",
+      "animation": "fsmash",
+      "total": 58,
+      "startup": 23,
+      "chargeable": true,
+      "hitboxes": [
+        {
+          "id": 1,
+          "active": [
+            23,
+            27
+          ],
+          "x": 16,
+          "y": -24,
+          "r": 14,
+          "damage": 19,
+          "angle": 40,
+          "bkb": 26,
+          "kbg": 40,
+          "group": 1
+        },
+        {
+          "id": 2,
+          "active": [
+            23,
+            27
+          ],
+          "x": 30,
+          "y": -24,
+          "r": 14,
+          "damage": 19,
+          "angle": 40,
+          "bkb": 26,
+          "kbg": 40,
+          "group": 1
+        },
+        {
+          "id": 3,
+          "active": [
+            23,
+            27
+          ],
+          "x": 44,
+          "y": -24,
+          "r": 14,
+          "damage": 19,
+          "angle": 40,
+          "bkb": 26,
+          "kbg": 40,
+          "group": 1
+        },
+        {
+          "id": 4,
+          "active": [
+            23,
+            27
+          ],
+          "x": 58,
+          "y": -24,
+          "r": 14,
+          "damage": 19,
+          "angle": 40,
+          "bkb": 26,
+          "kbg": 40,
+          "group": 1
+        },
+        {
+          "id": 5,
+          "active": [
+            23,
+            27
+          ],
+          "x": 72,
+          "y": -24,
+          "r": 14,
+          "damage": 19,
+          "angle": 40,
+          "bkb": 26,
+          "kbg": 40,
+          "group": 1
+        },
+        {
+          "id": 6,
+          "active": [
+            23,
+            27
+          ],
+          "x": 86,
+          "y": -24,
+          "r": 14,
+          "damage": 19,
+          "angle": 40,
+          "bkb": 26,
+          "kbg": 40,
+          "group": 1
+        },
+        {
+          "id": 7,
+          "active": [
+            23,
+            27
+          ],
+          "x": 94,
+          "y": -24,
+          "r": 14,
+          "damage": 19,
+          "angle": 40,
+          "bkb": 26,
+          "kbg": 40,
+          "group": 1
+        }
+      ],
+      "why": "The crescent heavy slash, 23-frame startup (5 slower than Aeval). 19 damage, kbg 40 (plan 22 and 50): uncharged KO 98 on a fresh Aeval from centre, full charge 59. With 19 damage the charged hit always lands about 40 percent under the uncharged one.",
+      "change_loop0": "kbg 30 to 35: KO 118 to 96 uncharged, 72 to 56 charged. With 22 damage the charged KO sits about 40 below the uncharged one for any bkb and kbg, so 95 and 62 cannot both be met; the uncharged target wins",
+      "change_loop2": "damage 22 to 19, kbg 35 to 40: KO 96 to 98 uncharged, 56 to 59 charged. The UI 5 CPU started fsmash on 11 percent of its moves (UI 10: 5), so a landed read pays less while the KO percent holds"
+    },
+    "usmash": {
+      "role": "anti-air kill",
+      "animation": "usmash",
+      "total": 56,
+      "startup": 21,
+      "chargeable": true,
+      "hitboxes": [
+        {
+          "id": 1,
+          "active": [
+            21,
+            26
+          ],
+          "x": 2,
+          "y": -52,
+          "r": 15,
+          "damage": 20,
+          "angle": 88,
+          "bkb": 32,
+          "kbg": 63,
+          "group": 1
+        },
+        {
+          "id": 2,
+          "active": [
+            21,
+            26
+          ],
+          "x": 4,
+          "y": -67,
+          "r": 13,
+          "damage": 20,
+          "angle": 88,
+          "bkb": 32,
+          "kbg": 63,
+          "group": 1
+        },
+        {
+          "id": 3,
+          "active": [
+            21,
+            26
+          ],
+          "x": 4,
+          "y": -80,
+          "r": 13,
+          "damage": 20,
+          "angle": 88,
+          "bkb": 32,
+          "kbg": 63,
+          "group": 1
+        },
+        {
+          "id": 4,
+          "active": [
+            21,
+            26
+          ],
+          "x": 4,
+          "y": -93,
+          "r": 13,
+          "damage": 20,
+          "angle": 88,
+          "bkb": 32,
+          "kbg": 63,
+          "group": 1
+        },
+        {
+          "id": 5,
+          "active": [
+            21,
+            26
+          ],
+          "x": 4,
+          "y": -106,
+          "r": 13,
+          "damage": 20,
+          "angle": 88,
+          "bkb": 32,
+          "kbg": 63,
+          "group": 1
+        },
+        {
+          "id": 6,
+          "active": [
+            21,
+            26
+          ],
+          "x": 4,
+          "y": -115,
+          "r": 13,
+          "damage": 20,
+          "angle": 88,
+          "bkb": 32,
+          "kbg": 63,
+          "group": 1
+        }
+      ],
+      "why": "Sword flung up to y -128 and caught. Loop 0 cut kbg to 63 so it kills a fresh Aeval at 107 (65 charged), not 83.",
+      "change_loop0": "kbg 76 to 63: KO 83 to 107, charged 48 to 65"
+    },
+    "dsmash": {
+      "role": "two-sided coverage",
+      "animation": "dsmash",
+      "total": 60,
+      "startup": 17,
+      "chargeable": true,
+      "hitsLedge": true,
+      "hitboxes": [
+        {
+          "id": 1,
+          "active": [
+            17,
+            20
+          ],
+          "x": 26,
+          "y": -34,
+          "r": 18,
+          "damage": 18,
+          "angle": 45,
+          "bkb": 30,
+          "kbg": 37,
+          "group": 1
+        },
+        {
+          "id": 2,
+          "active": [
+            24,
+            27
+          ],
+          "x": 38,
+          "y": -8,
+          "r": 16,
+          "damage": 16,
+          "angle": 80,
+          "bkb": 34,
+          "kbg": 38,
+          "group": 1
+        },
+        {
+          "id": 3,
+          "active": [
+            24,
+            27
+          ],
+          "x": -26,
+          "y": -6,
+          "r": 12,
+          "damage": 12,
+          "angle": 150,
+          "bkb": 30,
+          "kbg": 35,
+          "group": 1
+        }
+      ],
+      "why": "The counter art as a smash: an arc then an eruption in one group, so it hits once. Loop 0 cut its kbg to 0.54x so it kills at 110 (69 charged), not 47.",
+      "change_loop0": "kbg 68, 70, 64 to 37, 38, 35 (0.54x on all three): KO 47 to 110, charged 22 to 69"
+    },
+    "nair": {
+      "role": "ring spin out of shield and in the air",
+      "animation": "nair",
+      "total": 40,
+      "startup": 6,
+      "landingLag": 9,
+      "hitboxes": [
+        {
+          "id": 1,
+          "active": [
+            6,
+            9
+          ],
+          "x": 0,
+          "y": -26,
+          "r": 26,
+          "damage": 12,
+          "angle": 60,
+          "bkb": 22,
+          "kbg": 52,
+          "group": 1
+        },
+        {
+          "id": 2,
+          "active": [
+            10,
+            18
+          ],
+          "x": 0,
+          "y": -26,
+          "r": 24,
+          "damage": 7,
+          "angle": 55,
+          "bkb": 14,
+          "kbg": 42,
+          "group": 1
+        }
+      ],
+      "echo": {
+        "delayFrames": 8,
+        "damageScale": 0.5,
+        "offsetX": 0,
+        "groups": [
+          1
+        ]
+      },
+      "why": "Clean 6-9 then late 10-18, body centred r 26. Low knockback so it combos; the echo repeats it in place for a two-hit string."
+    },
+    "fair": {
+      "role": "aerial kill and wall",
+      "animation": "fair",
+      "total": 40,
+      "startup": 12,
+      "landingLag": 16,
+      "hitboxes": [
+        {
+          "id": 1,
+          "active": [
+            12,
+            16
+          ],
+          "x": 26,
+          "y": -26,
+          "r": 15,
+          "damage": 16,
+          "angle": 45,
+          "bkb": 24,
+          "kbg": 42,
+          "group": 1
+        },
+        {
+          "id": 2,
+          "active": [
+            12,
+            16
+          ],
+          "x": 38,
+          "y": -22,
+          "r": 13,
+          "damage": 16,
+          "angle": 45,
+          "bkb": 24,
+          "kbg": 42,
+          "group": 1
+        }
+      ],
+      "echo": {
+        "delayFrames": 10,
+        "damageScale": 0.5,
+        "offsetX": -6,
+        "groups": [
+          1
+        ]
+      },
+      "why": "16 damage, 45 degrees; the echo trails the drift so it covers the landing.",
+      "change_loop0": "kbg 62 to 42: KO 71 to 119"
+    },
+    "bair": {
+      "role": "back thrust",
+      "animation": "bair",
+      "total": 36,
+      "startup": 10,
+      "landingLag": 15,
+      "hitboxes": [
+        {
+          "id": 1,
+          "active": [
+            10,
+            13
+          ],
+          "x": -28,
+          "y": -24,
+          "r": 14,
+          "damage": 17,
+          "angle": 361,
+          "bkb": 26,
+          "kbg": 53,
+          "group": 1
+        },
+        {
+          "id": 2,
+          "active": [
+            10,
+            13
+          ],
+          "x": -40,
+          "y": -24,
+          "r": 12,
+          "damage": 17,
+          "angle": 361,
+          "bkb": 26,
+          "kbg": 53,
+          "group": 1
+        }
+      ],
+      "echo": {
+        "delayFrames": 8,
+        "damageScale": 0.5,
+        "offsetX": 6,
+        "groups": [
+          1
+        ]
+      },
+      "why": "His strongest aerial per hit, 17 damage; he turns his body for it (the left-facing shadow step frames). The echo stands 6 px ahead of him, which is behind the thrust.",
+      "change_loop0": "kbg 64 to 53: into a grounded Aeval 40 px behind him KO 81 to 104 (the harness placement, overhead, reads 151 to 188)"
+    },
+    "uair": {
+      "role": "juggle",
+      "animation": "uair",
+      "total": 42,
+      "startup": 16,
+      "landingLag": 14,
+      "hitboxes": [
+        {
+          "id": 1,
+          "active": [
+            16,
+            21
+          ],
+          "x": -10,
+          "y": -56,
+          "r": 16,
+          "damage": 12,
+          "angle": 80,
+          "bkb": 20,
+          "kbg": 90,
+          "group": 1
+        },
+        {
+          "id": 2,
+          "active": [
+            16,
+            21
+          ],
+          "x": 10,
+          "y": -60,
+          "r": 16,
+          "damage": 12,
+          "angle": 80,
+          "bkb": 20,
+          "kbg": 90,
+          "group": 1
+        },
+        {
+          "id": 3,
+          "active": [
+            16,
+            21
+          ],
+          "x": 24,
+          "y": -42,
+          "r": 12,
+          "damage": 12,
+          "angle": 80,
+          "bkb": 20,
+          "kbg": 90,
+          "group": 1
+        }
+      ],
+      "echo": {
+        "delayFrames": 5,
+        "damageScale": 0.5,
+        "offsetX": 0,
+        "groups": [
+          1
+        ]
+      },
+      "why": "Overhead arc, three circles; 16-frame startup keeps it from chaining freely. Loop 0: less base knockback and a 5-frame echo delay so the echo lands on a just-launched victim.",
+      "change_loop0": "bkb 30 to 20, kbg 82 to 95, echo delay 10 to 5: the echo now lands on a just-launched Aeval (36 of 41 probes at 0 percent, 27 at 30, 7 at 60; before 25, 0, 0); KO 141 to 128",
+      "change_loop1": "kbg 95 to 90: KO 128 to 137. uair was his top KO move at UI 5, 7 and 10 (20 to 23 percent of his KOs)"
+    },
+    "dair": {
+      "role": "stall-free spike",
+      "animation": "dair",
+      "total": 48,
+      "startup": 14,
+      "landingLag": 14,
+      "hitsLedge": true,
+      "hitboxes": [
+        {
+          "id": 1,
+          "active": [
+            14,
+            18
+          ],
+          "x": 4,
+          "y": 10,
+          "r": 13,
+          "damage": 16,
+          "angle": 270,
+          "bkb": 40,
+          "kbg": 78,
+          "group": 1
+        },
+        {
+          "id": 2,
+          "active": [
+            19,
+            24
+          ],
+          "x": 4,
+          "y": -6,
+          "r": 16,
+          "damage": 11,
+          "angle": 70,
+          "bkb": 30,
+          "kbg": 60,
+          "group": 2
+        }
+      ],
+      "echo": {
+        "delayFrames": 10,
+        "damageScale": 0.5,
+        "offsetX": 0,
+        "groups": [
+          2
+        ]
+      },
+      "why": "The tip spikes (14-18), the body hit is late (19-24). No dive and no bounce, 14 landing lag. Only the late group is echoed: an echoed spike would be a free second meteor.",
+      "change_loop1": "landingLag 24 to 18: landing was the top state Aeval UI 10 opened him in (11 percent), and the UI 10 CPU throws dair on 12 percent of its moves",
+      "change_loop2": "landingLag 18 to 14: same reason; dair startup and landing stayed the top UI 10 openings after loop 1"
+    },
+    "nspecial": {
+      "role": "aimed teleport sword",
+      "animation": "nspecial",
+      "total": 30,
+      "chargeable": true,
+      "chargeCastFrames": 8,
+      "branch": {
+        "start": 40,
+        "end": 54
+      },
+      "recall": {
+        "projectileId": "shadowSword",
+        "footOffsetY": 26,
+        "invulnFrames": 12,
+        "oncePerAir": true
+      },
+      "projectiles": [
+        {
+          "id": "shadowSword",
+          "spawnFrame": 14,
+          "x": 20,
+          "y": -26,
+          "speed": 5,
+          "lifetime": 28,
+          "r": 10,
+          "damage": 7,
+          "angle": 40,
+          "bkb": 30,
+          "kbg": 55,
+          "strength": 3,
+          "charged": {
+            "vx": 6,
+            "lifetime": 62,
+            "damage": 12,
+            "bkb": 40,
+            "kbg": 43,
+            "strength": 6
+          },
+          "destroyOnHit": true,
+          "aim": true,
+          "fixedScale": true,
+          "onePerOwner": true,
+          "burstId": "shadowBurst"
+        },
+        {
+          "id": "shadowBurst",
+          "spawnFrame": -1,
+          "x": 0,
+          "y": 0,
+          "speed": 0,
+          "lifetime": 12,
+          "r": 22,
+          "damage": 5,
+          "angle": 60,
+          "bkb": 30,
+          "kbg": 50,
+          "strength": 3,
+          "charged": {
+            "damage": 9
+          },
+          "destroyOnHit": false
+        }
+      ],
+      "travel": {
+        "tap": 140,
+        "full": 372,
+        "note": "px from spawn, selftest tkd5"
+      },
+      "why": "Slower to cast and shorter at a tap than the orb (140 px against 186), harder hitting at a tap (7 against 4), a little weaker at full (12 against 16), no heal, and it buys the recall teleport. Five aim directions set on release.",
+      "change_loop0": "shadowSword charged kbg 62 to 43: full charge KO 73 to 119 (tap unchanged at 173)"
+    },
+    "sspecial": {
+      "role": "mobility strike",
+      "animation": "sspecial",
+      "total": 46,
+      "startup": 19,
+      "hitboxes": [
+        {
+          "id": 1,
+          "active": [
+            19,
+            24
+          ],
+          "x": 14,
+          "y": -26,
+          "r": 16,
+          "damage": 13,
+          "angle": 40,
+          "bkb": 40,
+          "kbg": 48,
+          "group": 1
+        },
+        {
+          "id": 2,
+          "active": [
+            19,
+            24
+          ],
+          "x": 30,
+          "y": -26,
+          "r": 16,
+          "damage": 13,
+          "angle": 40,
+          "bkb": 40,
+          "kbg": 48,
+          "group": 1
+        },
+        {
+          "id": 3,
+          "active": [
+            19,
+            24
+          ],
+          "x": 46,
+          "y": -26,
+          "r": 16,
+          "damage": 13,
+          "angle": 40,
+          "bkb": 40,
+          "kbg": 48,
+          "group": 1
+        },
+        {
+          "id": 4,
+          "active": [
+            19,
+            24
+          ],
+          "x": 52,
+          "y": -26,
+          "r": 16,
+          "damage": 13,
+          "angle": 40,
+          "bkb": 40,
+          "kbg": 48,
+          "group": 1
+        }
+      ],
+      "shadowStep": {
+        "startFrame": 8,
+        "travelFrames": 6,
+        "distance": 96,
+        "invuln": [
+          3,
+          16
+        ],
+        "turnIfPassed": true,
+        "stopAtEdge": true,
+        "oncePerAir": true
+      },
+      "why": "96 px in 6 frames, invulnerable 3 to 16, turns him if he passes the opponent, then a backstrike on 19. Ground use stops at the edge, air use once per airborne period with no helpless.",
+      "change_loop0": "kbg 60 to 48: backstrike KO 81 to 108",
+      "change_loop1": "shadowStep invuln start 6 to 3: sspecial startup was 7 percent of the openings Aeval UI 10 found on him"
+    },
+    "uspecial": {
+      "role": "recovery with a drag-up hit",
+      "animation": "uspecial",
+      "total": 56,
+      "startup": 12,
+      "invuln": [
+        10,
+        14
+      ],
+      "helplessAfter": true,
+      "velocity": "{\"frame\":10,\"vx\":1.2,\"setX\":true,\"vy\":-6.85,\"setY\":true} then vy +0.25 on frames 11 to 30",
+      "hitboxes": [
+        {
+          "id": 1,
+          "active": [
+            12,
+            30
+          ],
+          "x": 0,
+          "y": -44,
+          "r": 16,
+          "damage": 3,
+          "angle": 90,
+          "bkb": 60,
+          "kbg": 30,
+          "group": 1
+        },
+        {
+          "id": 2,
+          "active": [
+            40,
+            46
+          ],
+          "x": 20,
+          "y": -30,
+          "r": 22,
+          "damage": 14,
+          "angle": 50,
+          "bkb": 42,
+          "kbg": 80,
+          "group": 2
+        },
+        {
+          "id": 3,
+          "active": [
+            40,
+            46
+          ],
+          "x": 34,
+          "y": -14,
+          "r": 16,
+          "damage": 14,
+          "angle": 50,
+          "bkb": 42,
+          "kbg": 80,
+          "group": 2
+        }
+      ],
+      "why": "Launch vy -6.85 instead of the plan -7.2: the plan number rose 102.5 px against Aeval 82.3 (1.245x); -6.85 rises 91.2 px, the plan 1.1x height target. The rising hitbox drags a victim into the top swing."
+    },
+    "dspecial": {
+      "role": "parry and counter",
+      "animation": "dspecial",
+      "total": 50,
+      "invuln": [
+        60,
+        72
+      ],
+      "hitboxes": [
+        {
+          "id": 1,
+          "active": [
+            70,
+            73
+          ],
+          "x": 24,
+          "y": -34,
+          "r": 20,
+          "damage": "counterDamage",
+          "angle": 45,
+          "bkb": 20,
+          "kbg": 61,
+          "group": 1,
+          "noCrit": true
+        },
+        {
+          "id": 2,
+          "active": [
+            78,
+            81
+          ],
+          "x": 38,
+          "y": -8,
+          "r": 18,
+          "damage": "counterDamage",
+          "angle": 45,
+          "bkb": 20,
+          "kbg": 61,
+          "group": 1,
+          "noCrit": true
+        }
+      ],
+      "counter": {
+        "windowStart": 5,
+        "windowEnd": 22,
+        "scale": 1.3,
+        "minDamage": 10,
+        "maxDamage": 20,
+        "attackerFreeze": 14
+      },
+      "branch": {
+        "start": 60,
+        "end": 104
+      },
+      "why": "Window 5 to 22 absorbs any melee hit or projectile, grabs beat it; 28 frames of whiff endlag after the window. The counter repays 1.3x the absorbed damage, clamped 10 to 20, never crits. A countered jab (floor 10) kills a fresh Aeval from centre at 130; a countered Aeval fsmash (19.5) at 59; the cap (20) at 57.",
+      "change_loop0": "counter maxDamage 30 to 20, hitboxes bkb 60 to 20 and kbg 70 to 61: KO at the 10 floor 46 to 130 (a countered jab), at the 20 cap 0 to 57 (a countered Aeval fsmash repays 19.5 and kills at 59)"
+    },
+    "taunt": {
+      "role": "taunt",
+      "animation": "taunt",
+      "total": 90,
+      "why": "No hitboxes."
+    },
+    "taunt2": {
+      "role": "taunt: clone summon",
+      "animation": "taunt2",
+      "total": 90,
+      "why": "No hitboxes."
+    },
+    "taunt3": {
+      "role": "taunt: shadow form",
+      "animation": "taunt3",
+      "total": 90,
+      "why": "No hitboxes."
+    },
+    "ledgeatk": {
+      "role": "ledge get-up swing",
+      "animation": "ledgeatk",
+      "total": 44,
+      "startup": 22,
+      "invuln": [
+        0,
+        24
+      ],
+      "hitboxes": [
+        {
+          "id": 1,
+          "active": [
+            22,
+            26
+          ],
+          "x": 24,
+          "y": -16,
+          "r": 14,
+          "damage": 10,
+          "angle": 361,
+          "bkb": 22,
+          "kbg": 48,
+          "group": 1
+        }
+      ],
+      "why": "Invulnerable to frame 24, swing on 22 to 26."
+    },
+    "getupatk": {
+      "role": "get-up sweep, both sides",
+      "animation": "getupatk",
+      "total": 38,
+      "startup": 16,
+      "invuln": [
+        0,
+        15
+      ],
+      "hitboxes": [
+        {
+          "id": 1,
+          "active": [
+            16,
+            21
+          ],
+          "x": 22,
+          "y": -12,
+          "r": 13,
+          "damage": 9,
+          "angle": 361,
+          "bkb": 24,
+          "kbg": 52,
+          "group": 1
+        },
+        {
+          "id": 2,
+          "active": [
+            16,
+            21
+          ],
+          "x": -22,
+          "y": -12,
+          "r": 13,
+          "damage": 9,
+          "angle": 361,
+          "bkb": 24,
+          "kbg": 52,
+          "group": 1
+        }
+      ],
+      "why": "Invulnerable to frame 15, both sides 16 to 21."
+    }
+  },
+  "grab_kit": {
+    "stand": {
+      "totalFrames": 34,
+      "start": 9,
+      "end": 10,
+      "x": 20,
+      "y": -24,
+      "r": 11
+    },
+    "dash": {
+      "totalFrames": 42,
+      "start": 11,
+      "end": 12,
+      "x": 28,
+      "y": -24,
+      "r": 12
+    },
+    "holdX": 14,
+    "holdY": 0,
+    "holdBase": 60,
+    "holdPerPercent": 0.5,
+    "mashFrames": 4,
+    "pummel": {
+      "damage": 2.2,
+      "totalFrames": 18,
+      "hitFrame": 5
+    },
+    "throws": {
+      "fthrow": {
+        "totalFrames": 24,
+        "releaseFrame": 10,
+        "damage": 11,
+        "angle": 40,
+        "bkb": 64,
+        "kbg": 62,
+        "holdX": 18,
+        "holdY": -4
+      },
+      "bthrow": {
+        "totalFrames": 30,
+        "releaseFrame": 14,
+        "damage": 12.5,
+        "angle": 45,
+        "bkb": 62,
+        "kbg": 74,
+        "holdX": 18,
+        "holdY": -4
+      },
+      "uthrow": {
+        "totalFrames": 28,
+        "releaseFrame": 12,
+        "damage": 10,
+        "angle": 90,
+        "bkb": 72,
+        "kbg": 58,
+        "holdX": 0,
+        "holdY": -30
+      },
+      "dthrow": {
+        "totalFrames": 26,
+        "releaseFrame": 12,
+        "damage": 8,
+        "angle": 72,
+        "bkb": 48,
+        "kbg": 38,
+        "holdX": 10,
+        "holdY": 0
+      }
+    },
+    "why": "Shadow hands: grabs start 2 frames after the default and reach 25 percent further, throws deal 1.4x the default and never crit. bthrow is the kill throw, dthrow the combo starter."
+  },
+  "calibrate": {
+    "note": "npm run calibrate -- --char trekmore --victim aeval (and the reverse). Tidegate, centre, fresh, victim holds nothing, crits off. \"full\" is full charge; for dspecial it is the counter at maxDamage (20) and \"ko\" at minDamage (10). bair and uspecial use the harness placements (victim in front or overhead), so their numbers are not the move at its best: bair into a grounded Aeval 40 px behind him kills at 104. Tables regenerated after balance loop 4 (the fsmash and uair rows changed in loops 1 and 2; the reverse table is unchanged) (docs/TREKMORE_BALANCE_LEDGER.md).",
+    "trekmore_vs_aeval": {
+      "jab": {
+        "ko": "none",
+        "kbAt100": 52.8,
+        "placement": "gap 40, lift 0"
+      },
+      "ftilt": {
+        "ko": 139,
+        "kbAt100": 86.7,
+        "placement": "gap 40, lift 0"
+      },
+      "utilt": {
+        "ko": 165,
+        "kbAt100": 156.4,
+        "placement": "gap 0, lift 0"
+      },
+      "dtilt": {
+        "ko": 162,
+        "kbAt100": 127.3,
+        "placement": "gap 40, lift 0"
+      },
+      "dashatk": {
+        "ko": 174,
+        "kbAt100": 119.6,
+        "placement": "gap 40, lift 0"
+      },
+      "fsmash": {
+        "ko": 98,
+        "full": 59,
+        "kbAt100": 107.6,
+        "placement": "gap 40, lift 0"
+      },
+      "usmash": {
+        "ko": 107,
+        "full": 65,
+        "kbAt100": 167.2,
+        "placement": "gap 0, lift 0"
+      },
+      "dsmash": {
+        "ko": 110,
+        "full": 69,
+        "kbAt100": 101.7,
+        "placement": "gap 40, lift 0"
+      },
+      "nair": {
+        "ko": 275,
+        "kbAt100": 92.1,
+        "placement": "gap 26, lift 0"
+      },
+      "fair": {
+        "ko": 119,
+        "kbAt100": 96.9,
+        "placement": "gap 40, lift 0"
+      },
+      "bair": {
+        "ko": 188,
+        "kbAt100": 80.5,
+        "placement": "gap 0, lift 44"
+      },
+      "uair": {
+        "ko": 137,
+        "kbAt100": 141.3,
+        "placement": "gap 40, lift 0"
+      },
+      "dair": {
+        "ko": "none",
+        "kbAt100": 175.3,
+        "placement": "gap 26, lift 0"
+      },
+      "nspecial": {
+        "ko": 173,
+        "full": 119,
+        "kbAt100": 79.3,
+        "placement": "gap 40, lift 0"
+      },
+      "sspecial": {
+        "ko": 108,
+        "kbAt100": 109.2,
+        "placement": "gap 40, lift 0"
+      },
+      "uspecial": {
+        "ko": "none",
+        "kbAt100": 76.9,
+        "placement": "gap 0, lift 44"
+      },
+      "dspecial": {
+        "ko": 130,
+        "full": 57,
+        "kbAt100": 90.9,
+        "placement": "gap 40, lift 0"
+      },
+      "ledgeatk": {
+        "ko": 166,
+        "kbAt100": 77.8,
+        "placement": "gap 40, lift 0"
+      },
+      "getupatk": {
+        "ko": 162,
+        "kbAt100": 79.8,
+        "placement": "gap 40, lift 0"
+      }
+    },
+    "aeval_vs_trekmore": {
+      "jab": {
+        "ko": "none",
+        "kbAt100": 40.9,
+        "placement": "gap 40, lift 0"
+      },
+      "ftilt": {
+        "ko": 234,
+        "kbAt100": 64.9,
+        "placement": "gap 40, lift 0"
+      },
+      "utilt": {
+        "ko": 229,
+        "kbAt100": 111.0,
+        "placement": "gap 26, lift 0"
+      },
+      "dtilt": {
+        "ko": 254,
+        "kbAt100": 104.8,
+        "placement": "gap 26, lift 0"
+      },
+      "dashatk": {
+        "ko": 228,
+        "kbAt100": 81.0,
+        "placement": "gap 40, lift 0"
+      },
+      "fsmash": {
+        "ko": 145,
+        "full": 97,
+        "kbAt100": 87.2,
+        "placement": "gap 40, lift 0"
+      },
+      "usmash": {
+        "ko": 160,
+        "full": 109,
+        "kbAt100": 133.3,
+        "placement": "gap 26, lift 0"
+      },
+      "dsmash": {
+        "ko": 164,
+        "full": 114,
+        "kbAt100": 84.7,
+        "placement": "gap 40, lift 0"
+      },
+      "nair": {
+        "ko": "none",
+        "kbAt100": 65.0,
+        "placement": "gap 26, lift 0"
+      },
+      "fair": {
+        "ko": 161,
+        "kbAt100": 81.9,
+        "placement": "gap 40, lift 0"
+      },
+      "bair": {
+        "ko": 148,
+        "kbAt100": 92.0,
+        "placement": "gap 0, lift 0"
+      },
+      "uair": {
+        "ko": 259,
+        "kbAt100": 97.1,
+        "placement": "gap 26, lift 0"
+      },
+      "dair": {
+        "ko": "none",
+        "kbAt100": 161.7,
+        "placement": "gap 26, lift 0"
+      },
+      "nspecial": {
+        "ko": "none",
+        "full": 133,
+        "kbAt100": 31.9,
+        "placement": "gap 40, lift 0"
+      },
+      "sspecial": {
+        "ko": 262,
+        "kbAt100": 63.2,
+        "placement": "gap 40, lift 0"
+      },
+      "uspecial": {
+        "ko": 154,
+        "kbAt100": 149.4,
+        "placement": "gap 26, lift 0"
+      },
+      "dspecial": {
+        "ko": 230,
+        "kbAt100": 137.2,
+        "placement": "gap 40, lift 0"
+      },
+      "ledgeatk": {
+        "ko": 254,
+        "kbAt100": 62.3,
+        "placement": "gap 40, lift 0"
+      },
+      "getupatk": {
+        "ko": 252,
+        "kbAt100": 63.9,
+        "placement": "gap 40, lift 0"
+      }
+    },
+    "trekmore_vs_trekmore": {
+      "jab": {
+        "ko": "none",
+        "kbAt100": 50.6,
+        "placement": "gap 40, lift 0"
+      },
+      "ftilt": {
+        "ko": 167,
+        "kbAt100": 80.8,
+        "placement": "gap 40, lift 0"
+      },
+      "utilt": {
+        "ko": 142,
+        "kbAt100": 145.9,
+        "placement": "gap 26, lift 0"
+      },
+      "dtilt": {
+        "ko": 197,
+        "kbAt100": 117.9,
+        "placement": "gap 40, lift 0"
+      },
+      "dashatk": {
+        "ko": 121,
+        "kbAt100": 112.0,
+        "placement": "gap 40, lift 0"
+      },
+      "fsmash": {
+        "ko": 118,
+        "full": 72,
+        "kbAt100": 100.6,
+        "placement": "gap 40, lift 0"
+      },
+      "usmash": {
+        "ko": 129,
+        "full": 81,
+        "kbAt100": 154.2,
+        "placement": "gap 26, lift 0"
+      },
+      "dsmash": {
+        "ko": 134,
+        "full": 87,
+        "kbAt100": 94.9,
+        "placement": "gap 40, lift 0"
+      },
+      "nair": {
+        "ko": "none",
+        "kbAt100": 85.7,
+        "placement": "gap 40, lift 0"
+      },
+      "fair": {
+        "ko": 143,
+        "kbAt100": 90.0,
+        "placement": "gap 40, lift 0"
+      },
+      "bair": {
+        "ko": 106,
+        "kbAt100": 114.1,
+        "placement": "gap 0, lift 0"
+      },
+      "uair": {
+        "ko": 209,
+        "kbAt100": 136.4,
+        "placement": "gap 40, lift 0"
+      },
+      "dair": {
+        "ko": "none",
+        "kbAt100": 162.6,
+        "placement": "gap 26, lift 0"
+      },
+      "nspecial": {
+        "ko": 207,
+        "full": 145,
+        "kbAt100": 75.2,
+        "placement": "gap 40, lift 0"
+      },
+      "sspecial": {
+        "ko": 131,
+        "kbAt100": 102.9,
+        "placement": "gap 40, lift 0"
+      },
+      "uspecial": {
+        "ko": "none",
+        "kbAt100": 75.7,
+        "placement": "gap 0, lift 44"
+      },
+      "dspecial": {
+        "ko": 156,
+        "full": 71,
+        "kbAt100": 84.7,
+        "placement": "gap 40, lift 0"
+      },
+      "ledgeatk": {
+        "ko": 198,
+        "kbAt100": 72.9,
+        "placement": "gap 40, lift 0"
+      },
+      "getupatk": {
+        "ko": 194,
+        "kbAt100": 74.9,
+        "placement": "gap 40, lift 0"
+      }
+    }
+  },
+  "plan_deviations": [
+    "jab echo offsetX +12 (plan -6): the echo missed a standing Aeval past 35 px after the jab slide.",
+    "fsmash kbg 35 (plan 50): uncharged KO 96, charged 56 (loop 0; W1-char had 30 for the 72 charged target).",
+    "uspecial launch vy -6.85 (plan -7.2): meets the 1.1x rise target; -7.2 gave 1.245x.",
+    "Balance loop 0 (docs/TREKMORE_BALANCE_LEDGER.md): kbg cut on ftilt, usmash, dsmash, fair, bair, sspecial, sword charged; kbg raised on utilt; dtilt angle 10 and echo 4/+20; uair bkb 20 kbg 95 echo delay 5; counter cap 20, bkb 20, kbg 61."
+  ]
+}

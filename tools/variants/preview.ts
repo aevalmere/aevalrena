@@ -1,30 +1,40 @@
 /**
- * Colour variant previews. Decodes Aeval's packed body and fx atlases, runs a handful of
+ * Colour variant previews. Decodes a character's packed body and fx atlases, runs a handful of
  * frames and the select-screen bust through src/render/palette.ts (the same remap the game
- * bakes with), and writes one PNG per variant to art/aeval/preview_variants/.
+ * bakes with, with that character's bands), and writes one PNG per variant to
+ * art/<char>/preview_variants/. Each sheet starts with the variant's select swatch.
  *
- * Run: npx --yes tsx tools/variants/preview.ts
+ * Run: npx --yes tsx tools/variants/preview.ts [--char aeval|trekmore]
+ * Without --char every character in CHARACTERS is written; one whose atlases are not generated
+ * yet is skipped with a note. A frame missing from an atlas is skipped with a note.
  *
  * The PNG reader handles what the atlases and icons use (8-bit RGBA or RGB, not interlaced).
  */
 
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { deflateSync, inflateSync } from 'node:zlib';
-import { AEVAL_BODY_SHEET } from '../../src/characters/aeval/art/atlas.body';
-import { AEVAL_FX_SHEET } from '../../src/characters/aeval/art/atlas.fx';
 import type { ImageSheetData } from '../../src/core/types';
-import { VARIANT_COUNT, VARIANT_NAMES, remapPixels } from '../../src/render/palette';
+import { VARIANT_COUNT, remapPixels, variantNames, variantSwatches } from '../../src/render/palette';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const OUT_DIR = join(ROOT, 'art', 'aeval', 'preview_variants');
 const SCALE = 3;
 const GAP = 6;
 const BG = [0x1a, 0x1b, 0x26];
+const SWATCH_PX = 10;
 
-const BODY_FRAMES = ['moves_idle_0', 'special_wave_5', 'special_whirl_4', 'uptilt_spike_2'];
-const FX_FRAMES = ['orb3', 'orbBig5', 'crescent1', 'burst5', 'orbCharge7', 'geyser1'];
+/** Frames shown per character: a spread of body poses and the fx that carry the glow colour. */
+const CHARACTERS: Record<string, { body: string[]; fx: string[] }> = {
+  aeval: {
+    body: ['moves_idle_0', 'special_wave_5', 'special_whirl_4', 'uptilt_spike_2'],
+    fx: ['orb3', 'orbBig5', 'crescent1', 'burst5', 'orbCharge7', 'geyser1'],
+  },
+  trekmore: {
+    body: ['loco_idle_0', 'heavy_slash_4', 'parry_counter_5', 'step_strike_2', 'uspec_g_12', 'conB_hitStrong_1'],
+    fx: ['shadowSword0', 'shadowBurst1', 'swordRise1', 'counterFlash1', 'stepTrail0'],
+  },
+};
 
 interface Img { w: number; h: number; data: Uint8Array }
 
@@ -136,10 +146,46 @@ function crop(src: Img, x: number, y: number, w: number, h: number): Img {
   return { w, h, data };
 }
 
-function frameOf(atlas: Img, sheet: ImageSheetData, name: string): Img {
-  const r = sheet.frames[name];
-  if (r === undefined) throw new Error(`frame ${name} missing`);
-  return crop(atlas, r[0], r[1], r[2], r[3]);
+/** The named frames that exist in `sheet`, each cropped; missing names are reported and skipped. */
+function framesOf(atlas: Img, sheet: ImageSheetData, names: string[], report: string): Img[] {
+  const out: Img[] = [];
+  for (const name of names) {
+    const r = sheet.frames[name];
+    if (r === undefined) {
+      if (report !== '') console.log(`${report}: frame ${name} not in the atlas, skipped`);
+      continue;
+    }
+    out.push(crop(atlas, r[0], r[1], r[2], r[3]));
+  }
+  return out;
+}
+
+function swatchOf(hex: string): Img {
+  const data = new Uint8Array(SWATCH_PX * SWATCH_PX * 4);
+  const h = hex.charAt(0) === '#' ? hex.slice(1) : hex;
+  for (let i = 0; i < data.length; i += 4) {
+    data[i] = parseInt(h.slice(0, 2), 16);
+    data[i + 1] = parseInt(h.slice(2, 4), 16);
+    data[i + 2] = parseInt(h.slice(4, 6), 16);
+    data[i + 3] = 255;
+  }
+  return { w: SWATCH_PX, h: SWATCH_PX, data };
+}
+
+function isSheet(v: unknown): v is ImageSheetData {
+  return typeof v === 'object' && v !== null && typeof (v as ImageSheetData).url === 'string' &&
+    typeof (v as ImageSheetData).frames === 'object';
+}
+
+/** The ImageSheetData a generated atlas module exports, whatever its export name. */
+async function loadSheet(path: string): Promise<ImageSheetData | null> {
+  if (!existsSync(path)) return null;
+  const mod = (await import(pathToFileURL(path).href)) as Record<string, unknown>;
+  for (const key in mod) {
+    const value = mod[key];
+    if (isSheet(value)) return value;
+  }
+  return null;
 }
 
 /** Lay the pieces out left to right on one row per group, scaled, over the INK background. */
@@ -185,20 +231,52 @@ function sheetOf(rows: Img[][]): Img {
   return { w, h, data };
 }
 
-function main(): void {
-  const body = atlasOf(AEVAL_BODY_SHEET);
-  const fx = atlasOf(AEVAL_FX_SHEET);
-  const bust = decodePng(new Uint8Array(readFileSync(join(ROOT, 'public', 'icons', 'aeval-bust.png'))));
-  mkdirSync(OUT_DIR, { recursive: true });
+/** Write `charId`'s four previews. Returns false when its atlases are not generated yet. */
+async function previewChar(charId: string): Promise<boolean> {
+  const frames = CHARACTERS[charId];
+  const art = join(ROOT, 'src', 'characters', charId, 'art');
+  const bodySheet = await loadSheet(join(art, 'atlas.body.ts'));
+  const fxSheet = await loadSheet(join(art, 'atlas.fx.ts'));
+  if (bodySheet === null || fxSheet === null) {
+    console.log(`${charId}: no generated atlases in ${art}, skipped`);
+    return false;
+  }
+  const body = atlasOf(bodySheet);
+  const fx = atlasOf(fxSheet);
+  const bustPath = join(ROOT, 'public', 'icons', `${charId}-bust.png`);
+  const bust = existsSync(bustPath) ? decodePng(new Uint8Array(readFileSync(bustPath))) : null;
+  if (bust === null) console.log(`${charId}: no ${bustPath}, bust skipped`);
+  const outDir = join(ROOT, 'art', charId, 'preview_variants');
+  mkdirSync(outDir, { recursive: true });
+  const names = variantNames(charId);
+  const swatches = variantSwatches(charId);
   for (let v = 0; v < VARIANT_COUNT; v++) {
-    const bodyRow = BODY_FRAMES.map((n) => frameOf(body, AEVAL_BODY_SHEET, n));
-    const fxRow = FX_FRAMES.map((n) => frameOf(fx, AEVAL_FX_SHEET, n));
-    const iconRow = [{ w: bust.w, h: bust.h, data: bust.data.slice() }];
-    for (const p of [...bodyRow, ...fxRow, ...iconRow]) remapPixels(new Uint8ClampedArray(p.data.buffer), v);
-    const out = join(OUT_DIR, `${v}-${VARIANT_NAMES[v].toLowerCase()}.png`);
-    writeFileSync(out, encodePng(sheetOf([bodyRow, fxRow, iconRow])));
+    const report = v === 0 ? charId : '';
+    const bodyRow = framesOf(body, bodySheet, frames.body, report);
+    const fxRow = framesOf(fx, fxSheet, frames.fx, report);
+    const iconRow: Img[] = bust === null ? [] : [{ w: bust.w, h: bust.h, data: bust.data.slice() }];
+    for (const p of [...bodyRow, ...fxRow, ...iconRow]) remapPixels(new Uint8ClampedArray(p.data.buffer), v, charId);
+    const rows = [[swatchOf(swatches[v])], bodyRow, fxRow, iconRow].filter((r) => r.length > 0);
+    const out = join(outDir, `${v}-${names[v].toLowerCase()}.png`);
+    writeFileSync(out, encodePng(sheetOf(rows)));
     console.log(out);
+  }
+  return true;
+}
+
+async function main(): Promise<void> {
+  const at = process.argv.indexOf('--char');
+  const only = at >= 0 ? process.argv[at + 1] : undefined;
+  if (only !== undefined && CHARACTERS[only] === undefined) {
+    console.error(`unknown --char ${only}; known: ${Object.keys(CHARACTERS).join(', ')}`);
+    process.exitCode = 1;
+    return;
+  }
+  const ids = only === undefined ? Object.keys(CHARACTERS) : [only];
+  for (const id of ids) {
+    const done = await previewChar(id);
+    if (!done && only !== undefined) process.exitCode = 1;
   }
 }
 
-main();
+await main();

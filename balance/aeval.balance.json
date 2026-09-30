@@ -243,12 +243,12 @@
     },
     "uair": {
       "damage": 8,
-      "startup": 10,
+      "startup": 14,
       "active": [
-        10,
-        14
+        14,
+        18
       ],
-      "total": 33,
+      "total": 37,
       "landingLag": 12,
       "angle": 85,
       "bkb": 26,
@@ -256,21 +256,22 @@
       "role": "juggle",
       "animation": "uair",
       "reachTopY": -110,
-      "change_2026_09_29": "damage 9 to 8, startup 8 to 10, total 30 to 33, landing lag 11 to 12, javelin top -114 to -110: juggles were too safe and rewarding"
+      "change_2026_09_29": "damage 9 to 8, startup 8 to 10, total 30 to 33, landing lag 11 to 12, javelin top -114 to -110: juggles were too safe and rewarding",
+      "change_2026_09_30": "startup 10 to 14, active 10-14 to 14-18, total 33 to 37 (endlag unchanged): the owner wants it slower still; anim holds [5,5,7,16] to [7,7,7,16] so the javelin crop lands on frame 14"
     },
     "dair": {
-      "damage": 12,
-      "startup": 12,
+      "damage": 14,
+      "startup": 6,
       "active": [
-        12,
-        16
+        6,
+        6
       ],
-      "total": 36,
-      "landingLag": 16,
-      "angle": 270,
-      "bkb": 30,
-      "kbg": 85,
-      "role": "commitment spike",
+      "total": 30,
+      "landingLag": 20,
+      "angle": 275,
+      "bkb": 50,
+      "kbg": 80,
+      "role": "dive smash: invulnerable straight drop, spike on contact",
       "animation": "dair",
       "hitsLedge": true,
       "bounceOnHit": {
@@ -279,23 +280,35 @@
         "restoresAirDodge": true,
         "restoresDoubleJump": false
       },
-      "change_2026_09_29": "bounces on a body hit like the SSBU dair hop: vy -3.5 (short hop), air dodge back, actionable 10 frames after hitlag instead of 20 more move frames"
+      "change_2026_09_29": "bounces on a body hit like the SSBU dair hop: vy -3.5 (short hop), air dodge back, actionable 10 frames after hitlag instead of 20 more move frames",
+      "activeNote": "pinned on frame 6 for the whole dive, so the spike is out until it meets a fighter, a shield or the ground",
+      "dive": {
+        "frame": 6,
+        "vy": 7,
+        "fastFallForReference": 5,
+        "horizontal": "vx zeroed every dive frame, one frame of air acceleration (0.14 px) is the only drift",
+        "invulnerable": "every dive frame, none in the landing lag",
+        "ends": "a hit on a fighter or shield, the ground (20 frames landing lag), or the blast zone",
+        "shieldActionableIn": 15,
+        "shieldFrameAdvantage": -4
+      },
+      "change_2026_09_30": "dive smash: startup 12 to 6, then an invulnerable 7 px/frame drop until contact or ground; damage 12 to 14, angle 270 to 275, bkb 30 to 50, kbg 85 to 80; landing lag 16 to 20; total 36 to 30; off a shield it bounces but acts 15 frames after hitlag (about -4); owner request"
     },
     "nspecial": {
       "damage": 4,
-      "startup": 9,
+      "startup": 3,
       "projectile": "orb",
       "projectileSpeed": 3.5,
       "lifetime": 48,
       "role": "slow durable zoning",
       "animation": "nspecial",
-      "total": 31,
+      "total": 12,
       "bkb": 14,
       "kbg": 30,
       "radius": 8,
       "charged": {
-        "startup": 21,
-        "total": 43,
+        "startup": 15,
+        "total": 24,
         "projectileSpeed": 9.5,
         "lifetime": 34,
         "damage": 16,
@@ -317,7 +330,9 @@
         "full": 8
       },
       "healFraction": 0.35,
-      "change_2026_09_29": "tap cast frame 11 to 9 and move 40 to 31, chargeCastFrames 16 to 12 (full charge fires on 21, was 27; move 43, was 56); charge length unchanged. A direct orb hit heals Aeval 35 percent of the damage dealt, floor 0"
+      "change_2026_09_29": "tap cast frame 11 to 9 and move 40 to 31, chargeCastFrames 16 to 12 (full charge fires on 21, was 27; move 43, was 56); charge length unchanged. A direct orb hit heals Aeval 35 percent of the damage dealt, floor 0",
+      "chargeHoldFrames": 60,
+      "change_2026_09_30": "tap cast frame 9 to 3 and move 31 to 12 (about a third); chargeCastFrames 12 unchanged, so a full charge fires on 15 of 24 (was 21 of 43). The 60-frame hold to full charge (TUNING.input.chargeMax, shared with smashes) already exceeds the 24-frame charged cast, so the hold is unchanged. Reading of the owner line: the charge and attack should be equal if not more charge"
     },
     "sspecial": {
       "damage": 9,
@@ -330,9 +345,13 @@
       "animation": "sspecial",
       "returnFrame": 57,
       "bkb": 24,
-      "kbg": 44,
+      "kbg": 40,
       "strength": 4,
-      "fighterMovement": "none (the +2 vx on frame 8 was removed)"
+      "fighterMovement": "none (the +2 vx on frame 8 was removed)",
+      "total": 30,
+      "onePerOwner": true,
+      "shieldBreaksIt": true,
+      "change_2026_09_30": "one crescent at a time (a press while hers is out does nothing, she stays actionable); total 42 to 30 with the frame 10 spawn unchanged, so she leaves the throw pose 12 frames sooner; kbg 44 to 40 (KO 197 to 220, kb at 100 71.2 to 66.9) for a shorter victim tumble; a shield now breaks it"
     },
     "uspecial": {
       "damage": 8,
@@ -382,7 +401,9 @@
       "finalBkb": 68,
       "finalKbg": 153,
       "role": "space control trap, not a free kill",
-      "animation": "dspecial"
+      "animation": "dspecial",
+      "healFraction": 0.5,
+      "change_2026_09_30": "lifesteal: each hit that lands on a body heals Aeval half its damage, the orb drain rule; 0.5 rather than the orb 0.35 because it is a committal multi-hit trap worth 10 at most"
     }
   },
   "character_scaling_system": {

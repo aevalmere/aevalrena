@@ -1,0 +1,245 @@
+{
+ "counts": {
+  "loco_idle": 8,
+  "loco_walk": 10,
+  "loco_run": 7,
+  "loco_dash": 3,
+  "air_jump": 10,
+  "air_fall": 10,
+  "air_stepR": 8,
+  "air_stepL": 8,
+  "parry_parry": 4,
+  "parry_counter": 9,
+  "heavy_slash": 6,
+  "step_ground": 8,
+  "step_front": 12,
+  "step_side": 10,
+  "step_strike": 4,
+  "uspec": 20,
+  "nspec": 20,
+  "clone": 20,
+  "conB_hero": 2,
+  "conB_idle": 7,
+  "conB_taunt": 4,
+  "conB_slash": 4,
+  "conB_ranged": 3,
+  "conB_aerial": 3,
+  "conB_hitLight": 3,
+  "conB_hitStrong": 4,
+  "conB_ledge": 5,
+  "conA_idle": 4,
+  "conA_slash": 3,
+  "conA_summon": 4,
+  "conA_aerial": 1,
+  "conA_erupt": 2,
+  "conA_cloneIdle": 3,
+  "conA_emerge": 3,
+  "conA_hands": 1,
+  "pix_downed": 1
+ },
+ "fallbackRows": [
+  "loco_run",
+  "loco_dash",
+  "air_jump",
+  "air_stepR",
+  "air_stepL",
+  "parry_counter[735]",
+  "step_ground",
+  "step_front",
+  "step_side",
+  "step_strike",
+  "conB_hero",
+  "conB_taunt",
+  "conB_slash",
+  "conB_ranged",
+  "conB_aerial",
+  "conB_hitStrong"
+ ],
+ "scaleTable": {
+  "loco": {
+   "stand": 0.47826,
+   "pose": null,
+   "sword": null,
+   "used": "stand",
+   "scale": 0.47826,
+   "diffPct": null
+  },
+  "air": {
+   "stand": null,
+   "pose": null,
+   "sword": 0.46822,
+   "used": "sword",
+   "scale": 0.46822,
+   "diffPct": null
+  },
+  "parry": {
+   "stand": 0.37671,
+   "pose": null,
+   "sword": 0.40691,
+   "used": "stand",
+   "scale": 0.37671,
+   "diffPct": 8.0
+  },
+  "heavy": {
+   "stand": null,
+   "pose": 0.30916,
+   "sword": 0.30998,
+   "used": "pose",
+   "scale": 0.30916,
+   "diffPct": 0.3
+  },
+  "step": {
+   "stand": null,
+   "pose": 0.56366,
+   "sword": 0.56957,
+   "used": "sword",
+   "scale": 0.56957,
+   "diffPct": 1.0
+  },
+  "step_front": {
+   "stand": 0.5,
+   "pose": null,
+   "sword": null,
+   "used": "stand",
+   "scale": 0.5,
+   "diffPct": null
+  },
+  "step_strike": {
+   "stand": null,
+   "pose": null,
+   "sword": 0.38172,
+   "used": "sword",
+   "scale": 0.38172,
+   "diffPct": null
+  },
+  "uspec": {
+   "stand": 0.29255,
+   "pose": null,
+   "sword": null,
+   "used": "stand",
+   "scale": 0.29255,
+   "diffPct": null
+  },
+  "nspec": {
+   "stand": 0.24664,
+   "pose": null,
+   "sword": null,
+   "used": "stand",
+   "scale": 0.24664,
+   "diffPct": null
+  },
+  "clone": {
+   "stand": null,
+   "pose": 0.40753,
+   "sword": null,
+   "used": "pose",
+   "scale": 0.40753,
+   "diffPct": null
+  },
+  "conB": {
+   "stand": 0.5914,
+   "pose": null,
+   "sword": null,
+   "used": "stand",
+   "scale": 0.5914,
+   "diffPct": null
+  },
+  "conB_taunt": {
+   "stand": 0.6962,
+   "pose": null,
+   "sword": null,
+   "used": "stand",
+   "scale": 0.6962,
+   "diffPct": null
+  },
+  "conB_slash": {
+   "used": "likeRow taunt",
+   "scale": 0.6962
+  },
+  "conB_ranged": {
+   "used": "likeRow taunt",
+   "scale": 0.6962
+  },
+  "conB_aerial": {
+   "used": "likeRow taunt",
+   "scale": 0.6962
+  },
+  "conB_hitLight": {
+   "used": "likeRow taunt",
+   "scale": 0.6962
+  },
+  "conB_hitStrong": {
+   "used": "likeRow taunt",
+   "scale": 0.6962
+  },
+  "conB_ledge": {
+   "used": "likeRow taunt",
+   "scale": 0.6962
+  },
+  "conA": {
+   "stand": 0.35948,
+   "pose": null,
+   "sword": null,
+   "used": "stand",
+   "scale": 0.35948,
+   "diffPct": null
+  },
+  "conA_slash": {
+   "stand": null,
+   "pose": 0.70045,
+   "sword": null,
+   "used": "pose",
+   "scale": 0.70045,
+   "diffPct": null
+  },
+  "conA_summon": {
+   "stand": 0.67901,
+   "pose": null,
+   "sword": null,
+   "used": "stand",
+   "scale": 0.67901,
+   "diffPct": null
+  },
+  "conA_aerial": {
+   "used": "likeRow slash",
+   "scale": 0.70045
+  },
+  "conA_erupt": {
+   "used": "likeRow slash",
+   "scale": 0.70045
+  },
+  "conA_cloneIdle": {
+   "stand": 0.40441,
+   "pose": null,
+   "sword": null,
+   "used": "stand",
+   "scale": 0.40441,
+   "diffPct": null
+  },
+  "conA_emerge": {
+   "stand": 0.42636,
+   "pose": null,
+   "sword": null,
+   "used": "stand",
+   "scale": 0.42636,
+   "diffPct": null
+  },
+  "conA_hands": {
+   "stand": 0.42636,
+   "pose": null,
+   "sword": null,
+   "used": "stand",
+   "scale": 0.42636,
+   "diffPct": null
+  },
+  "pix": {
+   "stand": null,
+   "pose": 0.625,
+   "sword": null,
+   "used": "fitWidth",
+   "scale": 0.625,
+   "diffPct": null
+  }
+ },
+ "swordLen": 35.59
+}

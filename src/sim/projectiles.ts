@@ -1,12 +1,21 @@
 import { CHARACTER_DEFS } from '../characters/registry';
-import type { GameState, MoveId, ProjectileDef, ProjectileState } from '../core/types';
+import type { AimDir, GameState, MoveId, ProjectileDef, ProjectileState } from '../core/types';
 import { stageOf, type SimFighter } from './state';
 
-/** Every projectile def in the game, keyed by def id. Built once at module load. */
-export const PROJECTILE_DEFS: Record<string, ProjectileDef> = buildProjectileDefs();
+/** Every projectile def in the game, keyed by def id. Built at module load; see rebuildProjectileDefs. */
+export const PROJECTILE_DEFS: Record<string, ProjectileDef> = buildProjectileDefs({});
 
-function buildProjectileDefs(): Record<string, ProjectileDef> {
-  const out: Record<string, ProjectileDef> = {};
+/**
+ * Rescans CHARACTER_DEFS into PROJECTILE_DEFS in place (same object, so every importer sees it).
+ * For a def registered after module load, such as a test character.
+ */
+export function rebuildProjectileDefs(): void {
+  const keys = Object.keys(PROJECTILE_DEFS);
+  for (let i = 0; i < keys.length; i++) delete PROJECTILE_DEFS[keys[i]];
+  buildProjectileDefs(PROJECTILE_DEFS);
+}
+
+function buildProjectileDefs(out: Record<string, ProjectileDef>): Record<string, ProjectileDef> {
   const charIds = Object.keys(CHARACTER_DEFS).sort();
   for (let c = 0; c < charIds.length; c++) {
     const moves = CHARACTER_DEFS[charIds[c]].moves;
@@ -58,6 +67,13 @@ function freeSlot(state: GameState): ProjectileState {
   return fresh;
 }
 
+/**
+ * cos and sin of AIM_ANGLES (0, 45, 90, -45, -90 degrees) as constants, so no trig runs in the
+ * sim and AI code that mirrors the aim stays inside its no-trig rule.
+ */
+const AIM_COS: readonly number[] = [1, Math.SQRT1_2, 0, Math.SQRT1_2, 0];
+const AIM_SIN: readonly number[] = [0, Math.SQRT1_2, 1, -Math.SQRT1_2, -1];
+
 function spawnAt(
   state: GameState,
   owner: number,
@@ -69,6 +85,7 @@ function spawnAt(
   scale: number,
   charge: number,
   hitSlots = 0,
+  aim: AimDir = 0,
 ): void {
   const p = freeSlot(state);
   p.id = state.nextProjectileId++;
@@ -76,8 +93,14 @@ function spawnAt(
   p.defId = def.id;
   p.x = x;
   p.y = y;
-  p.vx = chargedStat(def, charge, 'vx') * facing;
-  p.vy = def.vy;
+  if (def.aim === true) {
+    const speed = chargedStat(def, charge, 'vx');
+    p.vx = speed * AIM_COS[aim] * facing;
+    p.vy = -speed * AIM_SIN[aim];
+  } else {
+    p.vx = chargedStat(def, charge, 'vx') * facing;
+    p.vy = def.vy;
+  }
   p.facing = facing;
   p.age = 0;
   p.hitSlots = hitSlots;
@@ -85,7 +108,7 @@ function spawnAt(
   // A dead slot is handed back with the last projectile's values still on it, so
   // every per-instance field is reset here as well as on a fresh one.
   p.power = power;
-  p.scale = scale;
+  p.scale = def.fixedScale === true ? 1 : scale;
   p.charge = charge;
   p.returned = false;
   state.events.push({ type: 'projectileSpawn', x: p.x, y: p.y, slot: owner, defId: def.id });
@@ -100,24 +123,25 @@ function spawnAt(
 export function spawnProjectile(
   state: GameState, f: SimFighter, def: ProjectileDef, power = 1, scale = 1, charge = 0,
 ): void {
-  spawnAt(state, f.slot, f.facing, f.x + def.x * f.facing, f.y + def.y, def, power, scale, charge);
+  spawnAt(state, f.slot, f.facing, f.x + def.x * f.facing, f.y + def.y, def, power, scale, charge, 0, f.aimDir);
 }
 
 /**
  * Retire a projectile and detonate its burst where it died. The freed slot can
  * be handed straight back for the burst, which is why the position is read into
- * arguments before anything is written.
+ * arguments before anything is written. `burst` false retires it with no burst
+ * (a parried or recalled shot).
  */
-export function killProjectile(state: GameState, p: ProjectileState, def: ProjectileDef): void {
+export function killProjectile(state: GameState, p: ProjectileState, def: ProjectileDef, burst = true): void {
   p.alive = false;
   state.events.push({ type: 'projectileDie', x: p.x, y: p.y, defId: p.defId });
-  if (def.burstId === undefined) return;
-  const burst = PROJECTILE_DEFS[def.burstId];
-  if (burst === undefined) return;
+  if (!burst || def.burstId === undefined) return;
+  const burstDef = PROJECTILE_DEFS[def.burstId];
+  if (burstDef === undefined) return;
   // The burst is as strong and as big as the shot that carried it, and skips every fighter
   // that shot already hit: a burst never re-launches (and so never overrides) its orb's hit.
   // p may be the very slot handed back to the burst, so its fields are read first.
-  spawnAt(state, p.owner, p.facing, p.x, p.y, burst, p.power, p.scale, p.charge ?? 0, p.hitSlots);
+  spawnAt(state, p.owner, p.facing, p.x, p.y, burstDef, p.power, p.scale, p.charge ?? 0, p.hitSlots);
 }
 
 /** Step 5 of the frame: move, age, die on lifetime or outside the blast zone. */
