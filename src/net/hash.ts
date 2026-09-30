@@ -1,9 +1,10 @@
-import type { GameState } from '../core/types';
+import type { FighterState, GameState } from '../core/types';
 
 /**
  * Cheap desync fingerprint: 32-bit FNV-1a over the bytes of the numbers that matter for play
- * (frame, RNG, every fighter's position, velocity, percent, stocks, action and action frame, and
- * every projectile). Floats are hashed by their exact IEEE bits, so any drift shows.
+ * (frame, RNG, every fighter's position, velocity, percent, stocks, action and action frame, its
+ * echo, counter and air-lock state, and every projectile). Floats are hashed by their exact IEEE
+ * bits, so any drift shows.
  */
 
 const f64 = new Float64Array(1);
@@ -51,6 +52,19 @@ export function hashGameState(state: GameState): number {
     h = mixNum(h, f.hitstun);
     h = mixStr(h, f.action);
     h = mixStr(h, f.moveId ?? '-');
+    // Trekmore state that decides later frames without moving anything yet: a pending echo, a
+    // stored counter, the air locks and the latched aim. Absent (hand-built states) hashes as 0.
+    const sf = f as FighterState & { echoHitGroups?: number; counterDamage?: number; airLock?: number };
+    h = mixStr(h, sf.echoMove ?? '-');
+    h = mixNum(h, sf.echoAge ?? 0);
+    h = mixNum(h, sf.echoX ?? 0);
+    h = mixNum(h, sf.echoY ?? 0);
+    h = mixNum(h, sf.echoFacing ?? 0);
+    h = mixNum(h, sf.echoHitGroups ?? 0);
+    h = mixNum(h, sf.onBranch === true ? 1 : 0);
+    h = mixNum(h, sf.aimDir ?? 0);
+    h = mixNum(h, sf.counterDamage ?? 0);
+    h = mixNum(h, sf.airLock ?? 0);
   }
   h = mixNum(h, state.projectiles.length);
   for (let i = 0; i < state.projectiles.length; i++) {

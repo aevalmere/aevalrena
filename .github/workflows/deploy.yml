@@ -25,6 +25,9 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+        env:
+          # The LAN short-code helper (docs/LAN.md 11.9). Unset: the site's own origin.
+          VITE_RENDEZVOUS_URL: ${{ vars.RENDEZVOUS_URL }}
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

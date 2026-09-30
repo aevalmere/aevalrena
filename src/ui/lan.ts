@@ -1,22 +1,25 @@
 import { NETWORK_HINT, type Invite } from '../net/browserhost';
 import { lanClient, type LobbyRow } from '../net/client';
+import { CODE_ALPHABET, CODE_LENGTH, normalizeCode } from '../net/signal/codes';
 import {
   AUTO_DELAY, defaultSettings, LAN_PORT, LOBBY_MAX, SIM_LATENCIES, type LobbyMember, type LobbySettings,
 } from '../net/protocol';
 import { LOCAL_TAG } from '../net/view';
-import { VARIANT_COUNT, VARIANT_NAMES, VARIANT_SWATCHES, clampVariant } from '../render/palette';
+import { VARIANT_COUNT, clampVariant, variantNames, variantSwatches } from '../render/palette';
 import type { MenuCtx } from './context';
-import { encodeQr, qrSvg } from './qr';
 import { accentVars, PLAYER_ACCENTS, TEAM_NAMES, uiAsset } from './theme';
 
 /**
  * LAN screen (docs/LAN.md). Views, picked from the LAN client's state:
  *
- * - connect: only when no agent answers at this page's address (the page came from the Vite dev
- *   server, say): type the agent address and a name;
- * - lobby list: every lobby on the Wi-Fi (this agent's and every discovered agent's), refreshed
- *   each second, plus "join by address" and the create form;
- * - lobby: settings (the host edits), the four slots with pings, ready or start, rematch votes.
+ * - main (in browser, the default): Host game, or type a 4 letter code and Join. Short codes go
+ *   through the online helper (src/net/signal); when it is missing, the long-code view instead;
+ * - long codes: the host copies one join code per guest by hand and pastes the answers back;
+ * - advanced: Local agent and Long codes;
+ * - agent connect: only when no agent answers at this page's address: type the agent address;
+ * - agent lobby list: every lobby on the Wi-Fi, refreshed each second, and the create form;
+ * - lobby: settings (the host edits), the four slots with pings, ready or start, rematch votes,
+ *   and for a short-code host the game code in large type.
  *
  * The local player's card is always first, coloured as P1 and tagged "P1 (you)"; the host's slot
  * numbers stay authoritative underneath.
@@ -26,7 +29,6 @@ const NAME_KEY = 'aevalrena.lan.name';
 const ADDR_KEY = 'aevalrena.lan.address';
 const CHAR_KEY = 'aevalrena.lan.char';
 const DRAFT_KEY = 'aevalrena.lan.draft';
-const MODE_KEY = 'aevalrena.lan.mode';
 
 function load(key: string, fallback: string): string {
   try {
@@ -104,11 +106,7 @@ export const CSS = `
 .lan-warn { color: #ffb38a; }
 .lan-hint { font-size: 0.62rem; letter-spacing: 0.2em; text-transform: uppercase; color: #7d8699; }
 .lan-field.lan-code-field { text-transform: none; letter-spacing: 0.02em; font-weight: 400; min-width: 0; flex: 1; }
-.lan-codebox { display: flex; gap: 0.9rem; align-items: flex-start; margin-top: 0.3rem; }
-@media (max-width: 560px) { .lan-codebox { flex-direction: column; } }
-.lan-qr { flex-shrink: 0; width: 11rem; height: 11rem; line-height: 0; }
-.lan-qr svg { width: 100%; height: 100%; image-rendering: pixelated; }
-.lan-codeside { display: flex; flex-direction: column; gap: 0.5rem; min-width: 0; flex: 1; }
+.lan-codeside { display: flex; flex-direction: column; gap: 0.5rem; min-width: 0; flex: 1; margin-top: 0.3rem; }
 .lan-code {
   font-family: var(--font-ui); font-size: 0.72rem; line-height: 1.45; letter-spacing: 0.02em; text-transform: none;
   word-break: break-all; user-select: all; color: var(--text); padding: 0.4rem 0.5rem;
@@ -117,6 +115,21 @@ export const CSS = `
 .lan-invites { display: flex; flex-direction: column; gap: 0.6rem; margin-top: 0.2rem; }
 .lan-invite { --chamfer: 10px; padding: 0.65rem 0.8rem 0.75rem; display: flex; flex-direction: column; gap: 0.35rem; }
 .lan-note { font-size: 0.72rem; letter-spacing: 0.08em; line-height: 1.5; color: #9aa4b8; }
+.lan-letters { display: flex; gap: 0.5rem; align-items: center; margin-top: 0.2rem; }
+.lan-letter {
+  width: 2.6rem; height: 3.1rem; display: inline-flex; align-items: center; justify-content: center;
+  font-family: var(--font-display); font-size: 2rem; font-weight: 600; color: var(--text); cursor: text;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border-bottom: 2px solid color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.lan-letter-empty { color: color-mix(in srgb, var(--accent) 30%, #3a4256); }
+.lan-letter:focus { outline: none; border-bottom-color: var(--accent); color: var(--accent); text-shadow: var(--glow); background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.lan-status { font-size: 0.78rem; letter-spacing: 0.18em; text-transform: uppercase; color: var(--accent); min-height: 1.2em; }
+.lan-gamecode { --chamfer: 12px; padding: 0.8rem 1rem 0.9rem; display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 1.4rem; }
+.lan-gamecode-code { font-family: var(--font-display); font-size: 3.4rem; font-weight: 600; letter-spacing: 0.3em; line-height: 1; color: var(--accent); text-shadow: var(--glow); user-select: all; }
+.lan-gamecode-side { display: flex; flex-direction: column; gap: 0.3rem; min-width: 12rem; flex: 1; }
+.lan-advanced { align-self: flex-start; background: none; border: 0; padding: 0.2rem 0; cursor: pointer; font-family: var(--font-ui); font-size: 0.62rem; letter-spacing: 0.2em; text-transform: uppercase; color: #7d8699; text-decoration: underline; text-underline-offset: 3px; }
+.lan-advanced:hover, .lan-advanced:focus-visible { color: var(--accent); outline: none; }
 `;
 
 function h<K extends keyof HTMLElementTagNameMap>(tag: K, cls: string, parent: HTMLElement | null, text?: string): HTMLElementTagNameMap[K] {
@@ -158,15 +171,14 @@ function defaultAgentAddress(): string {
 }
 
 let autoTried = false;
-/** Browser mode: the join code being typed, and the answer code the host is typing. */
+/** Browser mode: the short code being typed, one letter per box ('' for an empty box). */
+const shortCode: string[] = Array.from({ length: CODE_LENGTH }, () => '');
+/** Long codes: the join code being pasted, and the answer code the host is pasting. */
 let joinCode = '';
 let answerCode = '';
-
-/** The link a join code's QR carries: this page with the code after #join=. */
-function joinLink(code: string): string {
-  if (location.protocol !== 'http:' && location.protocol !== 'https:') return code;
-  return `${location.origin}${location.pathname}#join=${code}`;
-}
+/** Browser mode sub-views: the Advanced list, and long codes picked there. */
+let advanced = false;
+let longCodes = false;
 
 function copyText(text: string, done: (ok: boolean) => void): void {
   const fallback = (): void => {
@@ -211,11 +223,9 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
   const stageName = (id: string): string => stages.find((s) => s.id === id)?.name ?? id;
   const charName = (id: string): string => characters.find((c) => c.id === id)?.name ?? id;
 
-  // A scanned #join= link: the browser mode's join field starts filled in.
-  if (client.pendingJoinCode !== '') {
-    joinCode = client.pendingJoinCode;
-    client.pendingJoinCode = '';
-  }
+  // The default LAN screen is the in-browser one; the agent mode sits under Advanced.
+  if (client.mode === 'none') client.setMode('browser');
+  client.checkHelper();
 
   /** Agent mode: talk to the agent that served this page without asking. */
   function autoConnect(): void {
@@ -413,38 +423,202 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
     });
   }
 
-  /** First view: how this device plays on the LAN. */
-  function renderChoose(panel: HTMLElement): void {
-    h('div', 'lan-sub', panel, 'Pick how this device plays on the LAN');
-    if (focusKey === '') focusKey = load(MODE_KEY, 'browser') === 'agent' ? 'mode-agent' : 'mode-browser';
-    const list = h('div', 'lan-list', panel);
-    const browserRow = row(list, 'In browser', 'mode-browser', () => {
-      focusKey = 'lobby-create';
-      store(MODE_KEY, 'browser');
-      client.setMode('browser');
+  /** Name and character, for joining or hosting. */
+  function youRows(right: HTMLElement): void {
+    h('div', 'lan-hint', right, 'You');
+    const nameRow = row(right, 'Name', 'my-name');
+    field(nameRow, name, 'Your name', 12, (v) => {
+      name = v;
+      client.name = v.trim().slice(0, 12) || 'PLAYER';
+      store(NAME_KEY, client.name);
+    }).classList.add('lan-value');
+    stepRow(right, 'Character', 'my-char', charName(charId), characters.length > 1 ? (d) => {
+      const i = characters.findIndex((c) => c.id === charId);
+      charId = characters[(i + d + characters.length) % characters.length].id;
+      store(CHAR_KEY, charId);
+      paint(true);
+    } : null);
+  }
+
+  function hostGame(): void {
+    focusKey = 'start';
+    client.name = name.trim().slice(0, 12) || 'PLAYER';
+    store(DRAFT_KEY, JSON.stringify(draft));
+    client.hostGame(draft, charId, { stages: stages.map((s) => s.id), characters: characters.map((c) => c.id) });
+  }
+
+  function joinShort(): void {
+    const code = shortCode.join('');
+    if (code.length < CODE_LENGTH) {
+      client.message = 'Type the 4 letter code the host sees';
+      focusKey = `code-${shortCode.findIndex((c) => c === '')}`;
+      paint(true);
+      return;
+    }
+    client.message = '';
+    client.name = name.trim().slice(0, 12) || 'PLAYER';
+    focusKey = 'join-go';
+    client.joinRoom(code, charId);
+  }
+
+  /**
+   * The code boxes. Keyboard: type letters (focus moves on), Backspace, paste. Pad or arrows:
+   * Left and Right step the focused box through the alphabet, Up and Down move between boxes.
+   */
+  function codeBoxes(parent: HTMLElement, enabled: boolean): void {
+    const wrap = h('div', 'lan-letters', parent);
+    wrap.setAttribute('role', 'group');
+    wrap.setAttribute('aria-label', 'Game code');
+    const boxes: HTMLElement[] = [];
+    const show = (i: number): void => {
+      const b = boxes[i];
+      b.textContent = shortCode[i] === '' ? '_' : shortCode[i];
+      b.classList.toggle('lan-letter-empty', shortCode[i] === '');
+    };
+    const focusBox = (i: number): void => {
+      const target = i >= CODE_LENGTH ? container.querySelector<HTMLElement>('[data-nav="join-go"]') : boxes[Math.max(0, i)];
+      target?.focus();
+    };
+    const fill = (text: string, from: number): void => {
+      const letters = normalizeCode(text);
+      let i = from;
+      for (const ch of letters) {
+        if (i >= CODE_LENGTH) break;
+        shortCode[i] = ch;
+        show(i);
+        i++;
+      }
+      focusBox(i);
+    };
+    for (let i = 0; i < CODE_LENGTH; i++) {
+      const b = h('span', 'lan-letter', wrap);
+      b.setAttribute('role', 'textbox');
+      b.setAttribute('aria-label', `Code letter ${i + 1}`);
+      boxes.push(b);
+      show(i);
+      if (!enabled) continue;
+      nav(b, `code-${i}`);
+      b.addEventListener('click', () => b.focus());
+      const step = (dir: -1 | 1): void => {
+        const n = CODE_ALPHABET.length;
+        const at = CODE_ALPHABET.indexOf(shortCode[i]);
+        shortCode[i] = CODE_ALPHABET[at < 0 ? (dir > 0 ? 0 : n - 1) : (at + dir + n) % n];
+        show(i);
+      };
+      steppers.set(b, step);
+      b.addEventListener('keydown', (e) => {
+        if (e.ctrlKey || e.metaKey || e.altKey) return;
+        if (e.key.length === 1) {
+          e.preventDefault();
+          e.stopPropagation();
+          if (normalizeCode(e.key) !== '') fill(e.key, i);
+          return;
+        }
+        if (e.code === 'Backspace' || e.code === 'Delete') {
+          e.preventDefault();
+          e.stopPropagation();
+          if (shortCode[i] === '' && i > 0 && e.code === 'Backspace') {
+            shortCode[i - 1] = '';
+            show(i - 1);
+            focusBox(i - 1);
+          } else {
+            shortCode[i] = '';
+            show(i);
+          }
+        } else if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
+          e.preventDefault();
+          e.stopPropagation();
+          step(e.code === 'ArrowLeft' ? -1 : 1);
+        } else if (e.code === 'Enter') {
+          e.preventDefault();
+          e.stopPropagation();
+          joinShort();
+        }
+      });
+      b.addEventListener('paste', (e) => {
+        e.preventDefault();
+        fill(e.clipboardData?.getData('text') ?? '', 0);
+      });
+    }
+  }
+
+  /** In browser, the default view: Host game, or Join with a code. */
+  function renderMain(panel: HTMLElement): void {
+    h('div', 'lan-sub', panel, 'Play with friends on the same Wi-Fi');
+    const cols = h('div', 'lan-cols', panel);
+    const left = h('div', 'lan-list', cols);
+    const checking = client.helper !== 'ok';
+    const g = client.guest;
+    const joining = g.state === 'waiting' || g.state === 'connecting' || g.state === 'connected';
+
+    h('div', 'lan-hint', left, 'Host');
+    const hostLine = h('div', 'lan-actions', left);
+    button(hostLine, 'Host game', 'host', hostGame, checking || joining);
+    h('div', 'lan-note', left, 'You get a short code. Your friends type it to join.');
+
+    h('div', 'lan-hint', left, 'Join');
+    const joinLine = h('div', 'lan-inline', left);
+    codeBoxes(joinLine, !joining);
+    if (joining) {
+      button(joinLine, 'Cancel', 'join-cancel', () => client.cancelGuest());
+      const text = g.state === 'waiting' ? 'Waiting for host' : g.state === 'connecting' ? 'Connecting' : 'Connected';
+      h('div', 'lan-status', left, text);
+    } else {
+      button(joinLine, g.state === 'failed' ? 'Retry' : 'Join', 'join-go', joinShort, checking);
+      if (g.state === 'failed') {
+        h('div', 'lan-note lan-warn', left, g.message);
+        if (g.network === true) h('div', 'lan-note', left, NETWORK_HINT);
+      } else {
+        h('div', 'lan-note', left, 'Type the code the host sees, then Join.');
+      }
+    }
+    if (client.helper === 'checking' || client.helper === 'unknown') h('div', 'lan-note', left, 'Checking the online helper...');
+
+    youRows(h('div', 'lan-list', cols));
+    const actions = h('div', 'lan-actions', panel);
+    button(actions, 'Back', 'back', back);
+    advancedLink(panel);
+  }
+
+  function advancedLink(panel: HTMLElement): void {
+    const a = h('button', 'lan-advanced', panel, 'Advanced');
+    a.type = 'button';
+    nav(a, 'advanced');
+    a.addEventListener('click', () => {
+      focusKey = 'adv-agent';
+      advanced = true;
+      paint(true);
     });
-    h('span', 'lan-meta', browserRow, 'No install. The host sends each guest a join code');
-    const agentRow = row(list, 'Local agent', 'mode-agent', () => {
+  }
+
+  /** Other ways to play: the Node agent, or long codes copied by hand. */
+  function renderAdvanced(panel: HTMLElement): void {
+    h('div', 'lan-sub', panel, 'Advanced');
+    const list = h('div', 'lan-list', panel);
+    const agentRow = row(list, 'Local agent', 'adv-agent', () => {
       focusKey = 'lobby-create';
-      store(MODE_KEY, 'agent');
+      advanced = false;
       client.setMode('agent');
       autoConnect();
     });
     h('span', 'lan-meta', agentRow, location.protocol === 'https:'
       ? 'Needs "npm run lan" and the page it serves (http)'
       : 'Every player runs "npm run lan". Lobbies are found automatically');
+    const longRow = row(list, 'Long codes', 'adv-long', () => {
+      focusKey = 'lobby-create';
+      advanced = false;
+      longCodes = true;
+      client.cancelGuest();
+      paint(true);
+    });
+    h('span', 'lan-meta', longRow, 'No online helper. Codes are copied by hand, both ways');
     const actions = h('div', 'lan-actions', panel);
     button(actions, 'Back', 'back', back);
   }
 
-  /** A code as text, a QR code and a Copy button. */
-  function codeBlock(parent: HTMLElement, code: string, qrText: string, key: string): void {
-    const box = h('div', 'lan-codebox', parent);
-    const qr = h('div', 'lan-qr', box);
-    qr.setAttribute('role', 'img');
-    qr.setAttribute('aria-label', 'QR code of the code');
-    qr.innerHTML = qrSvg(encodeQr(qrText, 'L'));
-    const side = h('div', 'lan-codeside', box);
+  /** A long code as text and a Copy button. */
+  function codeBlock(parent: HTMLElement, code: string, key: string): void {
+    const side = h('div', 'lan-codeside', parent);
     h('div', 'lan-code', side, code);
     const copy = button(side, 'Copy', key, () => {
       copyText(code, (ok) => {
@@ -454,9 +628,12 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
     });
   }
 
-  /** Browser mode, not in a lobby: join with a code, or create a lobby in this tab. */
+  /** Long codes, not in a lobby: join with a pasted code, or create a lobby in this tab. */
   function renderBrowser(panel: HTMLElement): void {
-    h('div', 'lan-sub', panel, 'In browser · automatic lobby discovery is not available in this mode. The host gives each guest a join code');
+    if (client.helper === 'none' && !longCodes) {
+      h('div', 'lan-note lan-warn', panel, 'Short codes need the online helper; this site copy has none. Use long codes instead: the host copies one to each player.');
+    }
+    h('div', 'lan-sub', panel, 'Long codes · the host gives each guest a join code, and the guest sends an answer code back');
     const cols = h('div', 'lan-cols', panel);
     const left = h('div', 'lan-list', cols);
     h('div', 'lan-hint', left, 'Join with code');
@@ -475,7 +652,7 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
       h('div', 'lan-note', left, 'Making your answer code...');
     } else if (g.state === 'answer') {
       h('div', 'lan-note', left, 'Give this answer code to the host. The host enters it to connect you.');
-      codeBlock(left, g.code, g.code, 'join-copy');
+      codeBlock(left, g.code, 'join-copy');
       h('div', 'lan-note', left, 'Waiting for the host...');
       const actions = h('div', 'lan-actions', left);
       button(actions, 'Cancel', 'join-cancel', () => client.cancelGuest());
@@ -489,13 +666,14 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
         h('div', 'lan-note lan-warn', left, g.message);
         h('div', 'lan-note', left, NETWORK_HINT);
       } else {
-        h('div', 'lan-note', left, 'The host makes one code per guest. Paste it here, or scan the host\'s QR code with this device\'s camera.');
+        h('div', 'lan-note', left, 'The host makes one code per guest. Paste it here.');
       }
     }
     youAndDraft(h('div', 'lan-list', cols));
     const actions = h('div', 'lan-actions', panel);
     button(actions, 'Create lobby', 'lobby-create', () => {
       focusKey = 'invite';
+      client.cancelGuest();
       client.name = name.trim().slice(0, 12) || 'PLAYER';
       store(DRAFT_KEY, JSON.stringify(draft));
       client.createInBrowser(draft, charId, { stages: stages.map((s) => s.id), characters: characters.map((c) => c.id) });
@@ -517,8 +695,8 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
         : inv.state === 'connecting' ? 'Connecting' : 'Failed';
       h('span', `ui-tag${inv.state === 'failed' ? ' lan-warn' : ''}`, head, stateText);
       if (inv.state === 'code') {
-        h('div', 'lan-note', card, 'Send this code to one guest (or let them scan it), then enter the answer code they get below.');
-        codeBlock(card, inv.code, joinLink(inv.code), `invite-copy-${inv.id}`);
+        h('div', 'lan-note', card, 'Send this code to one guest, then enter the answer code they get below.');
+        codeBlock(card, inv.code, `invite-copy-${inv.id}`);
       } else if (inv.state === 'failed') {
         h('div', 'lan-note lan-warn', card, inv.message);
         h('div', 'lan-note', card, NETWORK_HINT);
@@ -548,6 +726,35 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
     }, inMatch || !client.host.canInvite(members));
   }
 
+  /** Short-code host: the game code in large type, and how joins are going. */
+  function renderGameCode(panel: HTMLElement, members: number): void {
+    const room = client.room;
+    if (room === null) return;
+    const box = h('div', 'ui-frame lan-gamecode', panel);
+    box.setAttribute('style', accentVars(null));
+    if (room.state === 'open') {
+      h('div', 'lan-gamecode-code', box, room.code).setAttribute('aria-label', `Game code ${room.code.split('').join(' ')}`);
+    }
+    const side = h('div', 'lan-gamecode-side', box);
+    if (room.state === 'creating') {
+      h('div', 'lan-status', side, 'Getting a code...');
+    } else if (room.state === 'error') {
+      h('div', 'lan-note lan-warn', side, room.message);
+      const actions = h('div', 'lan-actions', side);
+      button(actions, 'Retry', 'room-retry', () => client.retryRoom());
+      return;
+    } else {
+      h('div', 'lan-status', side, members >= LOBBY_MAX ? 'The lobby is full' : 'Tell your friends this code');
+    }
+    const joins = room.joins();
+    if (joins.connecting > 0) h('div', 'lan-note', side, joins.connecting === 1 ? 'A player is connecting...' : `${joins.connecting} players are connecting...`);
+    if (joins.failed > 0) {
+      h('div', 'lan-note lan-warn', side, 'A player could not connect. They can press Retry.');
+      h('div', 'lan-note', side, NETWORK_HINT);
+    }
+    if (room.message !== '') h('div', 'lan-note lan-warn', side, room.message);
+  }
+
   function renderLobby(panel: HTMLElement): void {
     const lobby = client.lobby;
     if (lobby === null) return;
@@ -558,6 +765,7 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
     const sub = h('div', 'lan-sub', panel,
       `${lobby.settings.name} · hosted by ${hostMember?.name ?? '?'}${client.mode === 'browser' ? ' in their browser' : ` at ${client.lobbyAddress}`}${lobby.inMatch ? ' · match running' : ''} · your ping `);
     h('span', '', sub, pingLabel(client.rtt)).dataset.ping = 'me';
+    if (host && client.room !== null) renderGameCode(panel, lobby.members.length);
     const cols = h('div', 'lan-cols', panel);
 
     const left = h('div', 'lan-list', cols);
@@ -601,8 +809,8 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
       const variant = clampVariant(m.variant);
       const variantChip = h('button', 'lan-chip', line);
       variantChip.type = 'button';
-      h('span', 'lan-variant-dot', variantChip).style.background = VARIANT_SWATCHES[variant];
-      variantChip.appendChild(document.createTextNode(VARIANT_NAMES[variant]));
+      h('span', 'lan-variant-dot', variantChip).style.background = variantSwatches(m.charId)[variant];
+      variantChip.appendChild(document.createTextNode(variantNames(m.charId)[variant]));
       h('span', 'ui-tag', line, pingLabel(isMe ? client.rtt : m.ping)).dataset.ping = isMe ? 'me' : String(m.id);
       if (isMe && !lobby.inMatch) {
         nav(charChip, 'char');
@@ -640,7 +848,7 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
       h('div', 'lan-card-name', card, lobby.settings.cpuFill ? `CPU LV ${lobby.settings.cpuLevel}` : 'Open');
     }
 
-    if (host && client.mode === 'browser') renderInvites(panel, lobby.members.length, lobby.inMatch);
+    if (host && client.mode === 'browser' && client.room === null) renderInvites(panel, lobby.members.length, lobby.inMatch);
 
     const others = lobby.members.filter((m) => m.id !== lobby.hostId);
     const votes = lobby.members.filter((m) => m.rematch).length;
@@ -668,12 +876,21 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
   function back(): void {
     if (client.lobby !== null) client.leave();
     autoTried = false;
-    if (client.mode !== 'none') {
-      // Back from a mode returns to the mode choice (and drops that mode's connections).
-      focusKey = '';
-      client.setMode('none');
+    focusKey = '';
+    if (client.mode === 'agent') {
+      // Back from the agent mode returns to the in-browser screen (and drops the agent).
+      client.setMode('browser');
       return;
     }
+    if (advanced || longCodes) {
+      advanced = false;
+      longCodes = false;
+      client.cancelGuest();
+      paint(true);
+      return;
+    }
+    client.cancelGuest();
+    client.setMode('none');
     ctx.go('mode');
   }
 
@@ -685,8 +902,9 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
     const lobby = client.lobby === null ? null : {
       ...client.lobby, members: client.lobby.members.map((m) => ({ ...m, ping: 0 })),
     };
+    const room = client.room === null ? null : [client.room.state, client.room.code, client.room.message, client.room.joins()];
     return JSON.stringify([client.agentStatus, client.lobbyStatus, client.message, client.agentAddress,
-      client.rows(), lobby, draft, charId, client.mode, client.guest, client.host.list()]);
+      client.rows(), lobby, draft, charId, client.mode, client.guest, client.host.list(), client.helper, room, advanced, longCodes]);
   }
 
   function updatePings(): void {
@@ -729,10 +947,14 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
     h('div', 'aev-menu-headline', panel);
 
     if (inLobby) renderLobby(panel);
-    else if (client.mode === 'none') renderChoose(panel);
-    else if (client.mode === 'browser') renderBrowser(panel);
-    else if (client.agentStatus !== 'connected') renderConnect(panel);
-    else renderList(panel);
+    else if (client.mode === 'agent') {
+      if (client.agentStatus !== 'connected') renderConnect(panel);
+      else renderList(panel);
+    } else if (advanced) renderAdvanced(panel);
+    else if (longCodes || client.helper === 'none') {
+      renderBrowser(panel);
+      if (!longCodes) advancedLink(panel);
+    } else renderMain(panel);
 
     let note = client.message;
     if (note === '' && client.lobbyStatus === 'joining') note = client.mode === 'browser' ? 'Joining...' : `Joining ${client.lobbyAddress}...`;

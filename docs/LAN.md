@@ -225,7 +225,7 @@ agent's WebSocket wrapper around it), `src/net/client.ts` (browser), `src/ui/lan
 | Discovery | `npm run test:discovery` | Two agents on one machine see each other within 2 s and expire within 5 s, on multicast, on broadcast, and on both. |
 | Lobbies | `npm run test:lobby` | A real agent over real sockets: duplicate names, version guard, full and in-match refusals, guest leave, ready gating, input logging and resume with history, the 10 s timeout, and the host closing the lobby. |
 | Lobby core, no network | `npm run test:lobbycore` | `LobbyCore` with fake WebRTC-shaped links: version guard, variant defaults and validation, full lobby, slot assignment, ready gating, relay trust, a closed link retiring its player at once, rematch vote, liveness (a link silent for 4 s is dropped), the host closing the lobby, and a 2 player match relayed by the core with 15% loss and reordering on the unordered legs that ends in sync. |
-| Join codes and QR | `npm run test:signal` | SDP to code to SDP for a Chrome offer and a Firefox answer (only UDP host candidates kept, stable when packed again), damaged codes refused with a message, QR finder, timing and format bits, and two golden QR matrices. |
+| Join codes and the short-code helper | `npm run test:signal` | SDP to code to SDP for a Chrome offer and a Firefox answer (only UDP host candidates kept, stable when packed again), damaged codes refused with a message; the rendezvous handler in memory through a host and two guests (create, join, offer, answer, close), code alphabet, clash retry, expiry and renewal on a fake clock, and the Node server on a random port with real fetch. |
 | Browser | two agents (5180, 5181), two tabs, `?lantest` | The guest sees the host's lobby without typing, joins, plays, sees a confirmed drop and resume; the host closes the tab and the guest gets results and "lobby closed"; a 2v2 with CPU fill finishes and a rematch vote restarts it. Screenshots are `art/ui/ref/lan2_*.png`. |
 
 `?lantest` in the URL enables a DOM-event test hook in `main.ts` (`aevlantest`: returns net stats,
@@ -297,9 +297,16 @@ The netcode reads the game only through `createGameState`, `stepGame`, `MatchCon
 
 ## 11. In-browser mode (WebRTC, no agent)
 
-Owner brief: two to four players on one network play from the deployed site, with no Node agent
-and no install. The deployed site is HTTPS, so `ws://` to a LAN address is blocked; WebRTC data
-channels are the browser's only peer to peer path. No signaling server, no STUN or TURN.
+Owner brief: "make LAN super easy to use and self explanatory: one host code, one join code. no
+mobile qr or whatever. also it can be a short code, no one is stealing this. everyone is on same
+wifi and only have browser, nothing downloaded."
+
+Two to four players on one network play from the deployed site with nothing installed. The site
+is HTTPS, so `ws://` to a LAN address is blocked; WebRTC data channels are the browser's only
+peer to peer path. A small online helper (the rendezvous, 11.2) passes the WebRTC offer and
+answer between the tabs so nobody copies them by hand. It only carries those few hundred bytes
+while players join; the game itself runs directly between the machines on the Wi-Fi. No STUN
+or TURN.
 
 ### 11.1 Topology
 
@@ -331,39 +338,114 @@ defaults) and relays match inputs. Each guest has one RTCPeerConnection, to the 
   `createLinkTransport(link)`; `main.ts` does not know which. The sim, `RollbackSession`, the
   snapshot, the codec and the hash are untouched.
 
-### 11.2 Signaling flow
+### 11.2 Joining with a short code
 
-1. The host picks In browser, then **Create lobby**. The tab starts a LobbyCore and joins it
-   through the loopback.
-2. The host presses **Invite a player**. The tab makes an RTCPeerConnection with no iceServers,
-   creates both channels and an offer, sets it, waits until `iceGatheringState` is `complete`
-   (at most 3 s, then it uses what it has), and shows the **join code**: text, a QR code and a
-   Copy button. One code per guest; each invite has its own connection.
-3. The guest picks In browser and pastes the code into **Join with code**, or scans the QR code
-   with the device camera: it holds `https://<site>/#join=<code>`, which opens the game with the
-   code filled in. The guest's tab checks the version, sets the offer, answers, waits for
-   gathering the same way, and shows its **answer code** (text, QR code, Copy).
-4. The host pastes the answer into **Answer code** and presses Connect. The answer names its
-   invite, so answers can come back in any order.
-5. When both channels are open, the host's tab attaches the link to LobbyCore; the guest sends
-   `hello`, gets the lobby list (always one lobby) and joins it. From here the lobby works as in
-   the agent mode.
-6. Repeat 2 to 5 for each further guest (at most 3 guests, 4 players).
+**What the players see.** Mode select > LAN shows two things: **Host game**, and four code boxes
+with **Join**. (Local agent and long codes sit under a small **Advanced** link.)
 
-**Failure states.** On the host, a connection that is not open 10 s after the answer is entered
-fails its invite with a Retry (a new code; a used offer cannot be reused) and the hint "Both
-devices must be on the same Wi-Fi. Guest and public networks often block this." On the guest, the
-answer waits up to 2 minutes for the host (the guest cannot tell when the host pastes it), and
-fails at once if the connection itself fails, with the same hint and a Retry. Wrong input is
-refused with a message: an answer code pasted as a join code (or the reverse), a code cut short,
-extra characters, a different build.
+1. The host presses Host game. The lobby opens at once with the host in slot 1, and a box at the
+   top shows the game code in large type, for example `HPP3`, with "Tell your friends this code".
+2. A guest types the code (keyboard: type it, paste works too; pad: Left and Right change the
+   letter in a box, Up and Down move between boxes) and presses Join. The screen reads "Waiting
+   for host", then "Connecting", then the lobby appears with the guest in it. Measured in two
+   tabs: 2.3 s from Join to the lobby.
+3. More guests do the same with the same code, up to 3 guests (4 players).
 
-**Scanning.** A camera scan inside the page would need a library (or `BarcodeDetector`, which
-desktop Chrome on Windows does not have), so the page itself supports paste only. The join
-code's QR code is for phone and tablet camera apps: it opens the page with the code filled in.
-The answer code's QR code holds the bare code, for copying on a phone.
+From here the lobby works exactly as before: settings, characters, teams, ready, start, rematch.
 
-### 11.3 Code format
+**Under the hood.**
+
+```
+ host tab                        rendezvous                       guest tab
+ POST /api/room  ------------->  room HPP3
+                                                    <-----------  POST /api/room/HPP3/join -> guest id
+ GET  .../host?since= (700 ms) -> guest id
+ RTCPeerConnection + offer, ICE gathering (at most 3 s)
+ PUT  .../offer/{guest} ------>  offer code
+                                                    <-----------  GET .../guest/{guest} (400 ms) -> offer
+                                                                  answer, ICE gathering (at most 3 s)
+                                 answer code  <-------------------  PUT .../answer/{guest}
+ GET  .../host (300 ms while an offer waits) -> answer
+ setRemoteDescription; both data channels open; the lobby protocol runs on the reliable channel
+```
+
+- The offer and answer are the same compressed codes as the long-code mode (11.3), so they carry
+  the invite number and the version hash. A guest on another build stops with "Different version:
+  the host runs another build of the game. Reload both pages".
+- The host tab runs `RoomHost` (`src/net/signal/roomhost.ts`): one `BrowserHost` invite per
+  guest, tagged with the guest id. It polls every 700 ms, every 300 ms while an offer waits for
+  its answer, and not at all while all 4 slots are taken and nothing is pending (it starts again
+  when someone leaves). A guest arriving while the lobby is full gets "That game is full"; during
+  a match, "That game has started. Try again when it ends".
+- Leaving the lobby, Back, or closing the tab (a `pagehide` DELETE with `keepalive`) removes the
+  room. Guests still waiting then see "The host closed that game".
+
+**States and failures.**
+
+| Side | Shown | When |
+|---|---|---|
+| host | Getting a code... | until POST /api/room answers |
+| host | A player is connecting... | an invite for a guest is being made or opened |
+| host | A player could not connect. They can press Retry. + Wi-Fi hint | that connection failed (shown 12 s) |
+| host | Could not reach the online helper + Retry | the room could not be made |
+| guest | Waiting for host | registered, no offer yet |
+| guest | Connecting | answering and opening the channels |
+| guest | Connected | channels open; the lobby appears right after |
+| guest | No game with that code. Check it with the host | unknown or expired code |
+| guest | The host did not answer. Check the code, and that the host is still in the lobby | no offer within 10 s |
+| guest | Could not connect within 10 seconds + Wi-Fi hint + Retry | the channels did not open within 10 s of the offer |
+
+The Wi-Fi hint is one line: "Both devices must be on the same Wi-Fi. Guest and public networks
+often block this." Retry makes a fresh join (a used offer cannot be reused).
+
+**Rendezvous routes** (`server/rendezvous/handler.ts`, JSON, CORS open, no auth, no rate limit):
+
+| Route | Body | Answer |
+|---|---|---|
+| `GET /api/health` | | `{ok: true}` |
+| `POST /api/room` | `{}` or `{code}` | `{code}`: a new room, or with `code` the same room renewed (or taken back after expiry) |
+| `POST /api/room/{code}/join` | `{}` or `{guest}` | `{guest}`: a new guest id, or the same one registered again |
+| `GET /api/room/{code}/host?since=n` | | `{guests: [{id, n}], answers: {id: code}}` for guests from index n |
+| `PUT /api/room/{code}/offer/{guest}` | `{code}` or `{error}` | `{ok}` |
+| `GET /api/room/{code}/guest/{guest}` | | `{offer, error}` (`offer` null until the host put it) |
+| `PUT /api/room/{code}/answer/{guest}` | `{code}` | `{ok}` |
+| `DELETE /api/room/{code}` | | 204 |
+
+Unknown room or guest: 404. A new code is tried up to 8 times against existing rooms, then 503.
+
+**Codes.** Game codes are 4 characters from `ABCDEFGHJKMNPQRSTUVWXYZ23456789` (31 characters:
+no 0 or O, no 1, I or L), so 923,521 codes. Typing is not case sensitive and anything outside
+the alphabet is ignored. Guest ids are 8 characters from the same alphabet.
+
+**Storage and expiry.** Keys `room:{code}` (the guest id list), `offer:{code}:{guest}` and
+`answer:{code}:{guest}`. Every write sets a 10 minute expiry. The host writes its room again every
+4 minutes while it polls, and if the room is gone (expired) it takes the same code back, so a
+lobby that stays open keeps its code; that write re-reads the room afterward and folds in any
+guest who joined during the write, so a renew racing a join cannot drop that guest. Only three
+storage calls are used (get, put with TTL, delete), so there is no list operation. Two guests
+joining at the same instant can race on the room's guest list, and the loser's guest can vanish
+from it (or land at an index the host has already polled past); a guest whose id is no longer the
+list's last entry, such as one that gets "no such guest" or has no offer 3 s after registering,
+registers again with the same id, which appends it past the host's cursor and repairs that.
+
+### 11.3 Long codes (fallback, no helper)
+
+When the page opens the LAN screen it asks `GET /api/health` (2.5 s timeout). If the helper does
+not answer, the screen says "Short codes need the online helper; this site copy has none" and
+shows the long-code flow instead. Advanced > Long codes picks it on purpose.
+
+1. The host presses Create lobby, then **Invite a player**: after ICE gathering (at most 3 s) a
+   join code appears with a Copy button. One code per guest.
+2. The guest pastes it into Join with code and presses Join; an answer code appears with Copy.
+3. The host pastes the answer into Answer code and presses Connect. Answers can come back in any
+   order: each names its invite.
+
+On the host, a connection that is not open 10 s after the answer is entered fails with Retry and
+the Wi-Fi hint. On the guest, the answer waits up to 2 minutes for the host. Wrong input is
+refused with a message (an answer pasted as a join code or the reverse, a code cut short, extra
+characters, a different build). The QR codes and the `#join=` link of the first version are gone.
+
+**Code format** (used by both flows):
 
 `src/net/sdpcode.ts`. The SDP after gathering is about 1 KB. The code keeps only what a
 data-channel-only connection with host candidates needs, packs it into bytes and writes it as
@@ -394,11 +476,6 @@ rebuilt SDP is `v=0`, `o=`, `s=-`, `t=0 0`, the BUNDLE group, `a=msid-semantic: 
 default is far above any lobby message). A change to this layout bumps `CODE_FORMAT`; an old code
 is then refused as coming from another build.
 
-The QR codes come from `src/ui/qr.ts`, a small encoder written for this (byte mode, level L,
-versions 1 to 40, mask by the standard penalty score). A join link is about 200 characters, QR
-version 9 (53 x 53 modules). Every output of the encoder tried while writing it (versions 1 to
-13, levels L and M, all 8 masks, 80 symbols) was read back correctly by zbar.
-
 ### 11.4 Liveness, leaving, hidden tabs
 
 - **Pings on the reliable channel.** WebSocket ping frames are gone. Each client sends `ping`
@@ -424,8 +501,8 @@ version 9 (53 x 53 modules). Every output of the encoder tried while writing it 
 `vite.config.ts` computes `gameVersion()` from `server/version.ts` at build time and injects it
 as `__AEV_GAME_VERSION__`, read by `src/net/buildversion.ts`. It is the same string the agent
 computes at run time (checked: a build and the agent both gave `p4-abda18c3` on the same tree).
-Every code carries its FNV-1a, so the guest refuses a join code from another build before it
-connects ("Different version: the host runs another build of the game. Reload both pages") and
+Every offer and answer code carries its FNV-1a, so the guest refuses an offer from another build
+before it connects ("Different version: the host runs another build of the game. Reload both pages") and
 the host refuses such an answer. LobbyCore still compares the full string on `join` and answers
 with the existing "Different game version" message.
 
@@ -434,7 +511,7 @@ with the existing "Different game version" message.
 | Agent mode | In-browser mode |
 |---|---|
 | `npm run lan` on every machine | nothing to install; the deployed page |
-| Lobby list from UDP discovery, plus Join by address | Create lobby and Join with code; the screen says discovery is not available |
+| Lobby list from UDP discovery, plus Join by address | Host game gives a 4 letter code; guests type it |
 | Lobby host = the agent that holds the lobby | Lobby host = the host's tab (`BrowserHost`) |
 | WebSocket text frames (JSON) and binary frames (inputs), over TCP | reliable channel (JSON), unordered channel with no retransmits (inputs) |
 | Liveness by WebSocket ping frames | `ping` and `pong` on the reliable channel, from Worker timers |
@@ -452,68 +529,101 @@ CPU fill, auto input delay, the rollback session and the packet format. `PROTOCO
 |---|---|
 | `src/net/lobbycore.ts` | Lobby rules and relay, no Node imports. Used by the agent and the host tab. |
 | `server/lobbyhost.ts` | The agent's WebSocket wrapper around LobbyCore. |
-| `src/net/browserhost.ts` | The host tab: LobbyCore, the loopback link, invites. |
+| `src/net/browserhost.ts` | The host tab: LobbyCore, the loopback link, invites (tagged with a guest id for short codes). |
 | `src/net/rtc.ts` | `RtcLink` (one RTCPeerConnection, two channels), the gathering wait, the link transport. |
-| `src/net/sdpcode.ts` | Join and answer codes. |
+| `src/net/sdpcode.ts` | Offer and answer codes (both flows). |
+| `src/net/signal/codes.ts` | Game code alphabet, checks and normalizing (page and helper). |
+| `src/net/signal/api.ts` | The page's fetch calls to the helper; where the helper lives. |
+| `src/net/signal/roomhost.ts` | The host tab's room: polling, invites per guest, offers and answers. |
+| `server/rendezvous/handler.ts` | The helper: a pure fetch handler on a get/put/delete store, plus the memory store. |
+| `server/rendezvous/node.ts` | The helper as a Node server (`npm run rendezvous`, port 8788). |
+| `server/rendezvous/kv.ts`, `worker.ts`, `wrangler.worker.toml` | KV store adapter; the helper as a standalone Worker. |
+| `functions/api/[[route]].ts`, `wrangler.toml` | The helper as a Cloudflare Pages Function on KV `LOBBY`. |
 | `src/net/buildversion.ts` | The build's game version. |
-| `src/ui/qr.ts` | QR encoder. |
-| `src/net/client.ts`, `src/ui/lan.ts`, `src/main.ts` | Mode choice, browser views, match transport, `#join=` links. |
+| `src/net/client.ts`, `src/ui/lan.ts` | Host game, Join (short codes), long codes, Advanced, match transport. |
+| `src/net/signaltest.ts` | `npm run test:signal` (with `sdpcodetest.ts`): the helper in memory and over HTTP. |
 
 ### 11.8 Known limits
 
 - **mDNS host names.** Chrome, Edge and Firefox hide a page's local IP address behind a random
   `<uuid>.local` name unless the page has camera or microphone permission, and the other device
   must resolve that name over multicast DNS. Most home Wi-Fi does; networks that block multicast
-  (many guest, school and office networks) make the connection fail with the hint above.
+  (many guest, school and office networks) make the connection fail with the Wi-Fi hint.
 - **Client isolation.** Guest and public Wi-Fi often stop devices from reaching each other at all.
-- **Moving the answer code.** The answer has to get back to the host by hand (a chat message, or
-  reading it off the screen). The page cannot scan it.
+- **The helper needs the internet** while players join (not during play). Without it, long codes.
+- **Cloudflare KV is eventually consistent.** A write is normally visible at once to readers
+  served by the same Cloudflare location, which players on one Wi-Fi are. Reads from other
+  locations can lag up to about 60 s. Not measured on the live KV yet (11.10 B).
+- **KV free tier.** 100,000 reads and 1,000 writes a day. A host polls about 86 times a minute
+  while slots are open; one join costs 3 or 4 writes. Enough for evenings of play, not for a public
+  lobby service.
+- **No auth.** Anyone who knows or guesses a live code can join that lobby; the host sees them
+  and can leave. The owner accepted this.
 - **No resume and no host migration.** A reload leaves the match; the host's tab closing ends it
   for everyone.
 - **Same browser engine**, as in section 10: Chrome against Firefox may desync.
-- A code holds at most 8 candidates. A machine with more UDP host candidates (many virtual
-  adapters) sends the first 8 the browser gathered.
+- A code holds at most 8 ICE candidates.
 
-### 11.9 Manual check for the owner
+### 11.9 Deployment
 
-No browser was available when this mode was written, so the WebRTC path itself has not been run.
-Please run these and note any failure with its step number. Use Chrome or Edge on every device.
+The page finds the helper through `VITE_RENDEZVOUS_URL`, read at build time (`vite.config.ts`
+turns it into `__AEV_RENDEZVOUS_URL__`):
+
+| Value | Helper at |
+|---|---|
+| unset in `npm run build` | this page's own origin, `/api/...` (Cloudflare Pages) |
+| unset in `npm run dev` | port 8788 on the page's host (`npm run rendezvous`) |
+| `:PORT` | that port on the page's host |
+| a URL | that URL, for example `https://aevalrena-rendezvous.<account>.workers.dev` |
+
+**Cloudflare Pages (simplest).** `functions/api/[[route]].ts` serves the routes next to the site.
+
+1. `npx wrangler kv namespace create LOBBY` and note the id.
+2. In `wrangler.toml`, uncomment the `[[kv_namespaces]]` block and paste the id (binding name
+   `LOBBY`). With that file present, Pages takes bindings from it, not from the dashboard.
+3. Build command `npm run build`, output `dist`, as before. Leave `VITE_RENDEZVOUS_URL` unset.
+4. Check: `https://<site>/api/health` returns `{"ok":true}`. Without the binding it returns 503
+   and the game falls back to long codes.
+
+**GitHub Pages plus a Worker.** GitHub Pages cannot run code, so the helper runs as a Worker.
+
+1. `npx wrangler kv namespace create LOBBY`, paste the id into
+   `server/rendezvous/wrangler.worker.toml`, then
+   `npx wrangler deploy -c server/rendezvous/wrangler.worker.toml`. Note the Worker URL.
+2. In the GitHub repo, Settings > Secrets and variables > Actions > Variables, add
+   `RENDEZVOUS_URL` with that URL. `.github/workflows/deploy.yml` passes it to the build as
+   `VITE_RENDEZVOUS_URL`.
+3. Push to `main`. Without the variable the build points at its own origin, finds no helper and
+   uses long codes.
+
+### 11.10 Owner checklist
+
+Use Chrome or Edge on every device. Note any failure with its step.
 
 **A. Two tabs on one machine**
 
-1. `npm run build`, then `npx vite preview` (or open the deployed site). Open two tabs.
-2. Tab 1: Mode select > LAN > In browser. Set a name. Create lobby. The lobby shows you as Host.
-3. Tab 1: Invite a player. Within 3 s a code, a QR code and Copy appear. Press Copy.
-4. Tab 2: LAN > In browser. Paste the code into Join with code, press Join. Within 3 s an answer
-   code appears with "Waiting for the host".
-5. Tab 2: Copy the answer. Tab 1: paste it into Answer code, press Connect. Within a few seconds
-   tab 2 shows the lobby with both players, and tab 1 shows the guest in slot 2 with a ping.
-6. Change character, colour and team in each tab and see it in the other. The host moves the
-   guest to slot 3 and back. Start stays disabled until the guest presses Ready.
-7. Set Input delay to Auto and Stocks to 1. Ready, Start, play to the end. No red "Desync at
-   frame" banner. Both tabs show results; press Rematch in both and the next match starts by
-   itself.
-8. During a match, switch tab 1 to another tab for 10 s and back. Tab 2 must not freeze for
-   more than a moment.
-9. Close tab 2 during a match. Tab 1 shows "<name> left the match" and wins at once.
-10. Failure path: paste garbage, or the join code, into Answer code: a message explains it. Make
-    an invite, paste the answer from tab 2 after closing tab 2: after 10 s the invite shows
-    Failed with the Wi-Fi hint and Retry.
+1. Terminal 1: `npm run rendezvous`. Terminal 2: `npm run dev`. Open the address Vite prints in
+   two tabs.
+2. Tab 1: Mode select > LAN. Only Host game, the code boxes with Join, and Advanced show. Press
+   Host game: the lobby opens with you in slot 1 and a 4 letter code in large type.
+3. Tab 2: LAN, type the code, press Join. "Waiting for host", then "Connecting", then within about
+   2 s the lobby with both players. Tab 1 shows the guest in slot 2 with a ping.
+4. Tab 2: Ready. Tab 1: Start. Play: no red "Desync at frame" banner. Results, Rematch in both.
+5. Tab 2: back to LAN, type a wrong code (for example `ZZZZ`) and Join: "No game with that code".
+6. Stop `npm run rendezvous`, reload tab 2, open LAN: "Short codes need the online helper; this
+   site copy has none" and the long-code screen.
+7. Controller: on the LAN screen, Down to the code boxes, Left and Right change a letter, Down
+   moves to the next box, then Join.
 
 **B. Two machines on one Wi-Fi**
 
-1. Both on the same home Wi-Fi (not a guest network). Open the deployed site on both.
-2. Repeat A2 to A7 across the machines, moving the codes by chat, or by scanning the join QR code
-   with the guest's phone camera for a phone guest. Expect a ping under 10 ms and Auto delay 1.
-3. Play a full 1v1 to the end with no desync banner. Then, in a new match, close the host's tab:
-   the guest sees "You lost the connection", then results.
+1. Deploy (11.9) and check `/api/health`, or run A1 on one machine and open
+   `http://<that machine's LAN address>:5173` on the other (the page then finds the helper on
+   port 8788 of the same address; allow Node through the Windows firewall on Private networks).
+2. Repeat A2 to A4 across the machines. Expect a ping under 10 ms.
+3. During a match, close the host's tab: the guest sees "You lost the connection", then results.
+4. If joining fails on one network but works on another, note the network type: that is the
+   multicast DNS or client isolation limit above, not a bug in the game.
 
-**C. Four players**
-
-1. Four devices, or four tabs across two machines. The host makes three invites; answer them in
-   a different order than they were made.
-2. Play a 4-player free for all to the end, then a 2v2 (two pairs of matching team colours). No
-   desync banner, every card shows a ping, and the results agree on every screen.
-3. Two players plus CPU fill: the CPUs move on every screen and the match ends normally.
-4. If a step fails on one network but works on another, note the network type: that is the
-   multicast DNS limit above, not a bug in the game.
+**C. Four players**: three guests join with the same code; play a 4-player free for all and a
+2v2. A fifth tab trying the code gets "That game is full".

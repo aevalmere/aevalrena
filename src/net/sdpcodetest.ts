@@ -1,11 +1,9 @@
-import { encodeQr } from '../ui/qr';
 import { CodeError, compressSdp, expandCode, extractCode, versionHash } from './sdpcode';
 
 /**
- * Join and answer codes (src/net/sdpcode.ts) and the QR encoder (src/ui/qr.ts):
- * SDP -> code -> SDP round trips for a Chrome offer and a Firefox answer, refusals of damaged
- * codes, and QR structure plus a golden matrix (that matrix was read back correctly by zbar when
- * this test was written).
+ * Long join and answer codes (src/net/sdpcode.ts): SDP -> code -> SDP round trips for a Chrome
+ * offer and a Firefox answer, and refusals of damaged codes. The short-code rendezvous has its
+ * own test, src/net/signaltest.ts.
  *
  *   npx --yes tsx src/net/sdpcodetest.ts
  */
@@ -149,66 +147,6 @@ check('damaged codes are refused with a readable message, never a crash', () => 
   } catch (err) {
     if (!(err instanceof CodeError)) throw err;
     out.push(`no candidates: "${err.message}"`);
-  }
-  return out.join('; ');
-});
-
-// ---------------- QR ----------------
-
-function formatBits(modules: boolean[], size: number): number {
-  const get = (x: number, y: number): number => (modules[y * size + x] ? 1 : 0);
-  let bits = 0;
-  // First copy, bits 0..14, in the positions drawFormatBits uses (ISO 18004 figure 25).
-  const pos: [number, number][] = [];
-  for (let i = 0; i <= 5; i++) pos.push([8, i]);
-  pos.push([8, 7], [8, 8], [7, 8]);
-  for (let i = 9; i < 15; i++) pos.push([14 - i, 8]);
-  pos.forEach(([x, y], i) => { bits |= get(x, y) << i; });
-  return bits;
-}
-
-check('QR: a join link fits a small version; finders, timing and format bits are well formed', () => {
-  const text = `https://example.org/aevalrena/#join=${chromeCode}`;
-  const qr = encodeQr(text, 'L');
-  const n = qr.size;
-  const at = (x: number, y: number): boolean => qr.modules[y * n + x];
-  for (const [ox, oy] of [[0, 0], [n - 7, 0], [0, n - 7]]) {
-    for (let y = 0; y < 7; y++) {
-      for (let x = 0; x < 7; x++) {
-        const d = Math.max(Math.abs(x - 3), Math.abs(y - 3));
-        if (at(ox + x, oy + y) !== (d !== 2)) throw new Error(`finder at ${ox},${oy} wrong at ${x},${y}`);
-      }
-    }
-  }
-  for (let i = 8; i < n - 8; i++) if (at(i, 6) !== (i % 2 === 0) || at(6, i) !== (i % 2 === 0)) throw new Error(`timing at ${i}`);
-  if (!at(8, n - 8)) throw new Error('dark module missing');
-  const f = formatBits(qr.modules, n) ^ 0x5412;
-  const data = f >>> 10;
-  let rem = data;
-  for (let i = 0; i < 10; i++) rem = (rem << 1) ^ ((rem >>> 9) * 0x537);
-  if ((((data << 10) | (rem & 0x3ff)) >>> 0) !== f) throw new Error('format BCH check failed');
-  if (data >>> 3 !== 1 || (data & 7) !== qr.mask) throw new Error(`format says level ${data >>> 3} mask ${data & 7}`);
-  if (qr.version > 10) throw new Error(`version ${qr.version} for ${text.length} chars`);
-  return `${text.length} chars -> version ${qr.version} (${n}x${n}), mask ${qr.mask}`;
-});
-
-/** FNV-1a over the module bits, row major. */
-function matrixHash(modules: boolean[]): string {
-  let h = 0x811c9dc5;
-  for (const m of modules) h = Math.imul(h ^ (m ? 1 : 0), 0x01000193);
-  return (h >>> 0).toString(16).padStart(8, '0');
-}
-
-const GOLDEN_TEXT = 'https://example.org/aevalrena/#join=rq4BAKXx8dAAAQAiATAEa1d3YxhHeUVsQkU0T2tqbWl4Q0NJR1RiNFhOY2QDIIsm8pUSpqRq9U0eyv6lpfQlMEwmCm2c2oHQYcDZfMJtxgEBpS5GRhAiRl';
-const GOLDEN: Record<'L' | 'M', string> = { L: '0690a4a1', M: '1e96b2e4' };
-
-check('QR: golden matrices (read back by zbar when recorded) are unchanged', () => {
-  const out: string[] = [];
-  for (const ecl of ['L', 'M'] as const) {
-    const qr = encodeQr(GOLDEN_TEXT, ecl);
-    const h = matrixHash(qr.modules);
-    if (GOLDEN[ecl] !== h) throw new Error(`level ${ecl}: ${h}, expected ${GOLDEN[ecl]}`);
-    out.push(`${ecl}: version ${qr.version} mask ${qr.mask} hash ${h}`);
   }
   return out.join('; ');
 });

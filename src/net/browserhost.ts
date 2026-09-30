@@ -4,9 +4,10 @@
  * input relay, the input log and retirements. Guests reach it over one RtcLink each; the host's
  * own LanClient reaches it through an in-page loopback.
  *
- * Invites: each guest needs its own RTCPeerConnection, so the host makes one join code per
- * guest. The guest's answer code names the invite it answers, so answers can be pasted in any
- * order.
+ * Invites: each guest needs its own RTCPeerConnection, so the host makes one offer code per
+ * guest. The guest's answer code names the invite it answers, so answers can arrive in any
+ * order. With the rendezvous (src/net/signal/roomhost.ts) invites are made and answered
+ * automatically, tagged with the guest's rendezvous id; without it, the host copies them by hand.
  */
 import { startWorkerInterval, type WorkerInterval } from './bgtick';
 import { LEFT_CODE, LobbyCore, type LobbyConn, type LobbyPeer } from './lobbycore';
@@ -26,11 +27,15 @@ export interface Invite {
   /** The join code (base64url) once it is ready. */
   code: string;
   message: string;
+  /** The rendezvous guest id this invite is for; '' for a hand-copied invite. */
+  tag: string;
 }
 
 interface InviteSlot extends Invite {
   link: RtcLink;
   timer: ReturnType<typeof setTimeout> | 0;
+  /** Settles once the code is made (or making it failed). */
+  ready: Promise<void>;
 }
 
 export interface BrowserHostOptions {
@@ -149,7 +154,7 @@ export class BrowserHost {
   }
 
   list(): Invite[] {
-    return this.invites.map(({ id, state, code, message }) => ({ id, state, code, message }));
+    return this.invites.map(({ id, state, code, message, tag }) => ({ id, state, code, message, tag }));
   }
 
   /** Room for another invite: members plus open invites stay within the lobby size. */
@@ -157,12 +162,25 @@ export class BrowserHost {
     return this.core !== null && members + this.invites.length < LOBBY_MAX;
   }
 
-  /** Make a new join code. */
-  invite(): void {
-    if (this.core === null || this.opts === null) return;
+  /** Make a new join code. Returns the invite id, or 0 when there is no lobby. */
+  invite(tag = ''): number {
+    if (this.core === null || this.opts === null) return 0;
     const id = this.nextInvite;
     this.nextInvite = this.nextInvite >= 255 ? 1 : this.nextInvite + 1;
-    this.prepare({ id, state: 'preparing', code: '', message: '', link: new RtcLink(), timer: 0 });
+    this.prepare(this.slot(id, tag));
+    return id;
+  }
+
+  /** The invite once its code is made (state 'code', or 'failed'); null if it is gone. */
+  async whenReady(id: number): Promise<Invite | null> {
+    const inv = this.invites.find((x) => x.id === id);
+    if (inv === undefined) return null;
+    await inv.ready;
+    return this.list().find((x) => x.id === id) ?? null;
+  }
+
+  private slot(id: number, tag: string): InviteSlot {
+    return { id, state: 'preparing', code: '', message: '', tag, link: new RtcLink(), timer: 0, ready: Promise.resolve() };
   }
 
   private prepare(inv: InviteSlot): void {
@@ -172,7 +190,7 @@ export class BrowserHost {
     if (existing >= 0) this.invites[existing] = inv;
     else this.invites.push(inv);
     this.changed();
-    void (async () => {
+    inv.ready = (async () => {
       try {
         await inv.link.pc.setLocalDescription(await inv.link.pc.createOffer());
         inv.code = await inv.link.localCode('offer', inv.id, opts.version);
@@ -189,7 +207,7 @@ export class BrowserHost {
     const inv = this.invites.find((x) => x.id === id);
     if (inv === undefined) return;
     this.dropInvite(inv);
-    this.prepare({ id, state: 'preparing', code: '', message: '', link: new RtcLink(), timer: 0 });
+    this.prepare(this.slot(id, inv.tag));
   }
 
   cancel(id: number): void {

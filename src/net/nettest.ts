@@ -1,4 +1,4 @@
-import { cpuInput, warmAevalmere } from '../ai';
+import { cpuBrainName, cpuInput, CPU_ENGINE, setCpuEngine, warmAevalmere, type CpuEngine } from '../ai';
 import { createRng, nextFloat } from '../core/rng';
 import { Btn } from '../core/types';
 import type { GameState, InputFrame, MatchConfig } from '../core/types';
@@ -142,11 +142,15 @@ function scripted(player: number, t: number): InputFrame {
   return { held, pressed: held & ~prev, released: prev & ~held, direct: 0 };
 }
 
-function makeConfig(players: number, cpus: number[], stocks: number): MatchConfig {
+/** `cpuLevels[k]` is the level of the CPU at fighter `cpus[k]` (7 when absent); `chars[i]` the character of fighter i. */
+function makeConfig(players: number, cpus: number[], stocks: number, cpuLevels?: number[], chars?: string[]): MatchConfig {
   const list: MatchConfig['players'] = [];
   for (let i = 0; i < players; i++) {
-    const cpu = cpus.includes(i);
-    list.push({ slot: i, charId: 'aeval', cpu, cpuLevel: cpu ? 7 : 0, ...(cpu ? {} : { name: `N${i}` }), team: i < 2 ? 0 : 1 });
+    const k = cpus.indexOf(i);
+    const cpu = k >= 0;
+    const level = cpu ? (cpuLevels !== undefined && cpuLevels[k] !== undefined ? cpuLevels[k] : 7) : 0;
+    const charId = chars !== undefined && chars[i] !== undefined ? chars[i] : 'aeval';
+    list.push({ slot: i, charId, cpu, cpuLevel: level, ...(cpu ? {} : { name: `N${i}` }), team: i < 2 ? 0 : 1 });
   }
   return { stageId: 'tidegate', players: list, stocks, timeLimitSec: 0, seed: 12345, finalSmash: false, teams: players === 4 };
 }
@@ -203,6 +207,12 @@ interface Scenario {
   frames: number;
   /** Fighter indices driven by the real CPU (owned by their owner peer, like CPU fill). */
   cpus?: number[];
+  /** Level per entry of `cpus` (default 7). */
+  cpuLevels?: number[];
+  /** Character per fighter index (default 'aeval'). */
+  chars?: string[];
+  /** CPU routing for this scenario (src/ai/index.ts CPU_ENGINE); the previous value is restored after. */
+  engine?: CpuEngine;
   stocks?: number;
   /** Cut this peer off at `from` for `clocks` ticks, then rebuild it from the relay's log. */
   drop?: { peer: number; from: number; clocks: number };
@@ -236,6 +246,8 @@ interface ScenarioResult {
   packetsDropped: number;
   clocks: number;
   resumed?: boolean;
+  /** Per CPU: the brain it ran and how many times the host called it, against the frames played. */
+  cpuCalls?: string;
   leave?: { frame: number; finished: boolean; winnerSlot: number; winnerTeam: number };
   heapMB?: number[];
   logKB?: number;
@@ -256,7 +268,11 @@ function runScenario(sc: Scenario): ScenarioResult {
   const t0 = performance.now();
   const players = sc.owners.length;
   const cpus = sc.cpus ?? [];
-  const config = makeConfig(players, cpus, sc.stocks ?? 3);
+  const config = makeConfig(players, cpus, sc.stocks ?? 3, sc.cpuLevels, sc.chars);
+  const prevEngine = CPU_ENGINE;
+  if (sc.engine !== undefined) setCpuEngine(sc.engine);
+  const cpuCalls: number[] = cpus.map(() => 0);
+  const cpuBrains = cpus.map((i) => cpuBrainName(config.players[i].cpuLevel, config.players[i].charId));
   const hub = new FakeHub(sc.peers, sc.delay, sc.loss, sc.seed, sc.owners, sc.link ?? 'ws');
   let desyncLog = '';
   const hits: number[] = new Array(sc.peers).fill(0);
@@ -270,7 +286,10 @@ function runScenario(sc: Scenario): ScenarioResult {
     for (let i = 0; i < players; i++) {
       const idx = i;
       if (sc.owners[i] !== p) sources.push(null);
-      else if (cpus.includes(i)) sources.push((_f: number, st: GameState) => cpuInput(st, config.players[idx].slot, config.players[idx].cpuLevel, rand));
+      else if (cpus.includes(i)) {
+        const k = cpus.indexOf(i);
+        sources.push((_f: number, st: GameState) => { cpuCalls[k]++; return cpuInput(st, config.players[idx].slot, config.players[idx].cpuLevel, rand); });
+      }
       else sources.push((frame: number) => scripted(idx, frame - INPUT_DELAY));
     }
     configs[p] = JSON.parse(JSON.stringify(config)) as MatchConfig;
@@ -348,6 +367,7 @@ function runScenario(sc: Scenario): ScenarioResult {
     if (done) break;
   }
   if (sc.heapEvery !== undefined) heap.push(heapMB());
+  if (sc.engine !== undefined) setCpuEngine(prevEngine);
 
   const history = hub.log.history();
   const ref = replay(config, history, sc.frames, retirements);
@@ -383,12 +403,21 @@ function runScenario(sc: Scenario): ScenarioResult {
     leaveInfo = { frame: retirements[0]?.frame ?? -1, finished: st.finished, winnerSlot: st.winner, winnerTeam: st.winnerTeam ?? -1 };
     leaveOk = leaveOk && (sc.expectWinner === -1 ? !st.finished || st.endFrame > (retirements[0]?.frame ?? 0) + 1 : st.finished && winnerIdx === sc.expectWinner && st.endFrame === (retirements[0]?.frame ?? -1) + 1);
   }
+  // The CPU brains run on their owner only, once per frame played (plan R1 d); a drop-in resume
+  // would replay from the log, so it is not checked there.
+  const callsOk = sc.drop !== undefined || cpuCalls.every((n) => n === sc.frames);
+  const cpuInfo = cpus.map((i, k) => {
+    const p = config.players[i];
+    return `${p.charId} L${p.cpuLevel} ${cpuBrains[k]} ${cpuCalls[k]} calls`;
+  }).join('; ');
   // A resumed peer re-simulated the history silently, so its effect count restarts there.
   const hitsOk = hits.every((n, p) => left.has(p) || (resumed && p === sc.drop?.peer) || (n >= ref.hits && n <= ref.hits * 1.25 + 5));
   const pass = sc.corruptPeer !== undefined
     ? desyncs > 0
     : allTicked && hashes.every((h) => h === refHash) && desyncs === 0 && compared > 0 && scriptedMatch !== false && hitsOk &&
-      (sc.drop === undefined || resumed) && leaveOk && configOk;
+      (sc.drop === undefined || resumed) && leaveOk && configOk && callsOk;
+  if (!callsOk) process.stdout.write(`  CPU call count differs from ${sc.frames} frames: ${cpuInfo}
+`);
   if (!configOk) process.stdout.write('  config identity lost across a rollback\n');
   if (sc.leave !== undefined) process.stdout.write(`  leaver KO effects seen per peer: ${koSeen.join('/')}\n`);
   if (desyncLog !== '' && sc.corruptPeer === undefined) process.stdout.write(`  desync log:${desyncLog.slice(0, 200)}\n`);
@@ -399,6 +428,7 @@ function runScenario(sc: Scenario): ScenarioResult {
     hitsReference: ref.hits, hitsEmitted: hits,
     packetsSent: hub.sent, packetsDropped: hub.dropped, clocks: clock,
     ...(sc.drop !== undefined ? { resumed } : {}),
+    ...(cpus.length > 0 ? { cpuCalls: cpuInfo } : {}),
     ...(leaveInfo !== undefined ? { leave: leaveInfo } : {}),
     ...(sc.heapEvery !== undefined ? { heapMB: heap, logKB: Math.round(hub.log.bytes() / 1024) } : {}),
     ms: Math.round(performance.now() - t0),
@@ -413,6 +443,16 @@ const SCENARIOS: Scenario[] = [
   { name: '4 peers, 4f one-way, 10% loss', peers: 4, owners: [0, 1, 2, 3], delay: 4, loss: 0.1, startLag: [0, 1, 3, 6], seed: 404, frames: 1800 },
   { name: 'reconnect: peer 1 drops for 90 frames at 600, resumes from the relay log', peers: 2, owners: [0, 1], delay: 2, loss: 0.05, startLag: [0, 0], seed: 90, frames: 1800, drop: { peer: 1, from: 600, clocks: 90 } },
   { name: 'CPU fill: 2 humans + 2 real CPUs (level 7) run by the host, 2v2 teams, 2f, 5% loss', peers: 2, owners: [0, 1, 0, 0], delay: 2, loss: 0.05, startLag: [0, 2], seed: 22, frames: 1800, cpus: [2, 3] },
+  // The routed brains (src/ai/index.ts): level 3 on the search engine, level 10 Aeval on Aevalmere
+  // with the team targeter (auto) or on the engine's god (new), and a Trekmore CPU on the engine.
+  ...(['auto', 'new'] as const).map((engine): Scenario => ({
+    name: `CPU fill, ${engine}: levels 3 and 10 (Aeval) run by the host, 2v2 teams, 2f, 5% loss`, peers: 2, owners: [0, 1, 0, 0],
+    delay: 2, loss: 0.05, startLag: [0, 2], seed: 23, frames: 1800, cpus: [2, 3], cpuLevels: [3, 10], engine,
+  })),
+  ...(['auto', 'new'] as const).map((engine): Scenario => ({
+    name: `CPU fill, ${engine}: Trekmore level 10 and Aeval level 5 run by the host, 3 peers, 3f, 5% loss`, peers: 3, owners: [0, 1, 2, 0],
+    delay: 3, loss: 0.05, startLag: [0, 1, 3], seed: 24, frames: 1800, cpus: [0, 3], cpuLevels: [10, 5], chars: ['trekmore', 'aeval', 'trekmore', 'aeval'], engine,
+  })),
   { name: 'leave: peer 1 of 2 leaves at 900; the remaining player wins on the next frame', peers: 2, owners: [0, 1], delay: 2, loss: 0.05, startLag: [0, 1], seed: 31, frames: 1800, leave: { peer: 1, at: 900 }, expectWinner: 0 },
   { name: 'leave, teams: 2v2 over 3 peers, peer 2 (player 4) leaves at 900; its teammate plays on', peers: 3, owners: [0, 0, 1, 2], delay: 2, loss: 0.05, startLag: [0, 1, 2], seed: 32, frames: 1800, leave: { peer: 2, at: 900 }, expectWinner: -1 },
   { name: 'soak: 5 minutes (18000 frames), 2f one-way, 5% loss', peers: 2, owners: [0, 1], delay: 2, loss: 0.05, startLag: [0, 1], seed: 5, frames: 18000, stocks: 99, heapEvery: 3000 },
@@ -525,6 +565,7 @@ for (const sc of [...SCENARIOS, ...RTC_SCENARIOS]) {
   ok = ok && r.pass;
   const extra = [
     r.resumed !== undefined ? `resumed ${r.resumed}` : '',
+    r.cpuCalls !== undefined ? `CPUs: ${r.cpuCalls}` : '',
     r.leave !== undefined ? `left at frame ${r.leave.frame}, finished ${r.leave.finished}, winner slot ${r.leave.winnerSlot}${r.leave.winnerTeam >= 0 ? ` team ${r.leave.winnerTeam}` : ''}` : '',
     r.heapMB !== undefined ? `heap MB ${r.heapMB.join(' > ')}, relay log ${r.logKB} KB` : '',
     r.scriptedMatch !== null ? `log = script ${r.scriptedMatch}` : '',

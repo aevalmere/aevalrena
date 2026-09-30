@@ -1,0 +1,15 @@
+# Cloudflare Pages: the built site plus the LAN rendezvous Function (functions/api/[[route]].ts).
+# The Function needs a KV namespace bound as LOBBY:
+#
+#   npx wrangler kv namespace create LOBBY
+#
+# then uncomment the block below and paste the id it printed. With this file present, Pages
+# reads bindings from here, not from the dashboard. Until the binding exists the site still
+# works; LAN falls back to long codes. docs/LAN.md section 11.9.
+name = "aevalrena"
+pages_build_output_dir = "dist"
+compatibility_date = "2026-09-01"
+
+# [[kv_namespaces]]
+# binding = "LOBBY"
+# id = "PASTE_THE_KV_NAMESPACE_ID_HERE"

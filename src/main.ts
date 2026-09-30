@@ -450,8 +450,8 @@ function boot(): void {
     const session = createLocalSession(input, config);
     const cpuRng = createRng((config.seed ^ 0x9e3779b9) >>> 0);
     const rand = (): number => nextFloat(cpuRng);
-    // Pre-build the level 10 CPU's pools so the first match frame does not hitch.
-    if (config.players.some((p) => p.cpu && p.cpuLevel >= 10)) warmAevalmere(config);
+    // Pre-build every CPU brain (search engine levels 1 to 10, Aevalmere) so frame 0 does not hitch.
+    if (config.players.some((p) => p.cpu && p.cpuLevel >= 1)) warmAevalmere(config);
 
     for (let i = 0; i < config.players.length; i++) {
       const player = config.players[i];
@@ -633,7 +633,7 @@ function boot(): void {
     const cpuRng = createRng((config.seed ^ 0x9e3779b9) >>> 0);
     const rand = (): number => nextFloat(cpuRng);
     const ownsCpu = config.players.some((p, i) => p.cpu && start.owners[i] === peer);
-    if (ownsCpu && config.players.some((p) => p.cpu && p.cpuLevel >= 10)) warmAevalmere(config);
+    if (ownsCpu && config.players.some((p) => p.cpu && p.cpuLevel >= 1)) warmAevalmere(config);
     // CPU slots belong to the lobby host's peer: it runs the AI once per frame and sends the
     // result like a human input, so the AI is never re-run by a rollback.
     const sources: (LocalSource | null)[] = config.players.map((p, i) => {
@@ -881,17 +881,7 @@ function boot(): void {
       resizeView();
       if (ui !== null) ui.show('title');
       // A reload in the middle of a LAN match: take the seat back and land in the match.
-      const resumed = lanClient.resumeSavedSeat();
-      // A scanned in-browser LAN join code (#join=<code>): open the join view with it filled in.
-      const joinLink = /^#join=([A-Za-z0-9_-]+)$/.exec(location.hash);
-      if (joinLink !== null) {
-        history.replaceState(null, '', location.pathname + location.search);
-        if (!resumed) {
-          lanClient.setMode('browser');
-          lanClient.pendingJoinCode = joinLink[1];
-          openLanScreen();
-        }
-      }
+      lanClient.resumeSavedSeat();
     })
     .catch((err: unknown) => {
       showBootError(uiRoot, err);

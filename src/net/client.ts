@@ -9,6 +9,9 @@ import {
 } from './protocol';
 import { createLinkTransport, RtcLink, type BrowserLink } from './rtc';
 import { CodeError, expandCode, versionHash } from './sdpcode';
+import { SignalApi, SignalError } from './signal/api';
+import { isRoomCode, normalizeCode } from './signal/codes';
+import { RoomHost } from './signal/roomhost';
 import { createWebSocketTransport, type NetTransport } from './transport';
 
 /** sessionStorage key of the lobby seat this tab holds, so a reload mid-match can resume it. */
@@ -63,16 +66,30 @@ export type LobbyStatus = 'none' | 'joining' | 'in' | 'reconnecting';
 /** 'agent': lobbies live on `npm run lan` agents. 'browser': WebRTC to the host's tab (no agent). */
 export type LanMode = 'none' | 'agent' | 'browser';
 
-/** A guest's side of joining with a code in the browser mode. */
+/**
+ * A guest's side of joining in the browser mode. Short code: waiting (for the host's offer),
+ * connecting, connected. Long code: answering, answer (shown for the host to copy). Both: failed.
+ */
 export interface GuestJoin {
-  state: 'idle' | 'answering' | 'answer' | 'failed';
-  /** The answer code to show the host. */
+  state: 'idle' | 'waiting' | 'connecting' | 'connected' | 'answering' | 'answer' | 'failed';
+  /** The answer code to show the host (long codes). */
   code: string;
   message: string;
+  /** The failure was the connection itself: show the Wi-Fi hint. */
+  network?: boolean;
 }
 
-/** How long a guest waits for the host to enter its answer code. */
+/** How long a guest waits for the host to enter its answer code (long codes). */
 export const GUEST_WAIT_MS = 120000;
+/** Short codes: how long each step may take before the join fails. */
+export const ROOM_STEP_MS = 10000;
+/** Short codes: the guest's poll for its offer. */
+const GUEST_POLL_MS = 400;
+/** Short codes: register again when no offer came this long after registering (heals a lost write). */
+const REJOIN_MS = 3000;
+
+/** Whether the rendezvous answers: short codes need it. */
+export type HelperState = 'unknown' | 'checking' | 'ok' | 'none';
 
 /** A listing with its agent address resolved, plus whether this build can join it. */
 export interface LobbyRow extends LobbyListing {
@@ -86,8 +103,6 @@ function cleanAddress(address: string): string {
 export class LanClient {
   name = 'PLAYER';
   mode: LanMode = 'none';
-  /** Set from a #join= link: the LAN screen opens the browser mode's join view with it. */
-  pendingJoinCode = '';
 
   agentStatus: LinkStatus = 'idle';
   agentAddress = '';
@@ -125,6 +140,12 @@ export class LanClient {
   guest: GuestJoin = { state: 'idle', code: '', message: '' };
   private guestLink: RtcLink | null = null;
   private guestTimer = 0;
+  /** Bumped to stop a short-code join's polling. */
+  private guestRun = 0;
+  /** Short codes: the rendezvous, whether it answers, and the host's room. */
+  readonly signal = new SignalApi();
+  helper: HelperState = 'unknown';
+  room: RoomHost | null = null;
 
   /** Last error or notice, shown on the LAN screen; cleared by the next action. */
   message = '';
@@ -456,6 +477,7 @@ export class LanClient {
     this.linkTimer?.stop();
     this.linkTimer = null;
     link?.close();
+    this.closeRoom();
   }
 
   private sendOn(ws: WebSocket, msg: ClientMsg): void {
@@ -497,6 +519,7 @@ export class LanClient {
   /** Leave the lobby (the lobby's agent removes us when the socket closes). */
   leave(): void {
     this.send({ t: 'leave' });
+    if (this.guest.state === 'connected') this.guest = { state: 'idle', code: '', message: '' };
     this.lobby = null;
     this.lobbyStatus = 'none';
     this.token = '';
@@ -554,7 +577,169 @@ export class LanClient {
     this.attachLink(link, { t: 'create', settings, charId });
   }
 
-  /** Guest: read the host's join code and make the answer code for it. */
+  /** Ask the rendezvous whether it is there (the LAN screen does on open). */
+  checkHelper(): void {
+    if (this.helper === 'checking' || this.helper === 'ok') return;
+    this.helper = 'checking';
+    this.changed();
+    void this.signal.health().then((ok) => {
+      this.helper = ok ? 'ok' : 'none';
+      this.changed();
+    });
+  }
+
+  /** Host with a short code: the lobby opens at once, the code arrives a moment later. */
+  hostGame(settings: LobbySettings, charId: string, ids: { stages: string[]; characters: string[] }): void {
+    this.createInBrowser(settings, charId, ids);
+    if (this.link === null) return;
+    const room = new RoomHost(this.signal, this.host, () => ({
+      members: this.lobby?.members.length ?? 1,
+      inMatch: this.lobby?.inMatch ?? false,
+    }), () => this.changed());
+    this.room = room;
+    room.start();
+  }
+
+  /** Host: try again for a code after the helper could not be reached. */
+  retryRoom(): void {
+    if (this.room === null || this.room.state !== 'error') return;
+    this.room.start();
+  }
+
+  private closeRoom(): void {
+    const room = this.room;
+    this.room = null;
+    room?.close();
+  }
+
+  /** Guest with a short code: register, wait for the host's offer, answer, connect. */
+  joinRoom(text: string, charId: string): void {
+    this.cancelGuest();
+    this.message = '';
+    const code = normalizeCode(text);
+    if (!isRoomCode(code)) {
+      this.guest = { state: 'failed', code: '', message: 'A game code is 4 letters or digits' };
+      this.changed();
+      return;
+    }
+    const run = ++this.guestRun;
+    const live = (): boolean => this.guestRun === run;
+    const api = this.signal;
+    this.guest = { state: 'waiting', code: '', message: '' };
+    this.changed();
+    const fail = (message: string, network = false): void => {
+      if (!live()) return;
+      this.guestFailed(message, network);
+    };
+    const signalFail = (err: unknown, what: string): void => {
+      const e = err instanceof SignalError ? err : new SignalError(0, String(err));
+      if (e.status === 404) fail(what);
+      else if (e.status === 0) fail('Could not reach the online helper. Check the internet connection');
+      else fail(`The online helper refused that (${e.message})`);
+    };
+    void (async () => {
+      let guest = '';
+      try {
+        guest = await api.join(code);
+      } catch (err) {
+        signalFail(err, 'No game with that code. Check it with the host');
+        return;
+      }
+      const started = performance.now();
+      let registered = started;
+      let offer: string | null = null;
+      while (live() && offer === null) {
+        await new Promise((r) => setTimeout(r, GUEST_POLL_MS));
+        if (!live()) return;
+        try {
+          const r = await api.guestPoll(code, guest);
+          if (r.error === 'full') return fail('That game is full');
+          if (r.error === 'started') return fail('That game has started. Try again when it ends');
+          if (r.error !== undefined && r.error !== '') return fail('The host could not make a connection for you', true);
+          offer = r.offer;
+        } catch (err) {
+          if (err instanceof SignalError && err.status === 404 && err.message === 'no such guest') {
+            // This registration lost a race with another join on the room's guest list: register
+            // again with the same id rather than failing.
+            registered = performance.now();
+            await api.join(code, guest).catch(() => {});
+            continue;
+          }
+          if (err instanceof SignalError && err.status === 404) return fail('The host closed that game');
+          // A missed poll: the next one tries again.
+        }
+        const now = performance.now();
+        if (offer === null && now - started > ROOM_STEP_MS) {
+          return fail('The host did not answer. Check the code, and that the host is still in the lobby');
+        }
+        if (offer === null && now - registered > REJOIN_MS) {
+          registered = now;
+          await api.join(code, guest).catch(() => {});
+        }
+      }
+      if (!live() || offer === null) return;
+      this.answerOffer(offer, charId, run, (answer) => api.putAnswer(code, guest, answer));
+    })();
+  }
+
+  /** Short codes: answer the host's offer and connect (fails after ROOM_STEP_MS). */
+  private answerOffer(text: string, charId: string, run: number, send: (answer: string) => Promise<void>): void {
+    const live = (): boolean => this.guestRun === run;
+    let offerSdp = '';
+    let invite = 0;
+    try {
+      const code = expandCode(text);
+      if (code.kind !== 'offer') throw new CodeError('The host sent something that is not an offer');
+      if (code.versionHash !== versionHash(BUILD_VERSION)) {
+        this.guestFailed('Different version: the host runs another build of the game. Reload both pages');
+        return;
+      }
+      offerSdp = code.sdp;
+      invite = code.invite;
+    } catch (err) {
+      this.guestFailed(err instanceof CodeError ? err.message : 'The host sent an offer this page cannot read');
+      return;
+    }
+    let link: RtcLink;
+    try {
+      link = new RtcLink();
+    } catch (err) {
+      this.guestFailed(`This browser cannot open a WebRTC connection: ${(err as Error).message}`);
+      return;
+    }
+    this.guestLink = link;
+    this.guest = { state: 'connecting', code: '', message: '' };
+    this.changed();
+    const netFail = (message: string): void => {
+      if (!live() || this.guestLink !== link) return;
+      this.guestFailed(message, true);
+    };
+    this.guestTimer = window.setTimeout(() => netFail('Could not connect within 10 seconds'), ROOM_STEP_MS);
+    link.onOpen = () => {
+      if (this.guestLink !== link) return;
+      this.clearGuestTimer();
+      this.guestLink = null;
+      this.guest = { state: 'connected', code: '', message: '' };
+      this.joinChar = charId;
+      this.attachLink(link, null);
+    };
+    link.onClose = () => netFail('The connection closed before it opened');
+    void (async () => {
+      try {
+        await link.pc.setRemoteDescription({ type: 'offer', sdp: offerSdp });
+        await link.pc.setLocalDescription(await link.pc.createAnswer());
+        const answer = await link.localCode('answer', invite, BUILD_VERSION);
+        if (this.guestLink !== link) return;
+        await send(answer);
+      } catch (err) {
+        if (this.guestLink !== link) return;
+        if (err instanceof SignalError) netFail(err.status === 404 ? 'The host closed that game' : 'Could not reach the online helper');
+        else netFail(`Could not answer the host: ${(err as Error).message}`);
+      }
+    })();
+  }
+
+  /** Guest: read the host's long join code and make the answer code for it. */
   joinWithCode(text: string, charId: string): void {
     this.cancelGuest();
     this.message = '';
@@ -611,6 +796,7 @@ export class LanClient {
 
   /** Guest: give up on the pending join. */
   cancelGuest(): void {
+    this.guestRun++;
     this.dropGuestLink();
     if (this.guest.state !== 'idle') {
       this.guest = { state: 'idle', code: '', message: '' };
@@ -618,9 +804,10 @@ export class LanClient {
     }
   }
 
-  private guestFailed(message: string): void {
+  private guestFailed(message: string, network = false): void {
+    this.guestRun++;
     this.dropGuestLink();
-    this.guest = { state: 'failed', code: '', message };
+    this.guest = { state: 'failed', code: '', message, network };
     this.changed();
   }
 
@@ -700,6 +887,8 @@ export class LanClient {
   /** The browser link went down: no resume in this mode, so the lobby (or match) is over. */
   private linkLost(): void {
     this.link = null;
+    this.closeRoom();
+    if (this.guest.state === 'connected') this.guest = { state: 'idle', code: '', message: '' };
     this.linkTimer?.stop();
     this.linkTimer = null;
     const hadLobby = this.lobby !== null;

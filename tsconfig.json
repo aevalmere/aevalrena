@@ -12,5 +12,5 @@
     "types": []
   },
   "include": ["src"],
-  "exclude": ["src/net/discoverytest.ts"]
+  "exclude": ["src/net/discoverytest.ts", "src/net/signaltest.ts"]
 }

@@ -1,0 +1,14 @@
+# The LAN rendezvous as a standalone Worker, for a site hosted without Functions (GitHub Pages).
+# Not needed on Cloudflare Pages: there, functions/api/[[route]].ts serves the same routes.
+#
+#   npx wrangler kv namespace create LOBBY        (paste the id it prints below)
+#   npx wrangler deploy -c server/rendezvous/wrangler.worker.toml
+#
+# Then build the site with VITE_RENDEZVOUS_URL set to the Worker's URL (docs/LAN.md 11.9).
+name = "aevalrena-rendezvous"
+main = "worker.ts"
+compatibility_date = "2026-09-01"
+
+[[kv_namespaces]]
+binding = "LOBBY"
+id = "PASTE_THE_KV_NAMESPACE_ID_HERE"
