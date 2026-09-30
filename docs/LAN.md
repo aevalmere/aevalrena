@@ -571,19 +571,24 @@ turns it into `__AEV_RENDEZVOUS_URL__`):
 
 | Value | Helper at |
 |---|---|
-| unset in `npm run build` | this page's own origin, `/api/...` (Cloudflare Pages) |
+| unset in `npm run build` | this page's own origin, `/api/...` (Cloudflare) |
 | unset in `npm run dev` | port 8788 on the page's host (`npm run rendezvous`) |
 | `:PORT` | that port on the page's host |
 | a URL | that URL, for example `https://aevalrena-rendezvous.<account>.workers.dev` |
 
-**Cloudflare Pages (simplest).** `functions/api/[[route]].ts` serves the routes next to the site.
+**Cloudflare Worker with static assets (simplest).** The root `wrangler.toml` names
+`server/rendezvous/worker.ts` as the Worker, serves `dist` as assets and sends only `/api/*` to
+the Worker (`run_worker_first`). A Git-connected project in Workers & Pages runs `npm run build`
+and then `npx wrangler deploy`.
 
-1. `npx wrangler kv namespace create LOBBY` and note the id.
-2. In `wrangler.toml`, uncomment the `[[kv_namespaces]]` block and paste the id (binding name
-   `LOBBY`). With that file present, Pages takes bindings from it, not from the dashboard.
-3. Build command `npm run build`, output `dist`, as before. Leave `VITE_RENDEZVOUS_URL` unset.
-4. Check: `https://<site>/api/health` returns `{"ok":true}`. Without the binding it returns 503
+1. `npx wrangler kv namespace create LOBBY` and paste the id into the `[[kv_namespaces]]` block
+   of `wrangler.toml` (binding name `LOBBY`). Bindings come from that file, not the dashboard.
+2. Leave `VITE_RENDEZVOUS_URL` unset, so the page uses its own origin.
+3. Check: `https://<site>/api/health` returns `{"ok":true}`. Without the binding it returns 503
    and the game falls back to long codes.
+
+`functions/api/[[route]].ts` is the same handler as a Pages Function, kept for a Pages project
+(build output `dist`, bindings from `pages_build_output_dir` style config).
 
 **GitHub Pages plus a Worker.** GitHub Pages cannot run code, so the helper runs as a Worker.
 

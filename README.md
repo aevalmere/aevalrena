@@ -45,13 +45,14 @@ To try it locally: `npm run rendezvous` in one terminal (the helper, port 8788) 
 in another, then open the game in two tabs. Without the helper the LAN screen falls back to long
 codes copied by hand. Details: [docs/LAN.md](docs/LAN.md) section 11.
 
-## Deploy to Cloudflare Pages (with the LAN helper)
+## Deploy to Cloudflare (with the LAN helper)
 
-1. Connect the repository in the Cloudflare Pages dashboard.
-2. Set the build command to `npm run build` and the output directory to `dist`.
-3. Create the KV namespace for the LAN helper: `npx wrangler kv namespace create LOBBY`. In
-   `wrangler.toml`, uncomment the `[[kv_namespaces]]` block (binding `LOBBY`) and paste the id.
-   `functions/api/[[route]].ts` then serves `/api/*` next to the site.
+1. In the Cloudflare dashboard, Workers & Pages, Create, connect the repository (main branch).
+2. Build command `npm run build`, deploy command `npx wrangler deploy` (the default). The
+   `wrangler.toml` at the root serves `dist` as static assets and routes `/api/*` to the
+   rendezvous Worker in `server/rendezvous/worker.ts`.
+3. The KV namespace for the LAN helper is bound as `LOBBY` in `wrangler.toml`. For a new account
+   create one with `npx wrangler kv namespace create LOBBY` and paste its id there.
 4. Check `https://<your site>/api/health` returns `{"ok":true}`.
 
 ## Deploy to GitHub Pages

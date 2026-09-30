@@ -1,14 +1,19 @@
-# Cloudflare Pages: the built site plus the LAN rendezvous Function (functions/api/[[route]].ts).
-# The Function needs a KV namespace bound as LOBBY:
+# Cloudflare Worker with static assets: the built site (dist) plus the LAN rendezvous on /api/*.
+# Cloudflare's Git-connected "Workers & Pages" project runs `npm run build` then `npx wrangler deploy`.
 #
+# The rendezvous stores lobby codes in the KV namespace bound as LOBBY. Create one with
 #   npx wrangler kv namespace create LOBBY
-#
-# then uncomment the block below and paste the id it printed. With this file present, Pages
-# reads bindings from here, not from the dashboard. Until the binding exists the site still
-# works; LAN falls back to long codes. docs/LAN.md section 11.9.
+# and paste the id below. Without the binding /api/health answers 503 and the game falls back to
+# long codes. docs/LAN.md section 11.9.
 name = "aevalrena"
-pages_build_output_dir = "dist"
+main = "server/rendezvous/worker.ts"
 compatibility_date = "2026-09-01"
+
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+# Only /api/* reaches the Worker; every other path is served from dist.
+run_worker_first = ["/api/*"]
 
 [[kv_namespaces]]
 binding = "LOBBY"
