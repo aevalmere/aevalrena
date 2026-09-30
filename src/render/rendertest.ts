@@ -1,9 +1,10 @@
 import { TUNING } from '../core/constants';
 import type { GameState, MatchConfig, PerfSample, SimEvent } from '../core/types';
-import { frameNameFor } from './anim';
-import { getFrame } from './bake';
+import { animFrameIndex, frameNameFor } from './anim';
+import { getFrame, getShadowFrame } from './bake';
+import { COUNTER_DIM_FRAMES } from './fx';
 import { createRenderer } from './index';
-import { VARIANT_COUNT, VARIANT_NAMES, remapRgb, rgbToHsl } from './palette';
+import { PALETTES, VARIANT_COUNT, VARIANT_NAMES, remapHex, remapRgb, rgbToHsl, variantNames } from './palette';
 import { getCharVisual } from './visuals';
 
 /**
@@ -50,7 +51,11 @@ interface CallLog {
   restores: number;
   fillStyles: number;
   alphas: number;
+  /** Fills covering most of the view: the background clear and any screen dim. */
+  bigFills: number;
 }
+
+const BIG_FILL = 200;
 
 function createLog(): CallLog {
   return {
@@ -63,6 +68,7 @@ function createLog(): CallLog {
     restores: 0,
     fillStyles: 0,
     alphas: 0,
+    bigFills: 0,
   };
 }
 
@@ -76,6 +82,7 @@ function resetLog(log: CallLog): void {
   log.restores = 0;
   log.fillStyles = 0;
   log.alphas = 0;
+  log.bigFills = 0;
 }
 
 interface SizedImage {
@@ -121,6 +128,8 @@ class FakeContext {
     this.log.translates++;
   }
 
+  rotate(): void {}
+
   scale(x: number): void {
     this.log.scales.push(x);
   }
@@ -146,8 +155,9 @@ class FakeContext {
     this.log.draws.push(record);
   }
 
-  fillRect(): void {
+  fillRect(_x: number, _y: number, w: number, h: number): void {
     this.log.fillRects++;
+    if (w >= BIG_FILL && h >= BIG_FILL) this.log.bigFills++;
   }
 
   strokeRect(): void {}
@@ -250,6 +260,7 @@ function matchConfig(): MatchConfig {
 }
 
 const DEBUG_OFF = { hitboxes: false, frameData: false, perf: false };
+const DEBUG_FRAME_DATA = { hitboxes: false, frameData: true, perf: false };
 const PERF: PerfSample = { simMs: 0, renderMs: 0, fps: 0 };
 
 function sleep(ms: number): Promise<void> {
@@ -273,8 +284,8 @@ async function loadCreateGameState(): Promise<(config: MatchConfig) => GameState
   throw new Error('unreachable');
 }
 
-function hitEvent(victim: number): SimEvent {
-  return { type: 'hit', x: 0, y: -20, attacker: 0, victim, damage: 8, kb: 80, angle: 45 };
+function hitEvent(victim: number, kb = 80, crit = false): SimEvent {
+  return { type: 'hit', x: 0, y: -20, attacker: 0, victim, damage: 8, kb, angle: 45, crit };
 }
 
 /** Body canvas the renderer would pick for a fighter, normal or white silhouette. */
@@ -318,6 +329,7 @@ function copyLog(log: CallLog): CallLog {
   copy.translates = log.translates;
   copy.fillStyles = log.fillStyles;
   copy.alphas = log.alphas;
+  copy.bigFills = log.bigFills;
   for (let i = 0; i < log.draws.length; i++) copy.draws.push(log.draws[i]);
   for (let i = 0; i < log.scales.length; i++) copy.scales.push(log.scales[i]);
   for (let i = 0; i < log.transforms.length; i++) copy.transforms.push(log.transforms[i]);
@@ -373,6 +385,131 @@ export function paletteChecks(): RenderTestResult[] {
       detail: 'hue ' + hsl[0].toFixed(1) + ' sat ' + hsl[1].toFixed(2) + ' light ' + hsl[2].toFixed(2),
     });
   }
+  return out;
+}
+
+/**
+ * Aeval band 1 regression: these 12 colours and their remap per variant were recorded from the
+ * single-band palette.ts before the per-character rewrite (2026-09-30). Saturated blues, the
+ * outline navy, skin, white and grey; none of them is in the coat band.
+ */
+const AEVAL_PINS: readonly [string, readonly string[]][] = [
+  ['#3f8fe6', ['#3f8fe6', '#b835f0', '#bcc0c4', '#ea5a85']],
+  ['#7fb2ff', ['#7fb2ff', '#de7fff', '#d7d9dd', '#ff91ad']],
+  ['#b8e3ff', ['#b8e3ff', '#e5b8ff', '#e9ebec', '#ffc2d8']],
+  ['#1f5fb0', ['#1f5fb0', '#8b16b9', '#a2a7ac', '#d42556']],
+  ['#2a7fd0', ['#2a7fd0', '#a020da', '#b0b4b8', '#d94574']],
+  ['#5ac8f0', ['#5ac8f0', '#b251f9', '#c7ccce', '#f271a8']],
+  ['#0a1030', ['#0a1030', '#0a1030', '#0a1030', '#0a1030']],
+  ['#e8b89a', ['#e8b89a', '#e8b89a', '#e8b89a', '#e8b89a']],
+  ['#ffffff', ['#ffffff', '#ffffff', '#ffffff', '#ffffff']],
+  ['#808080', ['#808080', '#808080', '#808080', '#808080']],
+  ['#9fd4ff', ['#9fd4ff', '#df9fff', '#e1e3e5', '#ffacc8']],
+  ['#c07a60', ['#c07a60', '#c07a60', '#c07a60', '#c07a60']],
+];
+
+function hslOfHex(hex: string, out: number[]): void {
+  rgbToHsl(parseInt(hex.slice(1, 3), 16), parseInt(hex.slice(3, 5), 16), parseInt(hex.slice(5, 7), 16), out);
+}
+
+function hueDist(a: number, b: number): number {
+  let d = Math.abs(a - b) % 360;
+  if (d > 180) d = 360 - d;
+  return d;
+}
+
+/**
+ * Per character palettes: Aeval band 1 pinned, Aeval's coat tints part way, Trekmore's red,
+ * white and gold land in their bands and his ink never moves.
+ */
+export function characterPaletteChecks(): RenderTestResult[] {
+  const out: RenderTestResult[] = [];
+  const hsl = [0, 0, 0];
+  const base = [0, 0, 0];
+
+  let pinFails = 0;
+  let firstFail = '';
+  for (const [hex, want] of AEVAL_PINS) {
+    for (let v = 0; v < VARIANT_COUNT; v++) {
+      const got = remapHex(hex, v, 'aeval');
+      if (got !== want[v]) {
+        pinFails++;
+        if (firstFail === '') firstFail = hex + ' v' + v + ' got ' + got + ' want ' + want[v];
+      }
+    }
+  }
+  out.push({
+    name: 'Aeval band 1 output unchanged on 12 pinned colours',
+    pass: pinFails === 0,
+    detail: pinFails === 0 ? '48 of 48 match' : pinFails + ' mismatches, first ' + firstFail,
+  });
+
+  // Coat: a mid, low-saturation blue grey in the middle of the coat band.
+  const coat = '#4a5a78';
+  const coatBand = PALETTES.aeval.bands[1];
+  hslOfHex(coat, base);
+  const v0Same = remapHex(coat, 0, 'aeval') === coat;
+  hslOfHex(remapHex(coat, 1, 'aeval'), hsl);
+  const targetHue = 280 + (base[0] - coatBand.hueCenter) * 0.5;
+  const before = hueDist(base[0], targetHue);
+  const after = hueDist(hsl[0], targetHue);
+  const moved = (before - after) / before;
+  const s = coatBand.strength;
+  out.push({
+    name: 'Aeval coat pixel tints toward purple by the coat strength, variant 0 leaves it',
+    pass: v0Same && Math.abs(moved - s) < 0.1 && hsl[1] >= base[1] - 0.02,
+    detail:
+      coat + ' hue ' + base[0].toFixed(1) + ' -> ' + hsl[0].toFixed(1) + ' (target ' + targetHue.toFixed(1) +
+      '), moved ' + (moved * 100).toFixed(0) + '% of the way, strength ' + s + ', variant 0 unchanged ' + v0Same,
+  });
+
+  // Trekmore samples: three glow violets, three cloth violets.
+  const samples = ['#8a4dff', '#b070ff', '#6a30c0', '#3a2060', '#2a1648', '#4a2a78'];
+  const rows: string[] = [];
+  let redOk = true;
+  let whiteOk = true;
+  let goldOk = true;
+  for (const hex of samples) {
+    hslOfHex(hex, base);
+    hslOfHex(remapHex(hex, 1, 'trekmore'), hsl);
+    if (hueDist(hsl[0], 348) > 10 || hsl[1] < 0.35 || Math.abs(hsl[2] - base[2]) > 0.08) redOk = false;
+    const red = hsl[0].toFixed(0);
+    hslOfHex(remapHex(hex, 2, 'trekmore'), hsl);
+    if (hsl[1] > base[1] * 0.5 || hsl[2] <= base[2]) whiteOk = false;
+    const white = hsl[1].toFixed(2) + '/' + hsl[2].toFixed(2);
+    const goldHex = remapHex(hex, 3, 'trekmore');
+    hslOfHex(goldHex, hsl);
+    // Hue 28..52 covers the bronze deep shade; saturation high; mid tones lifted.
+    if (hsl[0] < 28 || hsl[0] > 52 || hsl[1] < 0.55 || hsl[2] <= base[2]) goldOk = false;
+    rows.push(hex + ' red h' + red + ' white s/l ' + white + ' gold ' + goldHex + ' h' + hsl[0].toFixed(0));
+  }
+  out.push({ name: 'Trekmore red keeps lightness and lands near crimson hue 348', pass: redOk, detail: rows.join('; ') });
+  out.push({ name: 'Trekmore white desaturates and lifts', pass: whiteOk, detail: samples.length + ' samples' });
+  out.push({ name: 'Trekmore gold lands in the metal band and lifts lightness', pass: goldOk, detail: samples.length + ' samples' });
+
+  // Gold on a mid glow purple: the gold band proper (40..48), saturated, lifted.
+  const glow = '#6a30c0';
+  hslOfHex(glow, base);
+  hslOfHex(remapHex(glow, 3, 'trekmore'), hsl);
+  const ink = ['#0e0816', '#08060c', '#000000'];
+  let inkOk = true;
+  for (const hex of ink) {
+    for (let v = 0; v < VARIANT_COUNT; v++) if (remapHex(hex, v, 'trekmore') !== hex) inkOk = false;
+  }
+  out.push({
+    name: 'Trekmore gold turns a purple pixel into the gold band and leaves near-black alone',
+    pass: hsl[0] >= 40 && hsl[0] <= 48 && hsl[1] >= 0.6 && hsl[2] > base[2] && inkOk,
+    detail:
+      glow + ' -> ' + remapHex(glow, 3, 'trekmore') + ' hue ' + hsl[0].toFixed(1) + ' sat ' + hsl[1].toFixed(2) +
+      ' light ' + base[2].toFixed(2) + ' -> ' + hsl[2].toFixed(2) + '; ink ' + ink.join(' ') + ' unchanged ' + inkOk,
+  });
+
+  const names = variantNames('trekmore').join(' ');
+  out.push({
+    name: 'variant names per character',
+    pass: names === 'Purple Red White Gold' && variantNames('aeval').join(' ') === 'Blue Purple White Pink',
+    detail: 'trekmore: ' + names + '; aeval: ' + variantNames('aeval').join(' ') + '; unknown: ' + variantNames('nobody').join(' '),
+  });
   return out;
 }
 
@@ -453,6 +590,61 @@ export async function runRenderTest(): Promise<RenderTestResult[]> {
   const purpleBody = bodyCanvasFor(state, 1, false);
   state.fighters[1].variant = 0;
 
+  // Echo: a hand-built echo of jab on fighter 0, ECHO_AGE frames in, at a latched point.
+  const ECHO_AGE = 5;
+  const noEcho = renderFrame(lastFrame + 2, noEvents);
+  const owner = state.fighters[0];
+  owner.echoMove = 'jab';
+  owner.echoAge = ECHO_AGE;
+  owner.echoX = -30;
+  owner.echoY = 0;
+  owner.echoFacing = 1;
+  const withEcho = renderFrame(lastFrame + 3, noEvents);
+  const withEchoAgain = renderFrame(lastFrame + 4, noEvents);
+  const ownerVisual = getCharVisual(owner.charId, 0);
+  let expectedEcho: object | null = null;
+  let echoFrameName = '';
+  if (ownerVisual !== null) {
+    const anim = ownerVisual.sprites.anims[ownerVisual.sprites.animFor('attack', 'jab', owner)];
+    if (anim !== undefined) {
+      echoFrameName = anim.frames[animFrameIndex(anim, ECHO_AGE)];
+      expectedEcho = getShadowFrame(ownerVisual.baseBodySheetId, echoFrameName, false, owner.variant, owner.charId);
+    }
+  }
+  const ownerFrame = ownerVisual === null ? null : frameNameFor(ownerVisual.sprites, owner);
+  owner.echoAge = -3;
+  const waiting = renderFrame(lastFrame + 5, noEvents);
+  owner.echoMove = null;
+
+  // Crit: the same knockback shakes harder with crit set. Each hit is rendered after the
+  // previous shake has decayed.
+  const quietGap = TUNING.camera.shakeFrames + 2;
+  const plainAt = lastFrame + 6 + quietGap;
+  renderFrame(plainAt - 1, noEvents);
+  const plainHit = renderFrame(plainAt, [hitEvent(1, 20, false)]);
+  const critAt = plainAt + quietGap;
+  renderFrame(critAt - 1, noEvents);
+  const critHit = renderFrame(critAt, [hitEvent(1, 20, true)]);
+
+  // Counter and teleport events: the counter dims the screen (one full-view fill) unless the
+  // frame data view is on; a teleport with no step trail art draws nothing and does not throw.
+  const counterAt = critAt + quietGap;
+  const quietBeforeCounter = renderFrame(counterAt - 1, noEvents);
+  const counter: SimEvent[] = [{ type: 'counter', x: 0, y: -20, slot: 1, attacker: 0 }];
+  const onCounter = renderFrame(counterAt, counter);
+  const teleport: SimEvent[] = [{ type: 'teleport', slot: 0, fromX: 0, fromY: 0, x: 60, y: 0, kind: 'step' }];
+  renderFrame(counterAt + COUNTER_DIM_FRAMES + 1, teleport);
+  function renderDebugFrame(frame: number, events: SimEvent[]): CallLog {
+    state.frame = frame;
+    state.events.length = 0;
+    for (let i = 0; i < events.length; i++) state.events.push(events[i]);
+    resetLog(log);
+    renderer.render(state, null, 1, DEBUG_FRAME_DATA, PERF);
+    return copyLog(log);
+  }
+  const debugQuiet = renderDebugFrame(counterAt + 20, noEvents);
+  const debugCounter = renderDebugFrame(counterAt + 21, counter);
+
   return [
     {
       name: 'screen shake fires on the hit frame and decays to zero',
@@ -486,6 +678,31 @@ export async function runRenderTest(): Promise<RenderTestResult[]> {
       detail: 'variant canvas drawn: ' + drewCanvas(tinted, purpleBody) + ', base canvas drawn: ' + drewCanvas(tinted, baseBody),
     },
     {
+      name: 'echo draw issues one extra drawImage of the cached shadow at the delayed frame',
+      pass:
+        expectedEcho !== null &&
+        withEcho.draws.length === noEcho.draws.length + 1 &&
+        drewCanvas(withEcho, expectedEcho) &&
+        drewCanvas(withEchoAgain, expectedEcho) &&
+        waiting.draws.length === noEcho.draws.length,
+      detail:
+        noEcho.draws.length + ' draws without, ' + withEcho.draws.length + ' with the echo (jab frame ' +
+        echoFrameName + ' at age ' + ECHO_AGE + ', owner on ' + ownerFrame + '), same canvas next render: ' +
+        drewCanvas(withEchoAgain, expectedEcho) + ', ' + waiting.draws.length + ' while echoAge < 0',
+    },
+    {
+      name: 'a crit hit shakes harder than a normal hit of the same knockback',
+      pass: shakeOffset(critHit) > shakeOffset(plainHit) && shakeOffset(plainHit) > 0,
+      detail: 'normal ' + shakeOffset(plainHit) + ' px, crit ' + shakeOffset(critHit) + ' px',
+    },
+    {
+      name: 'a counter event dims the screen, not with the frame data view on',
+      pass: onCounter.bigFills === quietBeforeCounter.bigFills + 1 && debugCounter.bigFills === debugQuiet.bigFills,
+      detail:
+        quietBeforeCounter.bigFills + ' full-view fills quiet, ' + onCounter.bigFills + ' on the counter; frame data view ' +
+        debugQuiet.bigFills + ' quiet, ' + debugCounter.bigFills + ' on the counter',
+    },
+    {
       name: 'parallax layers scale with camera zoom',
       pass: baseline.scales.length > 0 && Math.abs(zoomScale - zoomMax) < 1e-6,
       detail:
@@ -495,7 +712,7 @@ export async function runRenderTest(): Promise<RenderTestResult[]> {
 }
 
 if (typeof process !== 'undefined' && process.argv[1] && process.argv[1].endsWith('rendertest.ts')) {
-  const results = [...paletteChecks(), ...(await runRenderTest())];
+  const results = [...paletteChecks(), ...characterPaletteChecks(), ...(await runRenderTest())];
   let passed = 0;
   for (let i = 0; i < results.length; i++) {
     const r = results[i];

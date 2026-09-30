@@ -19,13 +19,20 @@ import type { FighterDrawDeps } from './fighters';
 import { drawFighters, drawRespawnPlatforms, resolveFighterFrames } from './fighters';
 import { bakeFont } from './font';
 import {
+  clearClips,
   clearSparks,
+  createClips,
   createSparks,
+  drawClips,
+  drawCounterDim,
   drawFighterFx,
   drawGeysers,
   drawProjectiles,
   drawSparks,
+  spawnClip,
   spawnSpark,
+  startCounterDim,
+  stepClips,
   stepSparks,
 } from './fx';
 import {
@@ -34,6 +41,7 @@ import {
   drawParticles,
   spawnDashDust,
   spawnDroplets,
+  spawnGlowSparks,
   spawnHitSparks,
   spawnKoBurst,
   spawnLandDust,
@@ -60,6 +68,15 @@ const HIT_SHAKE_MAX = 3;
 const KO_SHAKE = 4;
 const HARD_LAND_SHAKE = 1;
 const SHIELD_BREAK_SHAKE = 2;
+/** A critical hit shakes this much harder than a normal hit of the same knockback. */
+export const CRIT_SHAKE_MUL = 1.6;
+/** Crit: the counter flash clip at this scale, plus a few glow sparks. */
+const CRIT_FLASH_SCALE = 1.5;
+const CRIT_GLOW_SPARKS = 3;
+/** Chest height above the feet, for effects placed on a fighter's body. */
+const CHEST_Y = -24;
+/** The teleport arrival puff shows this many sim frames after the departure one. */
+const TELEPORT_ARRIVE_DELAY = 4;
 
 /** Optional hook a StageArt module can expose so its layers bake during load. */
 interface PreparableStageArt extends StageArt {
@@ -89,6 +106,7 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
   const shakeState = createShake();
   const particles = createParticles();
   const sparks = createSparks();
+  const clips = createClips();
 
   const posX = new Float32Array(MAX_PLAYERS);
   const posY = new Float32Array(MAX_PLAYERS);
@@ -126,6 +144,7 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
   function resetTransientState(): void {
     clearParticles(particles);
     clearSparks(sparks);
+    clearClips(clips);
     resetShake(shakeState);
     flash.fill(0);
     cameraPrimed = false;
@@ -155,14 +174,34 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
 
   /**
    * The die event carries no owner, so match it to the projectile it came from: the sim marks
-   * it dead where it stood, and it is still in the list on the frame the event is read.
+   * it dead where it stood, and it is still in the list on the frame the event is read. -1 when
+   * no projectile matches (variantForSlot and paletteIdForSlot then read the defaults).
    */
-  function variantForDeath(state: GameState, defId: string, x: number, y: number): number {
+  function ownerForDeath(state: GameState, defId: string, x: number, y: number): number {
     for (let i = 0; i < state.projectiles.length; i++) {
       const p = state.projectiles[i];
-      if (p.defId === defId && p.x === x && p.y === y) return variantForSlot(state, p.owner);
+      if (p.defId === defId && p.x === x && p.y === y) return p.owner;
     }
-    return 0;
+    return -1;
+  }
+
+  /** Character of the fighter in `slot`, Aeval's palette when none (particles need an id). */
+  function paletteIdForSlot(state: GameState, slot: number): string {
+    const id = charIdForSlot(state, slot);
+    return id === '' ? 'aeval' : id;
+  }
+
+  /** Feet y of the fighter in `slot`, or `fallback` when there is none. */
+  function feetYForSlot(state: GameState, slot: number, fallback: number): number {
+    if (slot < 0 || slot >= MAX_PLAYERS) return fallback;
+    const i = slotToIndex[slot];
+    return i < 0 ? fallback : state.fighters[i].y;
+  }
+
+  function feetXForSlot(state: GameState, slot: number, fallback: number): number {
+    if (slot < 0 || slot >= MAX_PLAYERS) return fallback;
+    const i = slotToIndex[slot];
+    return i < 0 ? fallback : state.fighters[i].x;
   }
 
   function consumeEvents(state: GameState): void {
@@ -171,11 +210,17 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
       switch (event.type) {
         case 'hit': {
           const v = variantForSlot(state, event.attacker);
-          spawnHitSparks(particles, event.x, event.y, event.damage, v);
-          spawnDroplets(particles, event.x, event.y, 4, v);
+          const c = paletteIdForSlot(state, event.attacker);
+          spawnHitSparks(particles, event.x, event.y, event.damage, v, c);
+          spawnDroplets(particles, event.x, event.y, 4, v, c);
           spawnSpark(sparks, event.x, event.y, charIdForSlot(state, event.attacker), v);
           let amount = HIT_SHAKE_BASE + event.kb * HIT_SHAKE_PER_KB;
           if (amount > HIT_SHAKE_MAX) amount = HIT_SHAKE_MAX;
+          if (event.crit === true) {
+            amount *= CRIT_SHAKE_MUL;
+            spawnClip(clips, c, v, 'counterFlash', event.x, event.y, CRIT_FLASH_SCALE, 0, true);
+            spawnGlowSparks(particles, event.x, event.y, CRIT_GLOW_SPARKS, v, c);
+          }
           addShake(shakeState, amount);
           const vi = event.victim >= 0 && event.victim < MAX_PLAYERS ? slotToIndex[event.victim] : -1;
           if (vi >= 0) flash[vi] = FLASH_FRAMES;
@@ -189,7 +234,7 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
           addShake(shakeState, SHIELD_BREAK_SHAKE);
           break;
         case 'ko':
-          spawnKoBurst(particles, event.x, event.y, variantForSlot(state, event.slot));
+          spawnKoBurst(particles, event.x, event.y, variantForSlot(state, event.slot), paletteIdForSlot(state, event.slot));
           addShake(shakeState, KO_SHAKE);
           break;
         case 'land':
@@ -200,14 +245,38 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
           spawnDashDust(particles, event.x, event.y, event.facing);
           break;
         case 'projectileSpawn':
-          spawnDroplets(particles, event.x, event.y, 6, variantForSlot(state, event.slot));
+          spawnDroplets(particles, event.x, event.y, 6, variantForSlot(state, event.slot), paletteIdForSlot(state, event.slot));
           break;
-        case 'projectileDie':
-          spawnDroplets(particles, event.x, event.y, 4, variantForDeath(state, event.defId, event.x, event.y));
+        case 'projectileDie': {
+          const owner = ownerForDeath(state, event.defId, event.x, event.y);
+          spawnDroplets(particles, event.x, event.y, 4, variantForSlot(state, owner), paletteIdForSlot(state, owner));
           break;
+        }
         case 'respawn':
-          spawnDroplets(particles, event.x, event.y, 8, variantForSlot(state, event.slot));
+          spawnDroplets(particles, event.x, event.y, 8, variantForSlot(state, event.slot), paletteIdForSlot(state, event.slot));
           break;
+        case 'jump':
+          // A character with a step trail puffs it under the feet on a mid-air jump.
+          if (event.double) {
+            spawnClip(clips, paletteIdForSlot(state, event.slot), variantForSlot(state, event.slot), 'stepTrail', event.x, event.y, 1, 0, false);
+          }
+          break;
+        case 'counter': {
+          const v = variantForSlot(state, event.slot);
+          const c = paletteIdForSlot(state, event.slot);
+          const cx = feetXForSlot(state, event.slot, event.x);
+          const cy = feetYForSlot(state, event.slot, event.y - CHEST_Y) + CHEST_Y;
+          spawnClip(clips, c, v, 'counterFlash', cx, cy, 1, 0, false);
+          startCounterDim(clips);
+          break;
+        }
+        case 'teleport': {
+          const v = variantForSlot(state, event.slot);
+          const c = paletteIdForSlot(state, event.slot);
+          spawnClip(clips, c, v, 'stepTrail', event.fromX, event.fromY + CHEST_Y, 1, 0, false);
+          spawnClip(clips, c, v, 'stepTrail', event.x, event.y + CHEST_Y, 1, TELEPORT_ARRIVE_DELAY, false);
+          break;
+        }
         default:
           break;
       }
@@ -268,6 +337,7 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
     stepShake(shakeState, steps);
     stepParticles(particles, steps);
     stepSparks(sparks, steps);
+    stepClips(clips, steps);
     if (steps <= 0) return;
     for (let i = 0; i < MAX_PLAYERS; i++) {
       if (flash[i] > 0) flash[i] = flash[i] > steps ? flash[i] - steps : 0;
@@ -369,6 +439,7 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
       drawGeysers(ctx, state, posX, posY);
       drawFighters(ctx, state, posX, posY, flash, drawDeps, renderTick);
       drawFighterFx(ctx, state, posX, posY);
+      drawClips(ctx, clips);
       drawSparks(ctx, sparks);
       drawParticles(ctx, particles);
       if (debug.hitboxes) drawDebugWorld(ctx, state, posX, posY, projX, projY);
@@ -377,6 +448,7 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
 
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.globalAlpha = 1;
+      drawCounterDim(ctx, clips, liveView.w, liveView.h, debug.frameData);
       drawDebugText(ctx, state, debug, perf);
     },
   };

@@ -10,7 +10,7 @@ import {
   type MenuCtx,
   type SlotMode,
 } from './context';
-import { VARIANT_COUNT, VARIANT_NAMES, VARIANT_SWATCHES, clampVariant } from '../render/palette';
+import { VARIANT_COUNT, clampVariant, variantNames, variantSwatches } from '../render/palette';
 import { setVariantSrc } from '../render/varianticon';
 import { PLAYER_ACCENTS, TEAM_NAMES, accentVars, iconAsset, uiAsset } from './theme';
 
@@ -75,6 +75,40 @@ function saveVariants(variants: number[]): void {
     /* storage blocked or full: remembered for this session only */
   }
 }
+
+/** localStorage key for each human slot's last chosen character id, next to its variant. */
+const CHARS_KEY = 'aevalrena.chars.v1';
+
+function loadChars(): (string | null)[] {
+  const out: (string | null)[] = new Array(CARD_COUNT).fill(null);
+  try {
+    const raw = localStorage.getItem(CHARS_KEY);
+    if (raw === null) return out;
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return out;
+    for (let i = 0; i < CARD_COUNT; i += 1) {
+      const v: unknown = parsed[i];
+      if (typeof v === 'string') out[i] = v;
+    }
+  } catch {
+    /* storage blocked or corrupt: first character */
+  }
+  return out;
+}
+
+function saveChars(chars: (string | null)[]): void {
+  try {
+    localStorage.setItem(CHARS_KEY, JSON.stringify(chars));
+  } catch {
+    /* storage blocked or full: remembered for this session only */
+  }
+}
+
+/**
+ * Slots whose character was picked by hand this session. A CPU slot outside this set mirrors
+ * P1's character (the CPU fill rule); a hand pick sticks.
+ */
+const handPicked = new WeakSet<object>();
 
 function saveNames(names: string[]): void {
   try {
@@ -248,6 +282,7 @@ export const CSS = `
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.sel-card-name.sel-card-name-long { font-size: 1.1rem; letter-spacing: 0.14em; }
 .sel-card-underline {
   height: 1px;
   width: 100%;
@@ -514,9 +549,6 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
     for (let v = 0; v < VARIANT_COUNT; v += 1) {
       const dot = el('button', 'sel-variant');
       dot.type = 'button';
-      dot.setAttribute('style', `--swatch:${VARIANT_SWATCHES[v]}`);
-      dot.title = `Colour: ${VARIANT_NAMES[v]}`;
-      dot.setAttribute('aria-label', `Player ${slot + 1} colour ${VARIANT_NAMES[v]}`);
       variantRow.appendChild(dot);
       variantDots.push(dot);
     }
@@ -613,11 +645,42 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
 
   const names = loadNames();
   const savedVariants = loadVariants();
+  const savedChars = loadChars();
+
+  /** Index of character `id` in the grid, -1 when it is not there. */
+  function charIndexOf(id: string | null): number {
+    return id === null ? -1 : deps.characters.findIndex((c) => c.id === id);
+  }
+
+  /** Put `slot` on character `index` without settling colours. */
+  function assignChar(slot: number, index: number): void {
+    const s = state.slots[slot];
+    const c = deps.characters[index];
+    if (!c) return;
+    s.charIndex = index;
+    s.charId = c.id;
+  }
+
+  /** CPU fill: a CPU slot nobody picked a character for plays P1's character. */
+  function mirrorP1(slot: number): void {
+    const s = state.slots[slot];
+    if (slot === 0 || s.mode !== 'cpu' || handPicked.has(s)) return;
+    const p1 = state.slots[0];
+    if (p1.mode === 'off') return;
+    assignChar(slot, clampCharIndex(p1.charIndex));
+  }
+
   state.slots.forEach((s, slot) => {
     if (s.name === undefined) s.name = names[slot];
     if (s.team === undefined) s.team = slot;
-    if (s.variant === undefined) s.variant = s.mode === 'human' ? savedVariants[slot] : 0;
+    if (s.variant === undefined) {
+      // First visit this session: a human slot comes back on its saved character and colour.
+      s.variant = s.mode === 'human' ? savedVariants[slot] : 0;
+      const saved = charIndexOf(savedChars[slot]);
+      if (s.mode === 'human' && saved >= 0) assignChar(slot, saved);
+    }
   });
+  for (let slot = 1; slot < CARD_COUNT; slot += 1) mirrorP1(slot);
 
   function variantOf(slot: number): number {
     return clampVariant(state.slots[slot].variant);
@@ -662,6 +725,14 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
 
   function settleAllVariants(): void {
     for (let slot = 0; slot < CARD_COUNT; slot += 1) settleVariant(slot, slot);
+  }
+
+  function persistChars(): void {
+    for (let slot = 0; slot < CARD_COUNT; slot += 1) {
+      const s = state.slots[slot];
+      if (s.mode === 'human') savedChars[slot] = s.charId;
+    }
+    saveChars(savedChars);
   }
 
   function persistVariants(): void {
@@ -765,11 +836,11 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
       if (bust !== icon) {
         img.onerror = (): void => {
           img.onerror = null;
-          setVariantSrc(img, icon, variant);
+          setVariantSrc(img, icon, variant, id);
         };
       }
       // The bust in the slot's colour variant (src/render/palette.ts, same remap as the sprites).
-      setVariantSrc(img, bust, variant);
+      setVariantSrc(img, bust, variant, id);
       card.face.appendChild(img);
     } else {
       card.face.classList.add('sel-face-fallback');
@@ -810,11 +881,22 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
     card.cpuRow.hidden = s.mode !== 'cpu';
     card.keysLine.hidden = s.mode !== 'human';
     const charIndex = clampCharIndex(s.charIndex);
-    card.name.textContent = deps.characters[charIndex]?.name ?? '';
+    const charName = deps.characters[charIndex]?.name ?? '';
+    card.name.textContent = charName;
+    // Names past six letters (TREKMORE) step down a size so they fit the card unclipped.
+    card.name.classList.toggle('sel-card-name-long', charName.length > 6);
     const variant = variantOf(slot);
     refreshFace(card, charIndex, variant);
     card.variantRow.hidden = !active;
+    const charId = deps.characters[charIndex]?.id ?? s.charId;
+    const colourNames = variantNames(charId);
+    const swatches = variantSwatches(charId);
     card.variantDots.forEach((dot, v) => {
+      const colourName = colourNames[v] ?? '';
+      dot.setAttribute('style', `--swatch:${swatches[v] ?? 'transparent'}`);
+      dot.title = `Colour: ${colourName}`;
+      dot.setAttribute('aria-label', `Player ${slot + 1} colour ${colourName}`);
+      dot.dataset.colour = colourName;
       dot.classList.toggle('sel-variant-on', v === variant);
       dot.disabled = !active || (v !== variant && variantTaken(slot, v));
       dot.setAttribute('aria-pressed', v === variant ? 'true' : 'false');
@@ -860,8 +942,15 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
     const idx = SLOT_MODE_CYCLE.indexOf(s.mode);
     const nextIdx = (idx + dir + SLOT_MODE_CYCLE.length) % SLOT_MODE_CYCLE.length;
     s.mode = SLOT_MODE_CYCLE[nextIdx] as SlotMode;
-    // A slot turned human picks up its saved colour; either way it must not clash.
-    if (s.mode === 'human') s.variant = savedVariants[slot];
+    // A slot turned human picks up its saved character and colour; a CPU mirrors P1 unless
+    // it was picked by hand. Either way the colour must not clash.
+    if (s.mode === 'human') {
+      const saved = charIndexOf(savedChars[slot]);
+      if (saved >= 0 && !handPicked.has(s)) assignChar(slot, saved);
+      s.variant = savedVariants[slot];
+    }
+    mirrorP1(slot);
+    if (slot === 0) followP1();
     settleVariant(slot);
     refreshAllCards();
     refreshStart();
@@ -899,14 +988,27 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
     input.blur();
   }
 
+  /** CPU slots that follow P1 take its new character, keeping clear of P1's colour. */
+  function followP1(): void {
+    for (let other = 1; other < CARD_COUNT; other += 1) {
+      const before = state.slots[other].charId;
+      mirrorP1(other);
+      if (state.slots[other].charId !== before) settleVariant(other);
+    }
+  }
+
   function setCharacter(slot: number, index: number): void {
     const chars = deps.characters;
     if (chars.length === 0) return;
     const s = state.slots[slot];
-    s.charIndex = clampCharIndex(index);
-    s.charId = chars[s.charIndex].id;
-    if (s.mode === 'human') s.variant = savedVariants[slot];
+    assignChar(slot, clampCharIndex(index));
+    handPicked.add(s);
+    if (s.mode === 'human') {
+      s.variant = savedVariants[slot];
+      persistChars();
+    }
     settleVariant(slot);
+    if (slot === 0) followP1();
     refreshAllCards();
   }
 

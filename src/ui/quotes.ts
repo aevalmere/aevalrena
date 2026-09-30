@@ -8,6 +8,14 @@ export const QUOTES: Record<string, string[]> = {
     'The shore always gives way in the end.',
     'I only followed the pull of the moon.',
   ],
+  trekmore: [
+    'Everywhere I go, the shadow follows.',
+    'Moonanchor holds.',
+    'No face. No fear. Only wins.',
+    'The Queen sleeps soundly tonight.',
+    'Your shadow knew before you did.',
+    'Kneel. The blade is heavier than you.',
+  ],
 };
 
 const GENERIC_QUOTES: string[] = [

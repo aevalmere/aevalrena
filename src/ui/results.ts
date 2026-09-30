@@ -482,7 +482,7 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
           }
         });
         // The win pose in the winner's colour variant (src/render/palette.ts).
-        setVariantSrc(pose, iconAsset(info.winPose), p.variant ?? 0);
+        setVariantSrc(pose, iconAsset(info.winPose), p.variant ?? 0, p.charId);
         ringWrap.appendChild(pose);
       }
       stage.appendChild(ringWrap);

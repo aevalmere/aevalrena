@@ -1,5 +1,6 @@
+import { CHARACTER_DEFS } from '../characters/registry';
 import { SIM_HZ } from '../core/types';
-import type { AnimDef, AnimName, CharacterSprites, FighterState } from '../core/types';
+import type { AnimDef, AnimName, CharacterSprites, FighterState, MoveDef } from '../core/types';
 
 /**
  * Animation selection. Names come from CharacterSprites.animFor; anything the
@@ -9,6 +10,7 @@ import type { AnimDef, AnimName, CharacterSprites, FighterState } from '../core/
 
 const FALLBACK_ANIM = 'idle';
 const CHARGE_SUFFIX = 'Charge';
+const BRANCH_SUFFIX = 'Branch';
 const AIR_JUMP_ANIM = 'airJump';
 const reportedMisses = new Set<string>();
 
@@ -25,6 +27,29 @@ function chargeNameOf(name: AnimName): AnimName {
   const built = name + CHARGE_SUFFIX;
   chargeNames.set(name, built);
   return built;
+}
+
+/** Same cache for '<anim>Branch' names, plus the set of names that are branch anims. */
+const branchNames = new Map<AnimName, AnimName>();
+const isBranchName = new Set<AnimName>();
+
+function branchNameOf(name: AnimName): AnimName {
+  const cached = branchNames.get(name);
+  if (cached !== undefined) return cached;
+  const built = name + BRANCH_SUFFIX;
+  branchNames.set(name, built);
+  isBranchName.add(built);
+  return built;
+}
+
+/** First frame of the current move's branch, or -1 when the move has none. */
+function branchStartOf(fighter: FighterState): number {
+  if (fighter.moveId === null) return -1;
+  const def = CHARACTER_DEFS[fighter.charId];
+  if (def === undefined) return -1;
+  const move: MoveDef | undefined = def.moves[fighter.moveId];
+  if (move === undefined || move.branch === undefined) return -1;
+  return move.branch.start;
 }
 
 /** Animation names the renderer could not resolve, for the debug overlay. */
@@ -54,6 +79,13 @@ export function pickAnimName(sprites: CharacterSprites, fighter: FighterState): 
     if (sprites.anims[held] !== undefined) name = held;
   }
 
+  // A move running its branch frames (counter, recall reappear) plays '<anim>Branch' when the
+  // sheet has one; animClock starts it at the branch's first frame.
+  if (fighter.onBranch === true && fighter.action === 'attack') {
+    const branch = branchNameOf(name);
+    if (sprites.anims[branch] !== undefined && branchStartOf(fighter) >= 0) name = branch;
+  }
+
   // A mid-air jump's own animation plays through its descent instead of 'fall'.
   if (fighter.action === 'air' && fighter.vy > 0 && name !== AIR_JUMP_ANIM && sprites.anims['fall'] !== undefined) {
     name = 'fall';
@@ -65,6 +97,16 @@ export function pickAnimName(sprites: CharacterSprites, fighter: FighterState): 
 
   if (sprites.anims[FALLBACK_ANIM] !== undefined) return FALLBACK_ANIM;
   return firstAnimName(sprites);
+}
+
+/**
+ * The time an animation picked by pickAnimName plays at: the fighter's actionFrame, or for a
+ * '<anim>Branch' anim the frames since the branch started.
+ */
+export function animClock(fighter: FighterState, name: AnimName): number {
+  if (!isBranchName.has(name)) return fighter.actionFrame;
+  const start = branchStartOf(fighter);
+  return start < 0 ? fighter.actionFrame : fighter.actionFrame - start;
 }
 
 /** Frame index inside an animation for a given action frame count. */
@@ -107,7 +149,7 @@ export function frameNameFor(sprites: CharacterSprites, fighter: FighterState): 
   if (name === null) return null;
   const def = sprites.anims[name];
   if (def === undefined || def.frames.length === 0) return null;
-  return def.frames[animFrameIndex(def, fighter.actionFrame)];
+  return def.frames[animFrameIndex(def, animClock(fighter, name))];
 }
 
 /** First frame of the idle animation, used for HUD portraits. */

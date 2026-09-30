@@ -49,6 +49,26 @@ const ROWS: Row[] = [
   { name: 'Final Smash', input: 'Unavailable', source: { kind: 'final' } },
 ];
 
+/** Short plain notes under a move's name, per character id. */
+export const MOVE_NOTES: Record<string, Partial<Record<MoveId, string>>> = {
+  trekmore: {
+    jab: 'Shadow repeats it.',
+    ftilt: 'Shadow repeats it.',
+    utilt: 'Shadow repeats it.',
+    dtilt: 'Shadow repeats it.',
+    dashatk: 'Shadow repeats it.',
+    nair: 'Shadow repeats it.',
+    fair: 'Shadow repeats it.',
+    bair: 'Shadow repeats it.',
+    uair: 'Shadow repeats it.',
+    dair: 'Shadow repeats it.',
+    nspecial: 'Aim with the stick. Press again to teleport to the sword.',
+    sspecial: 'Shadow step through, strike from behind.',
+    uspecial: 'Throw the sword up and rise into it.',
+    dspecial: 'Parry. A blocked hit becomes a counter slash.',
+  },
+};
+
 const MAX_HITS_SHOWN = 3;
 
 function pct(n: number): string {
@@ -73,6 +93,21 @@ function moveHits(move: MoveDef): number[] {
   return proj ? [proj.damage] : [];
 }
 
+/** Damage the shadow echo adds: the first hitbox of each replayed group, scaled. */
+function echoDamage(move: MoveDef): number {
+  const echo = move.echo;
+  if (!echo) return 0;
+  const firstPerGroup = new Map<number, { start: number; damage: number }>();
+  for (const hb of move.hitboxes) {
+    if (!echo.groups.includes(hb.group) || hb.fromCounter) continue;
+    const prev = firstPerGroup.get(hb.group);
+    if (!prev || hb.start < prev.start) firstPerGroup.set(hb.group, { start: hb.start, damage: hb.damage });
+  }
+  let total = 0;
+  for (const h of firstPerGroup.values()) total += h.damage * echo.damageScale;
+  return total;
+}
+
 function formatHits(hits: number[]): string {
   if (hits.length === 0) return '-';
   const shown = hits.slice(0, MAX_HITS_SHOWN).map(pct).join(' + ');
@@ -84,7 +119,12 @@ function damageText(def: CharacterDef | undefined, source: Source): string {
   switch (source.kind) {
     case 'move': {
       const move = def.moves[source.id];
-      return move ? formatHits(moveHits(move)) : '-';
+      if (!move) return '-';
+      // A counter's slash deals a share of the blocked hit, clamped to the counter's range.
+      if (move.counter) return `Counter ${pct(move.counter.minDamage)} to ${pct(move.counter.maxDamage)}`;
+      const text = formatHits(moveHits(move));
+      const echo = echoDamage(move);
+      return echo > 0 ? `${text} (+${pct(echo)} echo)` : text;
     }
     case 'grab':
       return '-';
@@ -146,7 +186,31 @@ export const CSS = `
 .aev-movelist-scroll .ui-table th:last-child { text-align: right; white-space: nowrap; }
 .aev-movelist-scroll .ui-table tr.aev-movelist-group td { border-top: 1px solid color-mix(in srgb, var(--accent) 55%, transparent); }
 .aev-movelist-chord { margin-left: 0.8rem; }
+.aev-movelist-extra { display: block; margin-top: 0.15rem; }
+.aev-movelist-echo { white-space: nowrap; }
+.aev-movelist-scroll .ui-table td .aev-movelist-note {
+  display: block;
+  margin-top: 0.15rem;
+  color: var(--text);
+  opacity: 0.7;
+  text-transform: none;
+  letter-spacing: 0.04em;
+  font-size: 0.72rem;
+  white-space: normal;
+}
 .aev-movelist-panel .ui-btn { align-self: flex-start; }
+/* Below the panel's full 54rem the columns wrap and tighten instead of scrolling sideways. */
+@media (max-width: 62rem) {
+  .aev-movelist-scroll { overflow-x: hidden; }
+  .aev-movelist-scroll .ui-table th,
+  .aev-movelist-scroll .ui-table td { padding: 0.35rem 0.45rem; }
+  .aev-movelist-scroll .ui-table th { letter-spacing: 0.14em; }
+  .aev-movelist-scroll .ui-table td { letter-spacing: 0.06em; font-size: 0.72rem; }
+  .aev-movelist-scroll .ui-table td:first-child,
+  .aev-movelist-scroll .ui-table td:last-child { white-space: normal; }
+  .aev-movelist-scroll .ui-table th:last-child { white-space: normal; }
+  .aev-movelist-chord { margin-left: 0.4rem; white-space: nowrap; }
+}
 `;
 
 /** P1's character: slot 0 when it is human, else the first human slot, else the first character. */
@@ -195,6 +259,12 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
   tag.className = 'ui-tag';
   tag.textContent = 'P1';
   charLine.appendChild(tag);
+  if (def?.crit) {
+    const critTag = document.createElement('span');
+    critTag.className = 'ui-tag';
+    critTag.textContent = `Crit ${Math.round(def.crit.chance * 100)}%`;
+    charLine.appendChild(critTag);
+  }
   panel.appendChild(charLine);
 
   const rule = document.createElement('div');
@@ -216,6 +286,7 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
   table.appendChild(thead);
 
   const keys = ctx.deps.input.controls.players[0]?.keys;
+  const notes = character ? MOVE_NOTES[character.id] : undefined;
   const tbody = document.createElement('tbody');
   for (const row of ROWS) {
     const tr = document.createElement('tr');
@@ -223,6 +294,13 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
 
     const nameTd = document.createElement('td');
     nameTd.textContent = row.name;
+    const note = row.source.kind === 'move' ? notes?.[row.source.id] : undefined;
+    if (note !== undefined) {
+      const noteEl = document.createElement('span');
+      noteEl.className = 'aev-movelist-note';
+      noteEl.textContent = note;
+      nameTd.appendChild(noteEl);
+    }
     tr.appendChild(nameTd);
 
     const inputTd = document.createElement('td');
@@ -234,10 +312,28 @@ export function render(container: HTMLElement, ctx: MenuCtx): void {
       chordTag.textContent = prettyKey(chord);
       inputTd.appendChild(chordTag);
     }
+    // A move with a recall teleports on a second press while its projectile is out.
+    if (row.source.kind === 'move' && def?.moves[row.source.id]?.recall) {
+      const recallTag = document.createElement('span');
+      recallTag.className = 'ui-tag aev-movelist-extra';
+      recallTag.textContent = 'Press again: teleport to sword';
+      inputTd.appendChild(recallTag);
+    }
     tr.appendChild(inputTd);
 
     const dmgTd = document.createElement('td');
-    dmgTd.textContent = damageText(def, row.source);
+    // The echo share stays on one line; a narrow panel wraps it under the hits as a unit.
+    const dmg = damageText(def, row.source);
+    const echoAt = dmg.indexOf(' (+');
+    if (echoAt < 0) {
+      dmgTd.textContent = dmg;
+    } else {
+      dmgTd.append(dmg.slice(0, echoAt + 1));
+      const echoEl = document.createElement('span');
+      echoEl.className = 'aev-movelist-echo';
+      echoEl.textContent = dmg.slice(echoAt + 1);
+      dmgTd.appendChild(echoEl);
+    }
     tr.appendChild(dmgTd);
 
     tbody.appendChild(tr);

@@ -1,6 +1,6 @@
 import type { ImageSheetData } from '../core/types';
 import { WHITE } from './colors';
-import { remapPixels } from './palette';
+import { VARIANT_COUNT as COLOUR_VARIANTS, paletteOf, remapPixels } from './palette';
 
 /**
  * Sprite baker. A character ships one packed PNG atlas; at load we decode it
@@ -27,6 +27,11 @@ interface FrameEntry {
   ay: number;
   w: number;
   outlines: Map<string, (HTMLCanvasElement | null)[]>;
+  /**
+   * Echo shadow copies, index colourVariant * 2 + flipped, baked on first request
+   * (getShadowFrame). Null until then; shared by the base sheet and its colour variants.
+   */
+  shadows: (HTMLCanvasElement | null)[] | null;
 }
 
 const sheets = new Map<string, Map<string, FrameEntry>>();
@@ -298,7 +303,7 @@ export async function bakeSheet(
         ]);
       }
     }
-    frames.set(frameName, { variants, outlines, ax, ay, w });
+    frames.set(frameName, { variants, outlines, ax, ay, w, shadows: null });
   }
   sheets.set(sheetId, frames);
 }
@@ -315,7 +320,7 @@ export function hasSheet(sheetId: string): boolean {
  * base sheet. Synchronous and run once per variant in use; a match with only the base colour
  * never calls it. Returns false when the base sheet is not baked.
  */
-export function bakeVariantSheet(baseId: string, variantId: string, variant: number): boolean {
+export function bakeVariantSheet(baseId: string, variantId: string, variant: number, charId = 'aeval'): boolean {
   if (sheets.has(variantId)) return true;
   const base = sheets.get(baseId);
   if (base === undefined) return false;
@@ -326,13 +331,13 @@ export function bakeVariantSheet(baseId: string, variantId: string, variant: num
     const w = src.width;
     const h = src.height;
     const pixels = context2d(src).getImageData(0, 0, w, h).data;
-    remapPixels(pixels, variant);
+    remapPixels(pixels, variant, charId);
     const variants: (HTMLCanvasElement | null)[] = new Array(VARIANT_COUNT).fill(null);
     variants[0] = canvasFrom(pixels, w, h);
     variants[VARIANT_FLIP] = canvasFrom(mirrored(pixels, w, h), w, h);
     variants[VARIANT_WHITE] = entry.variants[VARIANT_WHITE];
     variants[VARIANT_WHITE | VARIANT_FLIP] = entry.variants[VARIANT_WHITE | VARIANT_FLIP];
-    frames.set(frameName, { variants, outlines: entry.outlines, ax: entry.ax, ay: entry.ay, w: entry.w });
+    frames.set(frameName, { variants, outlines: entry.outlines, ax: entry.ax, ay: entry.ay, w: entry.w, shadows: null });
   }
   sheets.set(variantId, frames);
   return true;
@@ -350,6 +355,62 @@ export function getFrame(
   if (entry === undefined) return null;
   const v = (flipped ? VARIANT_FLIP : 0) | (white ? VARIANT_WHITE : 0);
   return entry.variants[v];
+}
+
+/** Echo shadow: opaque pixels keep this share of alpha, edge pixels (alpha < 255) EDGE share. */
+const ECHO_SHADOW_ALPHA = 0.62;
+const ECHO_SHADOW_EDGE = 0.4;
+
+/** Every opaque pixel in `rgb`, alpha scaled for the translucent echo. */
+function echoShadow(
+  pixels: Uint8ClampedArray,
+  rgb: [number, number, number]
+): Uint8ClampedArray<ArrayBuffer> {
+  const out = new Uint8ClampedArray(pixels.length);
+  for (let i = 0; i < pixels.length; i += 4) {
+    const a = pixels[i + 3];
+    if (a === 0) continue;
+    out[i] = rgb[0];
+    out[i + 1] = rgb[1];
+    out[i + 2] = rgb[2];
+    out[i + 3] = Math.round(a === 255 ? a * ECHO_SHADOW_ALPHA : a * ECHO_SHADOW_EDGE);
+  }
+  return out;
+}
+
+/**
+ * The shadow echo copy of a frame (TREKMORE_PLAN C.3): the frame's silhouette in `charId`'s
+ * shadow colour for `variant`, translucent. Baked the first time a (frame, variant, flip) is
+ * asked for and cached on the frame, so every later draw is one drawImage of a stored canvas.
+ * Pass the base body sheet id: the silhouette does not depend on the palette swap.
+ */
+export function getShadowFrame(
+  sheetId: string,
+  frameName: string,
+  flipped: boolean,
+  variant: number,
+  charId = 'aeval'
+): HTMLCanvasElement | null {
+  const frames = sheets.get(sheetId);
+  if (frames === undefined) return null;
+  const entry = frames.get(frameName);
+  if (entry === undefined) return null;
+  const v = variant > 0 && variant < COLOUR_VARIANTS ? variant : 0;
+  const slot = v * 2 + (flipped ? 1 : 0);
+  let list = entry.shadows;
+  if (list === null) {
+    list = new Array<HTMLCanvasElement | null>(COLOUR_VARIANTS * 2).fill(null);
+    entry.shadows = list;
+  }
+  const cached = list[slot];
+  if (cached !== null) return cached;
+  const src = entry.variants[flipped ? VARIANT_FLIP : 0];
+  if (src === null) return null;
+  const pixels = context2d(src).getImageData(0, 0, src.width, src.height).data;
+  const shadowHex = paletteOf(charId).shadow[v];
+  const baked = canvasFrom(echoShadow(pixels, parseHex(shadowHex === undefined ? '#2a1640' : shadowHex)), src.width, src.height);
+  list[slot] = baked;
+  return baked;
 }
 
 export function getOutline(

@@ -5,13 +5,16 @@ import type { FighterState, GameState, MoveDef, ProjectileDef } from '../core/ty
 import { chargeFraction, projectileChargeScale } from '../sim/hits';
 import { getFrame, getFrameAnchor } from './bake';
 import { PALE, WHITE, glowFor } from './colors';
-import type { CharVisual, ProjectileAnim } from './visuals';
+import type { CharVisual, FxClip, ProjectileAnim } from './visuals';
 import { getCharVisual, getProjectileVisual } from './visuals';
 
 /**
- * Effect-sheet drawing: the up-special geyser left standing at the takeoff
- * point, the down-special whirl anchored on the fighter, hit sparks from a
- * small fixed pool, and projectiles.
+ * Effect-sheet drawing: the up-special rise column left standing at the takeoff
+ * point, the down-special stance loop anchored on the fighter, hit sparks and
+ * one-shot clips (counter flash, step trail) from small fixed pools, the crit
+ * ring, the counter screen dim, and projectiles. Which frames a character uses
+ * for each role comes from its CharVisual (visuals.ts); a role the character
+ * has no art for draws nothing.
  */
 
 const SPARK_POOL = 24;
@@ -235,7 +238,7 @@ function drawOrbCharge(
   held: ProjectileDef | null,
   facing: number
 ): void {
-  const frames = visual.orbCharge;
+  const frames = visual.handCharge;
   const max = TUNING.input.chargeMax > 0 ? TUNING.input.chargeMax : 1;
   let t = charge / max;
   if (t < 0) t = 0;
@@ -283,7 +286,7 @@ function drawOrbCast(
       ? 0
       : Math.round(move.chargeCastFrames * chargeFraction(fighter.charge, move.chargeable));
   if (fighter.actionFrame >= held.spawnFrame + cast) return;
-  const frames = visual.orbCharge;
+  const frames = visual.handCharge;
   const scale = projectileChargeScale(fighter.charge, move.chargeable);
   drawHandOrb(ctx, visual, frames[frames.length - 1], x, y, held, fighter.facing, scale);
 }
@@ -321,7 +324,8 @@ function drawChargeRing(
   spin: number,
   held: ProjectileDef | null,
   facing: number,
-  variant: number
+  variant: number,
+  charId: string
 ): void {
   const max = TUNING.input.chargeMax > 0 ? TUNING.input.chargeMax : 1;
   let t = charge / max;
@@ -349,7 +353,7 @@ function drawChargeRing(
   const beads = CHARGE_BEADS_MIN + Math.floor((CHARGE_BEADS_MAX - CHARGE_BEADS_MIN) * t);
   const step = CHARGE_DIRS / beads;
 
-  ctx.fillStyle = t < 0.5 ? PALE : glowFor(variant);
+  ctx.fillStyle = t < 0.5 ? PALE : glowFor(variant, charId);
   for (let b = 0; b < beads; b++) {
     const dir = (Math.round(b * step) + spin) % CHARGE_DIRS;
     const bx = cx + Math.round(CHARGE_COS[dir] * radius) - 1;
@@ -386,7 +390,7 @@ function updateGeyser(
   x: number,
   y: number
 ): void {
-  const launch = visual === null ? -1 : visual.geyserLaunch;
+  const launch = visual === null ? -1 : visual.riseLaunch;
   if (launch < 0 || fighter.action !== 'attack' || fighter.moveId !== 'uspecial') {
     geyArmed[i] = 0;
     return;
@@ -417,17 +421,17 @@ function drawGeyser(ctx: CanvasRenderingContext2D, i: number, frame: number): vo
   }
   let t = age;
   let k = 0;
-  const holds = visual.geyserHolds;
+  const holds = visual.riseHolds;
   while (k < holds.length && t >= holds[k]) {
     t -= holds[k];
     k++;
   }
-  if (k >= holds.length || k >= visual.geyser.length) {
+  if (k >= holds.length || k >= visual.rise.length) {
     geyLive[i] = 0;
     geyVisual[i] = null;
     return;
   }
-  drawCentered(ctx, visual.fxSheetId, visual.geyser[k], geyX[i], geyY[i], geyFacing[i] === -1, 1);
+  drawCentered(ctx, visual.fxSheetId, visual.rise[k], geyX[i], geyY[i], geyFacing[i] === -1, 1);
 }
 
 /**
@@ -470,9 +474,9 @@ export function drawFighterFx(
       fighter.action === 'attack' && fighter.moveId === 'nspecial'
         ? getCharVisual(fighter.charId, fighter.variant)
         : null;
-    if (orbVisual !== null && orbVisual.orbCharge.length > 0 && !fighter.charging) {
+    if (orbVisual !== null && orbVisual.handCharge.length > 0 && !fighter.charging) {
       drawOrbCast(ctx, orbVisual, fighter, posX[i], posY[i]);
-    } else if (orbVisual !== null && orbVisual.orbCharge.length > 0) {
+    } else if (orbVisual !== null && orbVisual.handCharge.length > 0) {
       drawOrbCharge(
         ctx,
         orbVisual,
@@ -493,15 +497,16 @@ export function drawFighterFx(
         fighter.charge >> 1,
         heldProjectile(fighter),
         fighter.facing,
-        fighter.variant
+        fighter.variant,
+        fighter.charId
       );
     }
     if (fighter.action !== 'attack' || fighter.moveId !== 'dspecial') continue;
     const visual = getCharVisual(fighter.charId, fighter.variant);
     if (visual === null) continue;
 
-    // The whirlpool keeps cycling for the whole of dspecial.
-    const name = frameForAction(visual.whirl, fighter.actionFrame, 12, true);
+    // The stance loop (Aeval's whirlpool) keeps cycling for the whole of dspecial.
+    const name = frameForAction(visual.stance, fighter.actionFrame, 12, true);
     if (name === null) continue;
 
     const canvas = getFrame(visual.fxSheetId, name, fighter.facing === -1, false);
@@ -518,6 +523,33 @@ function variantOfSlot(state: GameState, slot: number): number {
     if (state.fighters[i].slot === slot) return state.fighters[i].variant;
   }
   return 0;
+}
+
+/**
+ * An aimed projectile (a def with `aim`) drawn along its velocity: rotated by atan2(vy, vx),
+ * with the facing mirror kept for a left-moving shot so the art is never upside down.
+ */
+function drawRotated(
+  ctx: CanvasRenderingContext2D,
+  visual: CharVisual,
+  frameName: string,
+  x: number,
+  y: number,
+  vx: number,
+  vy: number,
+  scale: number
+): boolean {
+  const left = vx < 0;
+  const canvas = getFrame(visual.fxSheetId, frameName, left, false);
+  if (canvas === null) return false;
+  const angle = left ? Math.atan2(-vy, -vx) : Math.atan2(vy, vx);
+  ctx.save();
+  ctx.translate(Math.round(x), Math.round(y));
+  ctx.rotate(angle);
+  drawShadow(ctx, visual, frameName, 0, 0, left, scale);
+  drawCentered(ctx, visual.fxSheetId, frameName, 0, 0, left, scale);
+  ctx.restore();
+  return true;
 }
 
 export function drawProjectiles(
@@ -559,7 +591,10 @@ export function drawProjectiles(
         idx = ((idx % visual.frames.length) + visual.frames.length) % visual.frames.length;
         name = visual.frames[idx];
       }
-      if (name !== null) {
+      const aimed = visual.def.aim === true;
+      if (name !== null && aimed && (projectile.vx !== 0 || projectile.vy !== 0)) {
+        drawn = drawRotated(ctx, owner, name, x, y, projectile.vx, projectile.vy, drawScale);
+      } else if (name !== null) {
         const flipped = projectile.facing === -1;
         drawShadow(ctx, owner, name, x, y, flipped, drawScale);
         if (isBig) {
@@ -582,10 +617,195 @@ export function drawProjectiles(
     }
 
     if (!drawn) {
-      ctx.fillStyle = glowFor(variant);
+      ctx.fillStyle = glowFor(variant, visual === null ? 'aeval' : visual.owner.charId);
       ctx.beginPath();
       ctx.arc(Math.round(x), Math.round(y), FALLBACK_PROJECTILE_R * scale, 0, Math.PI * 2);
       ctx.fill();
     }
   }
+}
+
+// ---------------- one-shot clips, crit ring, counter dim ----------------
+
+const CLIP_POOL = 16;
+/** Crit ring: a white core ring that grows and fades over RING_LIFE sim frames. */
+const RING_LIFE = 10;
+const RING_R0 = 6;
+const RING_R1 = 22;
+const RING_DIRS = 24;
+const RING_COS = new Float32Array(RING_DIRS);
+const RING_SIN = new Float32Array(RING_DIRS);
+for (let i = 0; i < RING_DIRS; i++) {
+  RING_COS[i] = Math.cos((i * Math.PI * 2) / RING_DIRS);
+  RING_SIN[i] = Math.sin((i * Math.PI * 2) / RING_DIRS);
+}
+/** Counter: the whole screen dims this much for DIM_FRAMES sim frames. */
+export const COUNTER_DIM_FRAMES = 4;
+const COUNTER_DIM_ALPHA = 0.15;
+const DIM_COLOR = '#000000';
+
+/**
+ * Fixed pool of one-shot effect clips (counter flash, step trail) and crit rings. A slot waits
+ * `delay` sim frames before it shows, so a teleport can put its arrival puff a few frames after
+ * its departure puff. Nothing allocates after creation.
+ */
+export interface ClipPool {
+  x: Float32Array;
+  y: Float32Array;
+  age: Float32Array;
+  delay: Float32Array;
+  scale: Float32Array;
+  live: Uint8Array;
+  /** 1 = the slot also draws the white crit ring. */
+  ring: Uint8Array;
+  clip: (FxClip | null)[];
+  source: (CharVisual | null)[];
+  cursor: number;
+  /** Sim frames of counter screen dim left. */
+  dim: number;
+}
+
+export function createClips(): ClipPool {
+  return {
+    x: new Float32Array(CLIP_POOL),
+    y: new Float32Array(CLIP_POOL),
+    age: new Float32Array(CLIP_POOL),
+    delay: new Float32Array(CLIP_POOL),
+    scale: new Float32Array(CLIP_POOL),
+    live: new Uint8Array(CLIP_POOL),
+    ring: new Uint8Array(CLIP_POOL),
+    clip: new Array<FxClip | null>(CLIP_POOL).fill(null),
+    source: new Array<CharVisual | null>(CLIP_POOL).fill(null),
+    cursor: 0,
+    dim: 0,
+  };
+}
+
+export function clearClips(pool: ClipPool): void {
+  pool.live.fill(0);
+  pool.clip.fill(null);
+  pool.source.fill(null);
+  pool.cursor = 0;
+  pool.dim = 0;
+}
+
+/**
+ * Play `charId`'s fx clip `name` at (x, y) in colour `variant`. With `ring` the slot also draws
+ * the crit ring, even when the character has no such clip. Returns false when nothing spawned.
+ */
+export function spawnClip(
+  pool: ClipPool,
+  charId: string,
+  variant: number,
+  name: string,
+  x: number,
+  y: number,
+  scale: number,
+  delay: number,
+  ring: boolean
+): boolean {
+  const visual = getCharVisual(charId, variant);
+  const found = visual === null ? undefined : visual.clips.get(name);
+  const clip = found === undefined ? null : found;
+  if (clip === null && !ring) return false;
+  const i = pool.cursor;
+  pool.cursor = (i + 1) % CLIP_POOL;
+  pool.x[i] = x;
+  pool.y[i] = y;
+  pool.age[i] = 0;
+  pool.delay[i] = delay;
+  pool.scale[i] = scale;
+  pool.live[i] = 1;
+  pool.ring[i] = ring ? 1 : 0;
+  pool.clip[i] = clip;
+  pool.source[i] = visual;
+  return true;
+}
+
+/** Start the counter screen dim. */
+export function startCounterDim(pool: ClipPool): void {
+  pool.dim = COUNTER_DIM_FRAMES;
+}
+
+/** Age the clips and the dim by `steps` sim frames. */
+export function stepClips(pool: ClipPool, steps: number): void {
+  if (steps <= 0) return;
+  pool.dim = pool.dim > steps ? pool.dim - steps : 0;
+  for (let i = 0; i < CLIP_POOL; i++) {
+    if (pool.live[i] === 0) continue;
+    if (pool.delay[i] > 0) {
+      const wait = pool.delay[i] < steps ? pool.delay[i] : steps;
+      pool.delay[i] -= wait;
+      pool.age[i] += steps - wait;
+    } else {
+      pool.age[i] += steps;
+    }
+    const clip = pool.clip[i];
+    const clipDone = clip === null || pool.age[i] >= clip.total;
+    const ringDone = pool.ring[i] === 0 || pool.age[i] >= RING_LIFE;
+    if (clipDone && ringDone) {
+      pool.live[i] = 0;
+      pool.clip[i] = null;
+      pool.source[i] = null;
+    }
+  }
+}
+
+function clipFrame(clip: FxClip, age: number): string | null {
+  let t = age;
+  for (let k = 0; k < clip.holds.length; k++) {
+    if (t < clip.holds[k]) return clip.frames[k];
+    t -= clip.holds[k];
+  }
+  return null;
+}
+
+/** The live clips and crit rings, in world space, over the fighters. */
+export function drawClips(ctx: CanvasRenderingContext2D, pool: ClipPool): void {
+  for (let i = 0; i < CLIP_POOL; i++) {
+    if (pool.live[i] === 0 || pool.delay[i] > 0) continue;
+    const age = pool.age[i];
+    const visual = pool.source[i];
+    const clip = pool.clip[i];
+    if (clip !== null && visual !== null) {
+      const name = clipFrame(clip, age);
+      if (name !== null) drawCentered(ctx, visual.fxSheetId, name, pool.x[i], pool.y[i], false, pool.scale[i]);
+    }
+    if (pool.ring[i] === 1 && age < RING_LIFE) drawCritRing(ctx, pool.x[i], pool.y[i], age);
+  }
+}
+
+/** A ring of whole-pixel dots that grows and thins out: the crit core. */
+function drawCritRing(ctx: CanvasRenderingContext2D, x: number, y: number, age: number): void {
+  const t = age / RING_LIFE;
+  const r = RING_R0 + (RING_R1 - RING_R0) * t;
+  const prev = ctx.globalAlpha;
+  ctx.globalAlpha = prev * (1 - t);
+  ctx.fillStyle = WHITE;
+  const cx = Math.round(x);
+  const cy = Math.round(y);
+  ctx.fillRect(cx - 2, cy - 2, 4, 4);
+  for (let d = 0; d < RING_DIRS; d++) {
+    ctx.fillRect(cx + Math.round(RING_COS[d] * r) - 1, cy + Math.round(RING_SIN[d] * r) - 1, 2, 2);
+  }
+  ctx.globalAlpha = prev;
+}
+
+/**
+ * The counter dim over the whole view, in screen space. Skipped while the debug frame data view
+ * is on so hitboxes stay readable.
+ */
+export function drawCounterDim(
+  ctx: CanvasRenderingContext2D,
+  pool: ClipPool,
+  w: number,
+  h: number,
+  frameData: boolean
+): void {
+  if (pool.dim <= 0 || frameData) return;
+  const prev = ctx.globalAlpha;
+  ctx.globalAlpha = COUNTER_DIM_ALPHA;
+  ctx.fillStyle = DIM_COLOR;
+  ctx.fillRect(0, 0, w, h);
+  ctx.globalAlpha = prev;
 }

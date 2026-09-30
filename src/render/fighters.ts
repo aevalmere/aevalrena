@@ -1,9 +1,9 @@
 import { CHARACTER_DEFS } from '../characters/registry';
-import { SHIELD_MAX } from '../core/constants';
+import { ECHO_TAIL, SHIELD_MAX } from '../core/constants';
 import { MAX_PLAYERS } from '../core/types';
-import type { FighterState, GameState } from '../core/types';
-import { animFrameIndex, pickAnimName } from './anim';
-import { getFrame, getFrameAnchor } from './bake';
+import type { FighterState, GameState, MoveDef } from '../core/types';
+import { animClock, animFrameIndex, pickAnimName } from './anim';
+import { getFrame, getFrameAnchor, getShadowFrame } from './bake';
 import { INK, STONE, STONE_LIGHT, WHITE, glowFor, slotColor } from './colors';
 import { getCharVisual } from './visuals';
 
@@ -18,6 +18,9 @@ const BLINK_ON = 4;
 const SHIELD_MIN_R = 9;
 const SHIELD_MAX_R = 24;
 const SHIELD_ALPHA = 0.34;
+// The bubble radii above are sized for a 40 px tall hurtbox (Aeval). A taller fighter gets a
+// bubble scaled to its hurtbox and centred on it, so Trekmore's helmet sits inside it too.
+const SHIELD_REF_H = 40;
 const RESPAWN_PLAT_W = 44;
 const RESPAWN_PLAT_H = 5;
 
@@ -49,7 +52,7 @@ export function drawRespawnPlatforms(
     ctx.fillRect(x, y, RESPAWN_PLAT_W, 2);
     ctx.fillStyle = STONE_LIGHT;
     ctx.fillRect(x + 2, y + 2, RESPAWN_PLAT_W - 4, 1);
-    ctx.fillStyle = glowFor(fighter.variant);
+    ctx.fillStyle = glowFor(fighter.variant, fighter.charId);
     ctx.fillRect(x + 6, y - 1, RESPAWN_PLAT_W - 12, 1);
   }
 }
@@ -59,17 +62,19 @@ function drawShieldBubble(
   x: number,
   y: number,
   shieldHp: number,
-  color: string
+  color: string,
+  hurtH: number
 ): void {
   let ratio = shieldHp / SHIELD_MAX;
   if (ratio < 0) ratio = 0;
   if (ratio > 1) ratio = 1;
-  const r = SHIELD_MIN_R + (SHIELD_MAX_R - SHIELD_MIN_R) * ratio;
+  const size = hurtH > SHIELD_REF_H ? hurtH / SHIELD_REF_H : 1;
+  const r = (SHIELD_MIN_R + (SHIELD_MAX_R - SHIELD_MIN_R) * ratio) * size;
   const prevAlpha = ctx.globalAlpha;
   ctx.globalAlpha = SHIELD_ALPHA;
   ctx.fillStyle = color;
   ctx.beginPath();
-  ctx.arc(Math.round(x), Math.round(y - 20), r, 0, Math.PI * 2);
+  ctx.arc(Math.round(x), Math.round(y - (SHIELD_REF_H / 2) * size), r, 0, Math.PI * 2);
   ctx.fill();
   ctx.globalAlpha = prevAlpha;
 }
@@ -140,9 +145,67 @@ export function resolveFighterFrames(state: GameState, deps: FighterDrawDeps): v
     if (animName === null) continue;
     const def = visual.sprites.anims[animName];
     if (def === undefined || def.frames.length === 0) continue;
-    deps.frameNames[i] = def.frames[animFrameIndex(def, fighter.actionFrame)];
+    deps.frameNames[i] = def.frames[animFrameIndex(def, animClock(fighter, animName))];
     if (def.mirror === true && i < animMirror.length) animMirror[i] = 1;
   }
+}
+
+/**
+ * Echo age at which the sim drops the echo: the last replayed hitbox's end plus ECHO_TAIL.
+ * -1 when the move has no echo. A loop over the move's hitboxes, no allocation.
+ */
+function echoEndAge(move: MoveDef): number {
+  const echo = move.echo;
+  if (echo === undefined) return -1;
+  let last = -1;
+  for (let h = 0; h < move.hitboxes.length; h++) {
+    const hb = move.hitboxes[h];
+    if (hb.end > last && echo.groups.indexOf(hb.group) >= 0) last = hb.end;
+  }
+  return last < 0 ? -1 : last + ECHO_TAIL;
+}
+
+/**
+ * The shadow echo of a fighter's move: the same animation, echoAge frames in, at the latched
+ * point, drawn from the cached shadow bake (bake.ts getShadowFrame). It fades out over the last
+ * ECHO_TAIL frames. Drawn before the fighter's body so the owner stays on top. Returns true when
+ * something was drawn.
+ */
+export function drawEcho(ctx: CanvasRenderingContext2D, fighter: FighterState): boolean {
+  const f = fighter;
+  const moveId = f.echoMove;
+  const age = f.echoAge;
+  if (moveId === undefined || moveId === null || age === undefined || age < 0) return false;
+  const def = CHARACTER_DEFS[fighter.charId];
+  if (def === undefined) return false;
+  const move: MoveDef | undefined = def.moves[moveId];
+  if (move === undefined) return false;
+  const visual = getCharVisual(fighter.charId, 0);
+  if (visual === null) return false;
+  const animName = visual.sprites.animFor('attack', moveId, fighter);
+  const anim = visual.sprites.anims[animName];
+  if (anim === undefined || anim.frames.length === 0) return false;
+  const frameName = anim.frames[animFrameIndex(anim, age)];
+  const facing = f.echoFacing === undefined ? fighter.facing : f.echoFacing;
+  const flipped = (facing === -1) !== (anim.mirror === true);
+  const sheetId = visual.baseBodySheetId;
+  const shadow = getShadowFrame(sheetId, frameName, flipped, fighter.variant, fighter.charId);
+  const anchor = shadow === null ? null : getFrameAnchor(sheetId, frameName, flipped);
+  if (shadow === null || anchor === null) return false;
+  const end = echoEndAge(move);
+  let fade = 1;
+  if (end > 0) {
+    fade = (end - age) / ECHO_TAIL;
+    if (fade > 1) fade = 1;
+    if (fade <= 0) return false;
+  }
+  const ex = f.echoX === undefined ? fighter.x : f.echoX;
+  const ey = f.echoY === undefined ? fighter.y : f.echoY;
+  const prev = ctx.globalAlpha;
+  if (fade < 1) ctx.globalAlpha = prev * fade;
+  ctx.drawImage(shadow, Math.round(ex - anchor.ax), Math.round(ey - anchor.ay));
+  if (fade < 1) ctx.globalAlpha = prev;
+  return true;
 }
 
 export function drawFighters(
@@ -169,6 +232,9 @@ export function drawFighters(
 
     const hidden = fighter.invuln > 0 && blinkOff;
 
+    // The echo does not blink with its owner: it is a separate shadow standing where the move began.
+    drawEcho(ctx, fighter);
+
     if (!hidden) {
       const white = flash[i] > 0;
       let drew = false;
@@ -189,7 +255,8 @@ export function drawFighters(
     }
 
     if (fighter.action === 'shield' || fighter.action === 'shieldStun') {
-      drawShieldBubble(ctx, x, y, fighter.shieldHp, color);
+      const hurt = CHARACTER_DEFS[fighter.charId]?.hurtbox;
+      drawShieldBubble(ctx, x, y, fighter.shieldHp, color, hurt === undefined ? SHIELD_REF_H : hurt.h);
     }
   }
 }

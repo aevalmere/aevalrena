@@ -1,5 +1,5 @@
 import type { Facing } from '../core/types';
-import { VARIANT_COUNT, variantTable } from './palette';
+import { PALETTES, VARIANT_COUNT, variantTable } from './palette';
 
 /**
  * Fixed particle pool, structs of arrays. Nothing is allocated after creation.
@@ -19,19 +19,39 @@ const P_DROP_A = 6;
 const P_DROP_B = 7;
 const TYPE_COUNT = 8;
 
+/** Aeval's water colours per particle type. P_KO_B is her glow. */
 const TYPE_COLOR: readonly string[] = [
   '#b8e3ff', '#f0ead6', '#c9d1e0', '#7fb2ff', '#9aa5b8', '#6e7a94', '#7fb2ff', '#b8e3ff',
 ];
+/** Base particle colours per character; a character missing here uses Aeval's. */
+const TYPE_COLOR_BY_CHAR: Record<string, readonly string[]> = {
+  aeval: TYPE_COLOR,
+  // Shadow violet: P_KO_B is his glow (#b070ff), dust stays grey.
+  trekmore: ['#d8b8ff', '#f0ead6', '#c9d1e0', '#b070ff', '#9aa5b8', '#6e7a94', '#8a4dff', '#d8b8ff'],
+};
+/** Characters with their own particle tables; a particle's tint is charIndex * VARIANT_COUNT + variant. */
+const PARTICLE_CHARS: readonly string[] = Object.keys(PALETTES);
 /**
- * TYPE_COLOR per colour variant, [variant][type], built once: water sparks, droplets and the KO
- * ring take the colour of the fighter they came from. Grey dust stays grey through the remap.
+ * Colours per (character, variant), [tint][type], built once: sparks, droplets and the KO ring
+ * take the colour of the fighter they came from. Grey dust stays grey through the remap.
  */
-const TYPE_COLOR_BY_VARIANT: readonly (readonly string[])[] = (() => {
-  const perType = TYPE_COLOR.map((c) => variantTable(c));
+const TYPE_COLOR_BY_TINT: readonly (readonly string[])[] = (() => {
   const out: string[][] = [];
-  for (let v = 0; v < VARIANT_COUNT; v++) out.push(perType.map((t) => t[v]));
+  for (const charId of PARTICLE_CHARS) {
+    const base = TYPE_COLOR_BY_CHAR[charId] === undefined ? TYPE_COLOR : TYPE_COLOR_BY_CHAR[charId];
+    const perType = base.map((c) => variantTable(c, charId));
+    for (let v = 0; v < VARIANT_COUNT; v++) out.push(perType.map((t) => t[v]));
+  }
   return out;
 })();
+
+/** Index of `charId` in PARTICLE_CHARS, 0 (Aeval) when unknown. No allocation. */
+function charIndex(charId: string): number {
+  for (let i = 0; i < PARTICLE_CHARS.length; i++) {
+    if (PARTICLE_CHARS[i] === charId) return i;
+  }
+  return 0;
+}
 const TYPE_SIZE = new Uint8Array([2, 1, 3, 2, 2, 1, 2, 1]);
 const TYPE_GRAVITY = new Float32Array([0.05, 0.05, 0.02, 0.02, -0.012, 0, 0.11, 0.11]);
 const TYPE_DRAG = new Float32Array([0.94, 0.94, 0.97, 0.97, 0.9, 0.88, 0.99, 0.99]);
@@ -43,7 +63,7 @@ export interface ParticlePool {
   vy: Float32Array;
   life: Float32Array;
   kind: Uint8Array;
-  /** Colour variant per particle (src/render/palette.ts). */
+  /** Colour per particle: character index * VARIANT_COUNT + variant (src/render/palette.ts). */
   tint: Uint8Array;
   cursor: number;
   seed: number;
@@ -90,7 +110,8 @@ function emit(
   vx: number,
   vy: number,
   life: number,
-  variant: number
+  variant: number,
+  charId: string
 ): void {
   const i = pool.cursor;
   pool.cursor = (i + 1) % POOL_SIZE;
@@ -100,10 +121,18 @@ function emit(
   pool.vy[i] = vy;
   pool.life[i] = life;
   pool.kind[i] = kind;
-  pool.tint[i] = variant > 0 && variant < VARIANT_COUNT ? variant : 0;
+  const v = variant > 0 && variant < VARIANT_COUNT ? variant : 0;
+  pool.tint[i] = charIndex(charId) * VARIANT_COUNT + v;
 }
 
-export function spawnHitSparks(pool: ParticlePool, x: number, y: number, damage: number, variant = 0): void {
+export function spawnHitSparks(
+  pool: ParticlePool,
+  x: number,
+  y: number,
+  damage: number,
+  variant = 0,
+  charId = 'aeval'
+): void {
   const count = 4 + Math.min(10, Math.floor(damage));
   for (let i = 0; i < count; i++) {
     const speed = 0.8 + rand(pool) * 2.2;
@@ -116,12 +145,13 @@ export function spawnHitSparks(pool: ParticlePool, x: number, y: number, damage:
       Math.cos(a) * speed,
       Math.sin(a) * speed,
       10 + rand(pool) * 10,
-      variant
+      variant,
+      charId
     );
   }
 }
 
-export function spawnKoBurst(pool: ParticlePool, x: number, y: number, variant = 0): void {
+export function spawnKoBurst(pool: ParticlePool, x: number, y: number, variant = 0, charId = 'aeval'): void {
   for (let i = 0; i < 40; i++) {
     const speed = 1.5 + rand(pool) * 3.5;
     const a = (i / 40) * Math.PI * 2 + spread(pool, 0.1);
@@ -133,8 +163,25 @@ export function spawnKoBurst(pool: ParticlePool, x: number, y: number, variant =
       Math.cos(a) * speed,
       Math.sin(a) * speed,
       24 + rand(pool) * 16,
-      variant
+      variant,
+      charId
     );
+  }
+}
+
+/** A few glow sparks in the attacker's colour: the crit tell on top of the normal hit sparks. */
+export function spawnGlowSparks(
+  pool: ParticlePool,
+  x: number,
+  y: number,
+  count: number,
+  variant = 0,
+  charId = 'aeval'
+): void {
+  for (let i = 0; i < count; i++) {
+    const speed = 1.8 + rand(pool) * 2.4;
+    const a = rand(pool) * Math.PI * 2;
+    emit(pool, P_KO_B, x, y, Math.cos(a) * speed, Math.sin(a) * speed, 16 + rand(pool) * 8, variant, charId);
   }
 }
 
@@ -150,7 +197,8 @@ export function spawnLandDust(pool: ParticlePool, x: number, y: number, hard: bo
       dir * (0.5 + rand(pool) * (hard ? 1.6 : 0.8)),
       -rand(pool) * 0.5,
       12 + rand(pool) * 10,
-      0
+      0,
+      'aeval'
     );
   }
 }
@@ -165,12 +213,20 @@ export function spawnDashDust(pool: ParticlePool, x: number, y: number, facing: 
       -facing * (0.4 + rand(pool) * 1.2),
       -rand(pool) * 0.4,
       10 + rand(pool) * 8,
-      0
+      0,
+      'aeval'
     );
   }
 }
 
-export function spawnDroplets(pool: ParticlePool, x: number, y: number, count: number, variant = 0): void {
+export function spawnDroplets(
+  pool: ParticlePool,
+  x: number,
+  y: number,
+  count: number,
+  variant = 0,
+  charId = 'aeval'
+): void {
   for (let i = 0; i < count; i++) {
     emit(
       pool,
@@ -180,7 +236,8 @@ export function spawnDroplets(pool: ParticlePool, x: number, y: number, count: n
       spread(pool, 1.4),
       -rand(pool) * 1.6,
       16 + rand(pool) * 14,
-      variant
+      variant,
+      charId
     );
   }
 }
@@ -222,7 +279,7 @@ export function drawParticles(ctx: CanvasRenderingContext2D, pool: ParticlePool)
       if (life[i] <= 0 || kind[i] !== k) continue;
       if (tint[i] !== styled) {
         styled = tint[i];
-        ctx.fillStyle = TYPE_COLOR_BY_VARIANT[styled][k];
+        ctx.fillStyle = TYPE_COLOR_BY_TINT[styled][k];
       }
       ctx.fillRect(Math.round(x[i]), Math.round(y[i]), size, size);
     }

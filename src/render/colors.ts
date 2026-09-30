@@ -1,6 +1,6 @@
 /** Shared color constants for the renderer. Values come from SPEC sections 6 and 8. */
 
-import { variantTable } from './palette';
+import { PALETTES, variantTable } from './palette';
 
 export const PLAYER_COLORS: readonly string[] = ['#7fb2ff', '#ff7f7f', '#ffd27f', '#9fff7f'];
 
@@ -10,13 +10,22 @@ export const STONE = '#3a4a6b';
 export const STONE_LIGHT = '#6e7a94';
 export const PALE = '#c9d1e0';
 export const GLOW = '#7fb2ff';
-/** GLOW per colour variant (src/render/palette.ts): charge beads, respawn glow, fallback orb. */
+/** Aeval's GLOW per colour variant (src/render/palette.ts). Per character: glowFor(v, charId). */
 export const GLOW_VARIANTS: readonly string[] = variantTable(GLOW);
 
-/** GLOW in colour variant `v`; out of range reads as the base blue. */
-export function glowFor(v: number): string {
-  const c = GLOW_VARIANTS[v];
-  return c === undefined ? GLOW : c;
+/** Each character's glow base (PaletteConfig.glow) per variant, built once at load. */
+const GLOW_BY_CHAR = new Map<string, readonly string[]>();
+for (const charId in PALETTES) GLOW_BY_CHAR.set(charId, variantTable(PALETTES[charId].glow, charId));
+
+/**
+ * `charId`'s glow in colour variant `v`: charge beads, respawn glow, crit sparks. An unknown
+ * character reads as Aeval's; an out of range variant reads as the base colour.
+ */
+export function glowFor(v: number, charId = 'aeval'): string {
+  const table = GLOW_BY_CHAR.get(charId);
+  const list = table === undefined ? GLOW_VARIANTS : table;
+  const c = list[v];
+  return c === undefined ? list[0] : c;
 }
 
 export const WHITE = '#ffffff';

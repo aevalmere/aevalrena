@@ -8,12 +8,39 @@ import { VARIANT_COUNT } from './palette';
 
 const NO_OUTLINES: readonly string[] = [];
 
-/** Per-character effect animations (frame order and holds), by character id. */
+/**
+ * Per-character effect animations (frame order and holds), by character id. A character's
+ * sprites module may instead carry them itself as `fxAnims` (see fxAnimsOf); a character in
+ * neither place probes `<name>0..n` frames with default holds.
+ */
 const FX_ANIMS: Record<string, Record<string, FxAnimDef>> = {
   aeval: AEVAL_FX_ANIMS,
 };
-/** Hold per geyser frame when a character has no fx anim entry for it. */
-const GEYSER_DEFAULT_HOLD = 5;
+/** Optional field a character's sprites module can export its fx anims on. */
+interface SpritesWithFx { fxAnims?: Record<string, FxAnimDef> }
+
+function fxAnimsOf(charId: string): Record<string, FxAnimDef> | undefined {
+  const sprites = CHARACTER_SPRITES[charId] as (CharacterSprites & SpritesWithFx) | undefined;
+  if (sprites !== undefined && sprites.fxAnims !== undefined) return sprites.fxAnims;
+  return FX_ANIMS[charId];
+}
+
+/**
+ * Effect roles by fx name. The first name a character's fx sheet has fills the role; a role
+ * with no match stays empty and simply draws nothing for that character.
+ * - rise: world anchored column latched at the uspecial launch (Aeval geyser, Trekmore sword).
+ * - stance: loops on the fighter for the whole of dspecial (Aeval whirl).
+ * - handCharge: formed in hand while nspecial charges, picked by charge fraction (Aeval orb).
+ * - clips: one-shots by name. counterFlash: parry success and crit core. stepTrail: teleport
+ *   departure and arrival. shadowBurst: spare burst for effects outside a projectile.
+ */
+const RISE_FX: readonly string[] = ['geyser', 'swordRise'];
+const STANCE_FX: readonly string[] = ['whirl'];
+const HAND_CHARGE_FX: readonly string[] = ['orbCharge'];
+const CLIP_FX: readonly string[] = ['counterFlash', 'stepTrail', 'shadowBurst'];
+/** Hold per frame when a character has no fx anim entry for a role or clip. */
+const DEFAULT_CLIP_HOLD = 5;
+const FLASH_CLIP_HOLD = 2;
 /** Projectile readability halo: silhouette colour and opacity, grown by 1 px. */
 const SHADOW_RGB = [0x0b, 0x10, 0x30];
 const SHADOW_ALPHA = 140; // ~0.55
@@ -27,18 +54,25 @@ const SHADOW_MIN_ALPHA = 24;
 
 export interface CharVisual {
   charId: string;
+  /** Baked body sheet in this visual's colour variant. */
   bodySheetId: string;
+  /** The base (variant 0) body sheet: echo shadows bake from it, whatever the variant. */
+  baseBodySheetId: string;
   fxSheetId: string;
   sprites: CharacterSprites;
   portrait: string | null;
-  geyser: string[];
-  /** Sim frames each geyser frame is shown, counted from the launch. */
-  geyserHolds: number[];
+  /** The uspecial column (RISE_FX), world anchored at the launch. Empty when the sheet has none. */
+  rise: string[];
+  /** Sim frames each rise frame is shown, counted from the launch. */
+  riseHolds: number[];
   /** uspecial frame that launches the fighter (first setY velocity), or -1. */
-  geyserLaunch: number;
-  whirl: string[];
-  /** Frames drawn at the hand while nspecial charges, picked by charge fraction. */
-  orbCharge: string[];
+  riseLaunch: number;
+  /** The dspecial loop (STANCE_FX). Empty when the sheet has none. */
+  stance: string[];
+  /** Frames drawn at the hand while nspecial charges (HAND_CHARGE_FX), picked by charge fraction. */
+  handCharge: string[];
+  /** One-shot fx clips by name (CLIP_FX) that the sheet has: counter flash, step trail. */
+  clips: Map<string, FxClip>;
   /**
    * Dark halo behind each fx frame, baked once at load: [normal, flipped], 1 px
    * larger on every side than the frame (so its anchor is the frame's plus 1).
@@ -47,6 +81,14 @@ export interface CharVisual {
   hitspark: string[];
   splash: string[];
   ko: string[];
+}
+
+/** A one-shot effect resolved once at load: frame names and sim-frame holds. */
+export interface FxClip {
+  frames: string[];
+  holds: number[];
+  /** Sum of holds. */
+  total: number;
 }
 
 /** A projectile's fx anim resolved once at load: frame names and sim-frame holds. */
@@ -108,20 +150,30 @@ export async function buildVisuals(): Promise<void> {
     const visual: CharVisual = {
       charId,
       bodySheetId,
+      baseBodySheetId: bodySheetId,
       fxSheetId,
       sprites,
       portrait: portraitFrameName(sprites),
-      geyser: [],
-      geyserHolds: [],
-      geyserLaunch: -1,
-      whirl: probeFrames(sprites.fx, 'whirl'),
-      orbCharge: [],
+      rise: [],
+      riseHolds: [],
+      riseLaunch: -1,
+      stance: [],
+      handCharge: [],
+      clips: new Map(),
       shadows: new Map(),
       hitspark: probeFrames(sprites.fx, 'hitspark'),
       splash: probeFrames(sprites.fx, 'splash'),
       ko: probeFrames(sprites.fx, 'ko'),
     };
-    geyserTiming(visual, charId);
+    riseTiming(visual, charId);
+    const stance = firstClip(charId, sprites.fx, STANCE_FX, DEFAULT_CLIP_HOLD);
+    visual.stance = stance === null ? [] : stance.frames;
+    const charge = firstClip(charId, sprites.fx, HAND_CHARGE_FX, DEFAULT_CLIP_HOLD);
+    visual.handCharge = charge === null ? [] : charge.frames;
+    for (const name of CLIP_FX) {
+      const clip = resolveClip(charId, sprites.fx, name, FLASH_CLIP_HOLD);
+      if (clip !== null) visual.clips.set(name, clip);
+    }
     for (const name in sprites.fx.frames) {
       const normal = getFrame(fxSheetId, name, false, false);
       const flipped = getFrame(fxSheetId, name, true, false);
@@ -129,8 +181,6 @@ export async function buildVisuals(): Promise<void> {
         visual.shadows.set(name, [bakeShadow(normal), bakeShadow(flipped)]);
       }
     }
-    const charge = fxAnim(charId, sprites.fx, 'orbCharge');
-    visual.orbCharge = charge === null ? probeFrames(sprites.fx, 'orbCharge') : charge.frames;
     charVisuals.set(charId, visual);
   }
 
@@ -161,7 +211,7 @@ export async function buildVisuals(): Promise<void> {
  * none or one of its frames is missing from the sheet. Holds fall back to fps.
  */
 function fxAnim(charId: string, sheet: ImageSheetData, name: string): ProjectileAnim | null {
-  const anims = FX_ANIMS[charId];
+  const anims = fxAnimsOf(charId);
   const anim = anims === undefined ? undefined : anims[name];
   if (anim === undefined || anim.frames.length === 0) return null;
   if (!anim.frames.every((n) => sheet.frames[n] !== undefined)) return null;
@@ -214,30 +264,49 @@ function bakeShadow(src: HTMLCanvasElement): HTMLCanvasElement {
 }
 
 /**
- * The geyser is world-anchored: it is latched where the fighter took off. Frame
- * order and holds come from the fx anim when there is one, the launch frame
- * from the uspecial move's first vertical-velocity set.
+ * Fx `name` as a clip: the fx anim when the character has one, else the probed `<name>0..n`
+ * frames at `hold` sim frames each. Null when the sheet has neither.
  */
-function geyserTiming(visual: CharVisual, charId: string): void {
-  const fx = visual.sprites.fx;
-  const anims = FX_ANIMS[charId];
-  const anim = anims === undefined ? undefined : anims.geyser;
-  if (anim !== undefined && anim.frames.every((n) => fx.frames[n] !== undefined)) {
-    visual.geyser = anim.frames.slice();
-    visual.geyserHolds = anim.frames.map((_, k) =>
-      anim.holds !== undefined && anim.holds[k] !== undefined ? anim.holds[k] : GEYSER_DEFAULT_HOLD
-    );
-  } else {
-    visual.geyser = probeFrames(fx, 'geyser');
-    visual.geyserHolds = visual.geyser.map(() => GEYSER_DEFAULT_HOLD);
+function resolveClip(charId: string, sheet: ImageSheetData, name: string, hold: number): FxClip | null {
+  const anim = fxAnim(charId, sheet, name);
+  if (anim !== null) return { frames: anim.frames, holds: anim.holds, total: anim.total };
+  const frames = probeFrames(sheet, name);
+  if (frames.length === 0) return null;
+  const holds = frames.map(() => hold);
+  return { frames, holds, total: hold * frames.length };
+}
+
+/** The first of `names` the character's fx sheet has, as a clip. */
+function firstClip(
+  charId: string,
+  sheet: ImageSheetData,
+  names: readonly string[],
+  hold: number
+): FxClip | null {
+  for (const name of names) {
+    const clip = resolveClip(charId, sheet, name, hold);
+    if (clip !== null) return clip;
   }
+  return null;
+}
+
+/**
+ * The rise column is world-anchored: it is latched where the fighter took off. Frame order and
+ * holds come from the fx anim when there is one, the launch frame from the uspecial move's
+ * first vertical-velocity set.
+ */
+function riseTiming(visual: CharVisual, charId: string): void {
+  const clip = firstClip(charId, visual.sprites.fx, RISE_FX, DEFAULT_CLIP_HOLD);
+  if (clip === null) return;
+  visual.rise = clip.frames;
+  visual.riseHolds = clip.holds;
   const def = CHARACTER_DEFS[charId];
   const move = def === undefined ? undefined : def.moves.uspecial;
   const velocity = move === undefined ? undefined : move.velocity;
   if (velocity === undefined) return;
   for (const v of velocity) {
     if (v.setY === true) {
-      visual.geyserLaunch = v.frame;
+      visual.riseLaunch = v.frame;
       return;
     }
   }
@@ -263,8 +332,8 @@ export function getCharVisual(charId: string, variant = 0): CharVisual | null {
   const suffix = '#' + variant;
   const bodySheetId = base.bodySheetId + suffix;
   const fxSheetId = base.fxSheetId + suffix;
-  if (!bakeVariantSheet(base.bodySheetId, bodySheetId, variant)) return base;
-  if (!bakeVariantSheet(base.fxSheetId, fxSheetId, variant)) return base;
+  if (!bakeVariantSheet(base.bodySheetId, bodySheetId, variant, charId)) return base;
+  if (!bakeVariantSheet(base.fxSheetId, fxSheetId, variant, charId)) return base;
   const built: CharVisual = { ...base, bodySheetId, fxSheetId };
   list[variant] = built;
   return built;

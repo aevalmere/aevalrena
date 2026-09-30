@@ -1,7 +1,9 @@
 import type { GameState } from '../core/types';
+import { cpuBrainName } from '../ai';
 import { FS_METER } from '../core/constants';
 import { percentColor } from '../render/colors';
 import { setVariantSrc } from '../render/varianticon';
+import { MAX_CPU_LEVEL } from './context';
 import { iconAsset, playerAccentVars, playerTag, uiAsset } from './theme';
 
 /**
@@ -333,10 +335,12 @@ function el(tag: string, className: string, parent: HTMLElement | null): HTMLEle
 }
 
 /**
- * An <img> showing `src` in colour `variant` (src/render/palette.ts) that falls back once to
+ * An <img> showing `src` in `charId`'s colour `variant` (src/render/palette.ts) that falls back once to
  * `fallback` if `src` fails to load.
  */
-function img(className: string, src: string, fallback: string, parent: HTMLElement, variant: number): HTMLImageElement {
+function img(
+  className: string, src: string, fallback: string, parent: HTMLElement, variant: number, charId: string,
+): HTMLImageElement {
   const node = document.createElement('img');
   node.className = className;
   node.alt = '';
@@ -344,12 +348,31 @@ function img(className: string, src: string, fallback: string, parent: HTMLEleme
   if (src !== fallback) {
     node.onerror = (): void => {
       node.onerror = null;
-      setVariantSrc(node, fallback, variant);
+      setVariantSrc(node, fallback, variant, charId);
     };
   }
-  setVariantSrc(node, src, variant);
+  setVariantSrc(node, src, variant, charId);
   parent.appendChild(node);
   return node;
+}
+
+/**
+ * playerTag (theme.ts), except a level 10 CPU reads 'AEVALMERE' only when that slot is really
+ * running the Aevalmere brain (src/ai/index.ts cpuBrainName: Aeval under CPU_ENGINE auto or
+ * legacy). Any other character, or Aeval under CPU_ENGINE new, runs the search engine at level
+ * 10 like any other level, so it reads the same as a lower level's tag.
+ */
+function fighterTag(state: GameState, slot: number): string {
+  const players = state.config.players;
+  for (let i = 0; i < players.length; i++) {
+    const p = players[i];
+    if (p.slot !== slot) continue;
+    if (p.cpu && p.cpuLevel >= MAX_CPU_LEVEL && cpuBrainName(p.cpuLevel, p.charId) !== 'aevalmere') {
+      return `CPU LV ${p.cpuLevel}`;
+    }
+    break;
+  }
+  return playerTag(players, slot);
 }
 
 export function createHud(host: HTMLElement, deps: HudDeps): Hud {
@@ -381,7 +404,7 @@ export function createHud(host: HTMLElement, deps: HudDeps): Hud {
     const portrait = el('div', 'hud-portrait', card);
     el('div', 'hud-ring', portrait);
     if (info.icon !== null && info.bust !== null) {
-      img('hud-face', info.bust, info.icon, portrait, fighter.variant);
+      img('hud-face', info.bust, info.icon, portrait, fighter.variant, fighter.charId);
     } else {
       const face = el('div', 'hud-face hud-face-fallback', portrait);
       face.textContent = info.name.slice(0, 1);
@@ -395,14 +418,14 @@ export function createHud(host: HTMLElement, deps: HudDeps): Hud {
     const name = el('div', 'hud-name', infoEl);
     name.textContent = info.name;
     const tag = el('div', 'hud-tag', infoEl);
-    tag.textContent = playerTag(state.config.players, fighter.slot);
+    tag.textContent = fighterTag(state, fighter.slot);
 
     const stockRow = el('div', 'hud-stocks', infoEl);
     const stockCount = Math.max(state.config.stocks, fighter.stocks);
     const stocks: HTMLElement[] = [];
     for (let s = 0; s < stockCount; s++) {
       if (info.icon !== null && info.stock !== null) {
-        stocks.push(img('hud-stock', info.stock, info.icon, stockRow, fighter.variant));
+        stocks.push(img('hud-stock', info.stock, info.icon, stockRow, fighter.variant, fighter.charId));
       } else {
         stocks.push(el('span', 'hud-stock', stockRow));
       }
@@ -474,7 +497,7 @@ export function createHud(host: HTMLElement, deps: HudDeps): Hud {
     const root = el('div', 'hud-ntag', layer);
     root.setAttribute('style', playerAccentVars(state.config.players, fighter.slot));
     const label = el('div', 'hud-ntag-label', root);
-    label.textContent = playerTag(state.config.players, fighter.slot);
+    label.textContent = fighterTag(state, fighter.slot);
     el('div', 'hud-ntag-chev', root);
     root.hidden = true;
     return {
