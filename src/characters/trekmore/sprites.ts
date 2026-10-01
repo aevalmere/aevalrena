@@ -58,7 +58,7 @@ const ACTION_ANIM: Record<ActionId, AnimName> = {
   airDodge: 'airDodge',
   hitstun: 'hitLight',
   tumble: 'tumble',
-  ledgeGrab: 'ledgeHang',
+  ledgeGrab: 'ledgeGrab',
   ledgeHang: 'ledgeHang',
   ledgeClimb: 'ledgeClimb',
   ledgeRoll: 'roll',
@@ -92,6 +92,14 @@ function animLength(def: AnimDef | undefined): number {
   return def.fps > 0 ? Math.ceil((def.frames.length * SIM_HZ) / def.fps) : 0;
 }
 const AIR_JUMP_FRAMES = animLength(anims['airJump']);
+// The hitStrong recoil (dk_strong_1, 2) before a launch turns into the tumble loop.
+const STRONG_RECOIL_FRAMES = 7;
+/**
+ * A hitstun hit draws hitStrong when its starting hitstun is at least this many frames. The sim
+ * sets hitstun = floor(kb * 0.4) and counts it down as actionFrame counts up, so hitstun +
+ * actionFrame is the starting length: 20 frames = knockback 50 (tumble starts at knockback 80).
+ */
+const STRONG_HITSTUN = 20;
 
 function animFor(action: ActionId, moveId: MoveId | null, fighter: FighterState): AnimName {
   // setAction restarts actionFrame at the mid-air jump, so the anim starts on its first frame.
@@ -102,6 +110,13 @@ function animFor(action: ActionId, moveId: MoveId | null, fighter: FighterState)
     const byMove = MOVE_ANIM[moveId];
     if (byMove !== undefined && anims[byMove] !== undefined) return byMove;
     return 'idle';
+  }
+  // Strong hits: the hitStrong recoil, and a launch (tumble) opens with it before the tumble loop.
+  if (action === 'hitstun' && fighter.hitstun + fighter.actionFrame >= STRONG_HITSTUN && anims['hitStrong'] !== undefined) {
+    return 'hitStrong';
+  }
+  if (action === 'tumble' && fighter.actionFrame < STRONG_RECOIL_FRAMES && anims['hitStrong'] !== undefined) {
+    return 'hitStrong';
   }
   const byAction = ACTION_ANIM[action];
   if (byAction !== undefined && anims[byAction] !== undefined) return byAction;

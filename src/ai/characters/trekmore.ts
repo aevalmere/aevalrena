@@ -49,7 +49,7 @@ import { specForUiLevel } from '../levels';
 import { breakEven } from '../model/gating';
 import { makeContext, newContext } from '../model/predictor';
 import { comboTableFor } from '../plans/advantage';
-import { registerFamilies } from '../plans/index';
+import { registerCandidateVeto, registerFamilies } from '../plans/index';
 import {
   codeOf, D, isOffstage, J, K_APPROACH, K_COMMIT, K_RETREAT, KeyedPlanPool, L, Plan, PlanPool, press, R,
   runState, safeDir, SP, stageGeo, stageOfState, targetIndex, U, type StageGeo,
@@ -142,7 +142,7 @@ function slot(v: DecisionView, name: string, dflt: number): number {
 
 interface Kit {
   def: CharacterDef;
-  sword: ProjectileDef; swordTotal: number; castFrames: number; recallFoot: number; recallLag: number;
+  sword: ProjectileDef; swordTotal: number; castFrames: number; chargeable: boolean; recallFoot: number; recallLag: number;
   stepStart: number; stepTravel: number; stepDist: number; stepHit: number;
   counterFrom: number; counterTo: number; counterScale: number; counterMin: number; counterMax: number; counterTotal: number;
 }
@@ -165,7 +165,7 @@ function kitOf(charId: string): Kit | null {
     let hit = 0;
     for (const h of ssp.hitboxes) if (hit === 0 || h.start < hit) hit = h.start;
     k = {
-      def, sword, swordTotal: nsp.totalFrames, castFrames: nsp.chargeCastFrames ?? 0, recallFoot: rc.footOffsetY,
+      def, sword, swordTotal: nsp.totalFrames, castFrames: nsp.chargeCastFrames ?? 0, chargeable: nsp.chargeable === true && nsp.holdAim !== true, recallFoot: rc.footOffsetY,
       recallLag: nsp.branch.end - nsp.branch.start,
       stepStart: ssp.shadowStep.startFrame, stepTravel: ssp.shadowStep.travelFrames, stepDist: ssp.shadowStep.distance, stepHit: hit,
       counterFrom: dsp.counter.windowStart, counterTo: dsp.counter.windowEnd, counterScale: dsp.counter.scale,
@@ -274,6 +274,8 @@ const FALL = { x: 0, y: 0 };
  */
 function swordPath(v: DecisionView, n: Tv, hold: number, aim: number, f: number): SwordPath {
   const k = n.kit;
+  // An unchargeable cast (the polish wave sword) starts on the press; a held Special does nothing.
+  if (!k.chargeable) hold = 0;
   const charge = hold <= 0 ? 0 : Math.min(TUNING.input.chargeMax, hold - 1);
   const frac = charge / TUNING.input.chargeMax;
   const delay = Math.round(k.castFrames * frac);
@@ -383,7 +385,10 @@ const poolSword = new PlanPool();
 const ROUTE_OFF: readonly number[] = [0, 30, -34];
 const ROUTE_CODE: readonly number[] = [C_DAIR, C_BAIR, C_FAIR];
 const ROUTE_HMIN: readonly number[] = [62, 48, 60];
-const ROUTE_HMAX: readonly number[] = [140, 110, 110];
+// Above: 140 to 170 in the polish balance pass. With the throw at 34 frames (recall from frame 34)
+// and the 8 px/frame sword, an up-forward throw is first recallable at 141 px of rise, so 140 left
+// no grounded route at all.
+const ROUTE_HMAX: readonly number[] = [170, 110, 110];
 
 const SWORD_ROUTE = family('special', ['neutral', 'advantage', 'airborne'], (v, out) => {
   const n = tv(v, 1);
@@ -394,7 +399,7 @@ const SWORD_ROUTE = family('special', ['neutral', 'advantage', 'airborne'], (v, 
   const g = n.g;
   const k = n.kit;
   const f = n.dir;
-  const holds = n.tier >= 2 ? [0, fullHold()] : [0];
+  const holds = n.tier >= 2 && k.chargeable ? [0, fullHold()] : [0];
   const aims = n.tier >= 2 && n.adx < 40 && n.dy < -50 ? [AIM_UPFWD, AIM_UP] : [AIM_UPFWD];
   let variant = 0;
   let emitted = 0;
@@ -440,7 +445,7 @@ const SWORD_ROUTE = family('special', ['neutral', 'advantage', 'airborne'], (v, 
   }
   // Charged sword as a zoning shot at long range (the recall stays as the escape).
   if (n.tier >= 2 && n.grounded && n.adx > 200 && Math.abs(n.dy) < 30) {
-    const hold = fullHold();
+    const hold = n.kit.chargeable ? fullHold() : 0;
     const path = swordPath(v, n, hold, AIM_FWD, f);
     const reach = Math.abs(path.vx) * (path.tMax - path.ts + 1) + Math.abs(path.sx - n.me.x);
     if (reach + n.vHalf >= n.adx) {
@@ -1044,6 +1049,47 @@ export const TREKMORE_FAMILY_TABLE: readonly { name: string; family: PlanFamily 
 export const TREKMORE_FAMILIES: readonly PlanFamily[] = TREKMORE_FAMILY_TABLE.map((e) => e.family);
 
 registerFamilies(TREKMORE_FAMILIES);
+
+// ---------------------------------------------------------------------------------------------
+// Sword throttle (polish wave balance pass)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Frames after his sword was last seen alive before the CPU may throw another. The uncharged cast
+ * (polish wave) let the CPU keep a 360 px sword out almost all the time; even with the throw at 34
+ * frames it ran hot (66 percent at UI 7), so the throttle keeps neutral open. Recalls (the sword is alive) are
+ * never throttled.
+ */
+const SWORD_GAP = 90;
+
+/**
+ * Last frame each brain saw its sword alive, keyed by the brain's Tempo object (one per CPU brain,
+ * so two CPUs never share it). A frame from an earlier match (larger than now) reads as never.
+ */
+const SWORD_SEEN = new WeakMap<object, number>();
+
+function swordThrottled(v: DecisionView, p: PlanInstance): boolean {
+  if (!isTrekmore(v)) return false;
+  const kit = kitOf(v.me.charId);
+  if (kit === null) return false;
+  const s = v.p.state;
+  const me = s.fighters[v.p.meI];
+  // Every candidate of every decision refreshes the record, not only sword plans.
+  for (let i = 0; i < s.projectiles.length; i++) {
+    const q = s.projectiles[i];
+    if (q.alive && q.owner === me.slot && q.defId === kit.sword.id) {
+      SWORD_SEEN.set(v.tempo, s.frame);
+      return false;   // the sword is out: an NSP plan is a recall
+    }
+  }
+  if (p.move !== NSP) return false;
+  const last = SWORD_SEEN.get(v.tempo);
+  if (last === undefined) return false;
+  const d = s.frame - last;
+  return d >= 0 && d < SWORD_GAP;
+}
+
+registerCandidateVeto(swordThrottled);
 
 /** Exposed for tests: the sword path model and the packed-parameter layout. */
 export const TREKMORE_TEST = { swordPath, packSword, NO_THROW, NO_RECALL, AIM_UPFWD, AIM_UP, FM_DIRECT, SM_TARGET, DR_NONE, DAIR_I };

@@ -459,3 +459,231 @@ Aeval on Trekmore (`npm run calibrate -- --char aeval --victim trekmore`) is unc
 | `npm run test:sim` | exit 0, 128 of 128 pass |
 | `npm run test:net` | exit 0, nettest PASS |
 | `npx --yes tsx src/ai/charprofile/cache.ts --check` | exit 0, trekmore hearthmoor and tidegate fresh |
+
+## Polish wave (2026-09-30, docs/TREKMORE_POLISH.md)
+
+### Final numbers (after the balance pass below)
+
+- utilt: head circle (2, -52) r 13 plus the crescent, circles r 12 on a radius 40 arc around (6, -34) from 120 to -20 degrees.
+  kbg 98 to 80. The head circle is back because the crescent's ring passes over an adjacent standing target.
+- usmash: head circle (2, -52) r 15 plus a radius 50 arc, circles r 14, from 120 to 75 degrees (front edge x 33, top edge y -98).
+  An anti-air again. Damage, angle, bkb and kbg are unchanged (KO 107, 65 charged).
+- uair: a radius 40 arc, circles r 12, from 140 to 20 degrees. Damage and knockback are unchanged. Echo (5, 0) is unchanged.
+- nspecial: not chargeable. 34 frames (22 in the contract; the endlag pass below); the sword still leaves on 9 at 8 px/frame for
+  45 frames (360 px). sheetmap nspecial holds [3, 3, 3, 25]. Damage is 4 + 1 per 36 px,
+  capped at 11 (13 in the contract, trimmed here; reached at 252 px). bkb is 30 + 0.05 per px, kbg 43. Burst is a flat 4.
+- uspecial: the rising body box is gone. The `ascentSword` projectile (spawn frame 8 at (4, -50), vx 1.2, vy -7.3, gravity 0.25,
+  lifetime 14) carries the drag hit (3, 90 degrees, bkb 60, kbg 30) and dies at his raised hand on frame 22 (0.4 px off). He is
+  hidden and invulnerable 10 to 21. `ascentVelocity()` is unchanged.
+- dspecial: counter window 4 to 30 (was 5 to 22); a whiff lasts 56 frames (was 50).
+- Sim rule (src/sim/hits.ts resolveEcho): an echo never softens a launch. A tumbling victim still flying faster than the echo hit
+  would send it is passed through, and the group stays live. Hitstun slides are untouched (the jab and dtilt echoes still
+  re-hit). Only Trekmore has echoes, so Aeval-only matches and hashes are unchanged.
+
+nspecial by distance flown (straight line from the spawn point):
+
+| Distance | Damage | bkb |
+|---|---|---|
+| 50 px | 5.39 | 32.5 |
+| 150 px | 8.17 | 37.5 |
+| 300 px | 11.00 (cap) | 45.0 |
+
+Up-B height is unchanged (`ascentVelocity()` is untouched; the 91.2 px rise logged when it was set). From the ground the feet peak
+100.5 px above the start (selftest tkd11).
+
+### Calibrate (Trekmore on Aeval), changed rows
+
+| Move | HEAD | First polish pass | Final |
+|---|---|---|---|
+| utilt | 165 (gap 0) | 119 (gap 40) | 152 (gap 40) |
+| usmash | 107 / 65 (gap 0) | 107 / 65 (gap 40) | 107 / 65 (gap 0) |
+| uair | 137 (gap 40) | 220 (gap 40) | 136 (gap 40) |
+| nspecial | 173 / 119 | none (58.9 kb at 100) | none (58.9 kb at 100) |
+
+uair at 220 was not a knockback change (141.3 at 100 throughout). The echo, delayed 5 frames, caught the launched victim as it
+rose through the wide crescent and relaunched it with its half-damage hit. The echo rule above fixes that. utilt's old 165 at
+gap 0 was the same effect.
+
+### Balance pass
+
+`trekbalance.ts`, Trekmore vs Aeval, UI 7, 3 stocks:
+
+| Build | n | Trekmore score | Openings T/A | usmash KO share | uair KO share |
+|---|---|---|---|---|---|
+| HEAD bfa892a (clean worktree) | 120 | 69/120 (57%) | 3632/5403 | 16% | 19% |
+| First polish pass | 40 | 33/40 (83%) | 1188/1571 | 41% | 19% |
+| usmash to 60, utilt kbg 80, echo rule | 40 | 28/40 (70%) | 1231/1559 | 21% | 23% |
+| + nspecial cap 11 | 40 | 25/40 (63%) | 1251/1647 | 24% | 23% |
+| same | 120 | 88/120 (73%) | 3796/4659 | 25% | 22% |
+| Final (usmash to 75, uair 140 to 20) | 120 | 93/120 (78%) | 3801/4709 | 18% | 23% |
+| Final, at the requested sizes | 40 / 20 / 20 | UI 7 35/40 (88%), UI 5 20/20, UI 10 7/20 | 1289/1585 | 21% | 21% |
+
+Isolation runs (UI 7, n 120, each against the "+ nspecial cap 11" build):
+
+| Change | UI 7 score |
+|---|---|
+| All new sim code with HEAD's Trekmore moves.ts | 71/120 (59%) |
+| Old nspecial (chargeable, the old sword), rest new | 74/120 (62%) |
+| Old nspecial timing (spawn 14, total 30), still uncharged | 84/120 (70%) |
+| Sword lifetime 18 (144 px) | 93/120 (78%) |
+| Sword kbg 30, bkbPerPx 0.03 | 94/120 (78%) |
+| Old utilt, usmash and uair hitboxes | 87/120 (73%) |
+| Old uspecial (body box, invuln 10 to 14, no sword) | 91/120 (76%) |
+| Old counter window 5 to 22 | 92/120 (77%) |
+| Echo rule off | 93/120 (78%) |
+| CPU sword zoning plan off | 95/120 (79%) |
+
+Finding: the move that runs hot is the uncharged nspecial. Aeval's openings fall from about 5400 to about 4700 per 120 games. The
+old CPU spent long charge holds that Aeval punished, and the fast tap cast removes them. Range, damage and knockback of the sword
+do not move the score. The arcs, uspecial, the counter window and the echo rule are each inside the noise. UI 7 is not inside 45
+to 62 percent. Getting there needs a frame-data lever the contract freezes (a later release or more endlag on nspecial, with the
+art retimed), or a CPU change that uses the sword less.
+
+### Endlag pass (nspecial totalFrames, sword still on frame 9)
+
+Each total with the art matched (sheetmap nspecial last hold = total - 9, `python tools/sheetcut/pack.py --char trekmore`), the
+cache regenerated, UI 7 vs Aeval, n 120, 3 stocks:
+
+| nspecial total | Last hold | CPU sword throttle | UI 7 score | Wilson 95% |
+|---|---|---|---|---|
+| 22 (before) | 13 | none | 93/120 (78%) | 0.692 to 0.841 |
+| 26 | 17 | none | 86/120 (72%) | 0.630 to 0.790 |
+| 30 | 21 | none | 89/120 (74%) | 0.657 to 0.812 |
+| 34 | 25 | none | 79/120 (66%) | 0.570 to 0.737 |
+| 34 | 25 | 90 frames | 78/120 (65%) | 0.561 to 0.729 |
+| 34 | 25 | 180 frames | 91/120 (76%) | 0.674 to 0.826 |
+| 34 | 25 | 300 frames | 82/120 (68%) | 0.596 to 0.760 |
+| 34 | 25 | no re-throw at all (test only) | 80/120 (67%) | 0.578 to 0.745 |
+| 34, final (throttle 90, route height cap 170) | 25 | 90 frames | 72/120 (60%) | 0.511 to 0.683 |
+
+The throttle (src/ai/characters/trekmore.ts `swordThrottled`, registered through the new `registerCandidateVeto` in
+src/ai/plans/index.ts) drops a sword-throw candidate for SWORD_GAP frames after the CPU last saw its sword alive. Recalls are never
+throttled. It works: with no re-throw at all, nspecial left his move list. But it did not move the score beyond noise; even no
+re-throw at all gave 67 percent. Every score in the table overlaps the others' intervals. The endlag and the throttle together
+take UI 7 from 78 to 60 to 68 percent; the final run, 60 percent, is inside 45 to 62, but a near-identical build gave 65. The rest
+of the gap to HEAD (57 to 59) is spread over the polish changes; no single one stands out at n 120.
+
+With the throw at 34 frames the sword is first recallable at frame 34, so a grounded up-forward throw has already risen 141 px.
+The swordRoute "above" landing cap ROUTE_HMAX[0] went from 140 to 170, or the route never fired from the ground (unit test
+trekmore.swordRoute; its scene spacing went from 110 to 170 px, and the swordRecall scene now waits 35 frames).
+
+Gates after the endlag pass: typecheck exit 0; test:sim 129/129; test:ai unit PASS (trekmore 16/16); profile cache rewritten
+(trekmore hearthmoor 3c24a251b83236f9, tidegate d848d0858019648f; aeval unchanged).
+
+## Round 2 (2026-09-30 evening, SIM)
+
+No balance or CPU runs this round (owner: no CPU work), so there is no trekbalance number. Frame data and hitboxes only.
+
+### Sim
+- `MoveDef.holdAim`: nspecial is `chargeable`, `chargeButton: 'special'`, `holdAim: true`. Special still held on the hold frame
+  (frame 8, the one before the sword's spawn frame 9) pauses the move there for up to 45 frames while `aimDir` follows the stick;
+  the release frame reads the aim and runs frame 9 at once, so the sword spawns on the release frame. `chargesPower(mv)` (hits.ts)
+  keeps a holdAim move out of every charge scale (melee multiplier, projectile power, scale, `charged` lerp, cast delay), so the
+  held frames only count in `f.charge`. A tap (the shortcut, or Special let go before frame 8) is unchanged: spawn on frame 9,
+  34 frames (selftest tkd13). The hold rides `charging`/`charge`/`aimDir`, which every clone and snapshot already carries (tk15
+  adds a mid-hold snapshot). The CPU keeps tapping: its Trekmore kit and the profile derive treat a holdAim move as unchargeable.
+- Echo placement: `echoX = x + dir * offsetX + clamp(vx * delayFrames, -40, 40)`, dir = sign(vx) when |vx| >= 0.5, else facing.
+  The vx term (coordinator addition) leads the shadow to where a drifting or running Trekmore will be, so he does not overtake it.
+  The echo keeps his facing. The round-1 rule (an echo skips a tumbling victim already flying faster) stays.
+
+### Echo offsets
+Echo connect rate (percent of owner hits that the echo follows, victim at 0/25/50 percent, spacing -40 to 90 px, aerials at five
+heights; standing / drifting at vx 1.5):
+
+| Move | Old offset | New | Rate at new | Rate at 6 |
+|---|---|---|---|---|
+| jab | 12 | 20 | 98 / 98 | 79 / 86 |
+| ftilt | -8 | 20 | 58 / 67 | 50 / 60 |
+| utilt | -6 | 5, delay 10 to 4, followThrough | 100 grounded, 0 to 60 percent (tkd14) | 0 / 0 before the fix |
+| dtilt | 20 | 20 | 33 / 33 | 28 / 28 |
+| dashatk | -10 | 18 | 33 / 33 | 28 / 33 |
+| nair | 0 | 16 | 55 / 57 | 49 / 49 |
+| fair | -6 | 20 | 30 / 29 | 25 / 23 |
+| bair | 6 | 12 | 27 / 24 | 23 / 21 |
+| uair | 0 | 10 | 33 / 31 | 33 / 29 |
+| dair (late hit) | 0 | 10 | 11 / 8 | 9 / 8 |
+
+The owner's hit pushes the victim away, so a shadow further ahead follows more often. utilt's echo never lands: the column
+launches straight up and the echo, 10 frames later, meets a victim already flying faster (the round-1 rule). Selftests tkd4 (jab
+echo at every spacing 16 to 56, now to 63) and tkd12 (placement) pass.
+
+### Hitboxes
+- utilt, uair, usmash: back to the bfa892a sword column / three overhead circles. Kept from the polish wave: utilt kbg 80 (98
+  killed at 119 once echoes stopped softening launches, below the tilt band; 80 kills at 152, calibrate with the echo off; with
+  the echo on the harness lands only the echo at gap 26 and reads 275). usmash kbg 63 and uair kbg 90 were never changed.
+- fair (now the fsmash crescent): three circles r 14 at (22, -42), (40, -32), (46, -16); front edge 60 px (was 51). KO 119.
+- dair (now the dsmash art): spike r 15 at (26, 0) on 14 to 18 (the arc coming down in front-below); late hit r 17 at (4, 4) and
+  r 13 at (32, -2) on 19 to 24, group 2 (the eruption under him). Damage and knockback unchanged.
+- dashatk (now twin_strike): circles r 12 from x 14 to 50 at y -22 plus an impact circle r 18 at x 68; front edge 86 px (was 92),
+  frames 11 to 18. KO 174.
+
+Calibrate (trekmore vs aeval): ftilt 139, utilt 275 (echo-only placement, see above), dtilt 162, dashatk 174, fsmash 98/59,
+usmash 107/65, dsmash 110/69, fair 119, bair 188, uair 136, sspecial 108, dspecial 130/57.
+
+Gates: typecheck exit 0; test:sim 130/131, the one FAIL is tkd1 "nspecial: no Charge anim" (the ART worker's nspecialCharge
+anim, in its contract table); test:ai unit PASS (trekmore.ts ok), fast tier fails only perf, perf.4p, ba, bf (as at HEAD). Profile
+cache rewritten (trekmore hearthmoor 828406c51a7ba4cb, tidegate 13f82070653f8b3f; aeval unchanged).
+
+### utilt shadow fix
+The owner wants the shadow to attack. utilt's echo never landed: the column launches straight up faster than the half-damage
+replay would, so the round-1 rule passed it through at every delay (2 to 6 tried, 0 of 48 grounded cases). New
+`EchoDef.followThrough` (types.ts, hits.ts resolveEcho): such an echo still strikes (damage, 7 frames of hitlag, the hit event)
+and the victim keeps its faster launch (direction, speed, gravity, the longer hitstun). utilt: delay 4, offset 5, followThrough.
+It connects at every spacing utilt reaches on a grounded Aeval at 0, 20, 40 and 60 percent; the victim's peak height moves
+under 0.5 px; KO 152 with the echo on (selftest tkd14). Offsets of 6 and up let calibrate find a gap only the shadow reaches
+(an echo-only 275), so 5 is the cap. Delay 3 to 5 all connect; 4 is the middle. No other move uses followThrough.
+Gates: typecheck exit 0; test:sim 132/132 (tkd1 passes now that the nspecialCharge anim exists); cache rewritten (trekmore
+hearthmoor 9fe02f087d2e0abb, tidegate ee0d2a85542775c2; aeval unchanged).
+
+### Round 2 QA (SIM)
+- Echo follows him: the side (travel direction, facing when nearly still) is latched at move frame 0 in the new fighter field
+  `echoDir`; every frame after all fighters move (`syncEchoes`, src/sim/index.ts) the echo stands at his current feet plus
+  echoDir * offsetX, y included. The vx lead term is gone. echoFacing stays latched. A 62 px dashatk slide and a 60 px fair drift
+  keep it exactly on its spot (tkd12). Every echo selftest still connects; no offset needed retuning for that.
+- aimDir: while Special is held up to the hold frame the aim follows the stick every frame, so the first paused frame (8) shows
+  Up held since frame 3 (tkd15). A shortcut tap (no Special held) still aims once on the press. A button tap held a few
+  frames now aims from the stick of its last held frame.
+- `ProjectileDef.dieOnGround` (shadowSword): crossing a platform top going down, or entering a solid platform's body, stops it on
+  the surface and bursts it there (tkd16: down and down-forward throws on the ground die on the floor at step 11 and 12).
+- Recovering from below (generic, every character): rising into a solid platform's underside with the centre within 40 px of a
+  ledge corner slides the fighter out past that corner (vy kept) instead of bonking; under the middle it bonks as before
+  (physics.ts resolveSolids, UNDER_EDGE_BAND). Before, an up special 20 px in from an edge died under the stage; now Aeval and
+  Trekmore grab the ledge from both edges on both stages (tkd17). tkd8's deepest Aeval recovery start went 135 to 145 px.
+  No selftest expectation or Aeval hash changed. Aeval's profile cache changed (recoverBox reaches further from below; one
+  starterKills and one killPctRecover entry rose since a victim now recovers), which is expected from the rule.
+- utilt, uair, usmash now draw the concept_a upsweep: the column became an arc from 30 to 105 degrees around (4, -30), radius
+  42 with r 12 circles (usmash 50, r 14); utilt and usmash keep the hilt circle (2, -52). Totals, active frames, damage, angles
+  and knockback unchanged. Calibrate: utilt 152 (echo on), uair 136, usmash 107 / 65.
+- utilt echo: delay 4, offset 5 to 14, followThrough. 0 to 60 percent connects at every spacing the utilt reaches (19 of 19)
+  up to 14; 18 drops one. KO 152 at every offset 5 to 22 (the sweep reaches gap 40 now, so no echo-only placement).
+- dashatk echo: offset 18 to 32 so the shadow thrusts clear of him. It connects on a 0 percent victim at 11 of 19 spacings (15 at
+  18); above 0 percent the thrust launches her out of its reach at any offset 18 to 42, delay 4 to 10, with or without
+  followThrough, as before. KO 174.
+Gates: typecheck exit 0; test:sim 135/135; test:ai unit PASS; cache rewritten (trekmore hearthmoor 1c41def6dad05762, tidegate
+32a185e79bf45cce; aeval input hashes d9f60627e257bb1a and e80bb07f911dd3a1 unchanged, its derived content changed as above).
+
+### Round 2 QA, crescent restored (owner)
+The up attacks are back on the round-1 crescent art (uspec_g_12..17), so the upsweep is gone and the polish-wave final hitboxes
+are restored exactly: utilt head circle (2, -52, r 13) plus overheadArc radius 40, r 12, 120 to -20, kbg 80; usmash head circle
+plus radius 50, r 14, 120 to 75; uair radius 40, r 12, 140 to 20. Everything else from rounds 2 and 3 stays (echo follows him,
+followThrough, offsets). Calibrate: utilt 152 (echo on), uair 136, usmash 107 / 65.
+utilt echo on the crescent: delay 4, followThrough, offset kept at 14. Every offset 5 to 22 connects at all 22 spacings utilt
+reaches on a grounded Aeval at 0, 20, 40 and 60 percent, KO 152 at each; tkd14 passes (32 owner hits, no misses).
+Gates: typecheck exit 0; test:sim 135/135; cache rewritten (trekmore hearthmoor 4b1926c37328a2fd, tidegate 497be703744876e1;
+aeval input hashes unchanged). No moonanchor stage was present in this run.
+
+utilt echo offset 14 to 20 (coordinator): matches jab, ftilt and fair so the clone stands visibly in front; the sweep above
+showed 20 connects at all 22 spacings, 0 to 60 percent, KO 152.
+test:sim 135/135 (tkd14: 32 owner hits, no misses, KO 152); cache rewritten (trekmore hearthmoor 22bc7eaccec2705a, tidegate
+32787a3ceb2ea7f1; aeval unchanged).
+
+### Aeval dair no-stun (owner, SIM worker)
+Before: the dive spike (14 dmg, 275 deg, bkb 50, kbg 80) froze the victim 11 frames (hitlag) plus hitstun kb * 0.4 (31 at 0
+percent, 50 at 50, 69 at 100); from 80 kb on (about 9 percent up) it was a tumble. A standing victim then stayed in tumble on the
+floor until it pressed something (42, 61, 80 frames of no control at 0, 50, 100); an airborne one landed still in hitstun and was
+knocked down (downed up to 120 frames plus a 30-frame get-up: 166 frames with no input, about 48 with an instant get-up).
+After: new `HitboxDef.hitstunScale` (applyHit scales the hitstun and never tumbles the victim, so landing is ordinary, never a
+knockdown); Aeval's dair box has 0.25. Same damage and launch (still a meteor off stage). Actionable after the hit: 18, 23, 28
+frames at 0, 50, 100 percent, standing or airborne (selftest cn2). No existing selftest expectation changed; test:net passes.
+Gates: typecheck exit 0; test:sim 136/136; caches rewritten (aeval hashes change with the dair: hearthmoor 07c4770b90563b08,
+tidegate 301b258191b8af3b; the other worker's moonanchor stage now appears in both caches).

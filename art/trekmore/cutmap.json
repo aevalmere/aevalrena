@@ -34,13 +34,15 @@
     "name": "run",
     "y0": 505,
     "y1": 645,
-    "count": 7
+    "count": 7,
+    "bodyScale": 0.9
    },
    {
     "name": "dash",
     "y0": 720,
     "y1": 855,
-    "count": 3
+    "count": 3,
+    "bodyScale": 0.9
    }
   ],
   "scaleRef": {
@@ -58,7 +60,8 @@
      202
     ]
    }
-  }
+  },
+  "_noteRound2": "Round 2: run and dash bodyScale 0.9. Within this sheet the run sword (guard to tip) measures 74 source px against 70 on idle_0 (7 percent larger), and next to dk_light_0, vk_dash_0 and heavy_slash_0 the run and dash helmets and torsos read about 10 percent big."
  },
  "air": {
   "file": "jump_fall_airdash.png",
@@ -166,33 +169,25 @@
     "name": "counter",
     "parts": [
      {
-      "y0": 445,
-      "y1": 674,
+      "y0": 425,
+      "y1": 685,
       "count": 6,
-      "cells": [
+      "centers": [
+       120,
+       340,
+       575,
+       820,
+       1090,
+       1360
+      ],
+      "reassign": [
        [
-        24,
-        240
-       ],
-       [
-        241,
-        460
-       ],
-       [
-        461,
+        5,
+        4,
+        0,
+        0,
+        1257,
         700
-       ],
-       [
-        701,
-        995
-       ],
-       [
-        996,
-        1250
-       ],
-       [
-        1251,
-        1530
        ]
       ]
      },
@@ -201,7 +196,8 @@
       "y1": 946,
       "count": 3
      }
-    ]
+    ],
+    "_noteQA2": "QA round 2: line 1 grows from measured body centres instead of cells (the arc of frame 4 touches frame 5's cape; cells cut the arc and the eruption flat), band 425..685 so the arc top and eruption base are whole; the DOWN SMASH caption and the frame numbers are blanked by rects."
    }
   ],
   "scaleRef": {
@@ -221,7 +217,45 @@
    },
    "allowDisagree": "the parry sheet draws the sword about 8 percent longer relative to the body than locomotion.png; the stand height is used"
   },
-  "pocketMin": 40
+  "pocketMin": 40,
+  "rects": [
+   [
+    405,
+    447,
+    30,
+    390
+   ],
+   [
+    679,
+    700,
+    108,
+    126
+   ],
+   [
+    679,
+    700,
+    323,
+    341
+   ],
+   [
+    680,
+    700,
+    562,
+    580
+   ],
+   [
+    680,
+    700,
+    808,
+    826
+   ],
+   [
+    683,
+    700,
+    1077,
+    1095
+   ]
+  ]
  },
  "heavy": {
   "file": "heavy_slash.png",
@@ -380,7 +414,13 @@
      1360,
      1530,
      1690
-    ]
+    ],
+    "bodyScaleFrames": {
+     "5": 0.88,
+     "6": 0.88,
+     "7": 0.88,
+     "8": 0.88
+    }
    },
    {
     "name": "strike",
@@ -398,7 +438,8 @@
        806
       ]
      }
-    }
+    },
+    "bodyScale": 0.9
    }
   ],
   "scaleRef": {
@@ -419,7 +460,8 @@
    },
    "use": "sword"
   },
-  "pocketMin": 40
+  "pocketMin": 40,
+  "_notePolish": "Polish wave: the backstrike row body is about 10 percent larger than loco (its own sword scale), bodyScale 0.9; side frames 5 to 8 (the reappearance) are drawn about 12 percent larger than the rest of the row, 0.88."
  },
  "uspec": {
   "file": "up_special.jpeg",
@@ -548,7 +590,8 @@
     "count": 4,
     "scaleRef": {
      "likeRow": "taunt"
-    }
+    },
+    "bodyScale": 1.3
    },
    {
     "name": "ranged",
@@ -559,7 +602,8 @@
     "count": 3,
     "scaleRef": {
      "likeRow": "taunt"
-    }
+    },
+    "bodyScale": 1.3
    },
    {
     "name": "aerial",
@@ -570,18 +614,20 @@
     "count": 3,
     "scaleRef": {
      "likeRow": "taunt"
-    }
+    },
+    "bodyScale": 1.3
    },
    {
     "name": "hitLight",
-    "y0": 751,
+    "y0": 741,
     "y1": 794,
     "x0": 738,
     "x1": 1102,
     "count": 3,
     "scaleRef": {
      "likeRow": "taunt"
-    }
+    },
+    "bodyScale": 1.3
    },
    {
     "name": "hitStrong",
@@ -592,41 +638,43 @@
     "count": 4,
     "scaleRef": {
      "likeRow": "taunt"
-    }
+    },
+    "bodyScale": 1.3
    },
    {
     "name": "ledge",
     "y0": 920,
-    "y1": 982,
+    "y1": 986,
     "x0": 1136,
     "x1": 1510,
     "count": 5,
     "ledgeBlocks": true,
     "cells": [
      [
-      1140,
-      1205
+      1181,
+      1213
      ],
      [
-      1206,
-      1270
+      1248,
+      1281
      ],
      [
-      1271,
-      1338
+      1309,
+      1343
      ],
      [
-      1339,
-      1404
+      1380,
+      1402
      ],
      [
-      1405,
-      1478
+      1446,
+      1474
      ]
     ],
     "scaleRef": {
      "likeRow": "taunt"
-    }
+    },
+    "bodyScale": 1.3
    }
   ],
   "scaleRef": {
@@ -647,10 +695,17 @@
     919,
     1136,
     1510
+   ],
+   [
+    735,
+    747,
+    745,
+    840
    ]
   ],
   "pocketMin": 150,
-  "_note": "The taunt, hit, attack and ledge panels draw the knight smaller than the idle panel: taunt is scaled on its upright frame (taunt_3), and the other small-sprite rows share that scale (pose matching on 40 to 60 px sprites was unstable, 0.7x to 1.45x)."
+  "_note": "The taunt, hit, attack and ledge panels draw the knight smaller than the idle panel: taunt is scaled on its upright frame (taunt_3), and the other small-sprite rows share that scale (pose matching on 40 to 60 px sprites was unstable, 0.7x to 1.45x).",
+  "_notePolish": "Polish wave: the attack, hit and ledge panels (slash, ranged, aerial, hitLight, hitStrong, ledge) draw the body about 1.3x smaller than the taunt panel they took their scale from; bodyScale 1.3 matches helmet, torso and helmet-to-hip against loco_idle_0 (the rigid sword then also measures about 36 game px, as on loco). hitLight band raised to 741 (the helmets were cut at 751) with the HIT (LIGHT) title blanked; ledge cells re-measured to each hanging figure's own columns (the old cells cut the right side of every figure and kept the slate block's left pillar and top slab)."
  },
  "conA": {
   "file": "concept_a.png",
@@ -673,26 +728,19 @@
     "x0": 526,
     "x1": 826,
     "count": 3,
-    "cells": [
-     [
-      526,
-      602
-     ],
-     [
-      603,
-      684
-     ],
-     [
-      685,
-      826
-     ]
-    ],
     "scaleRef": {
      "pose": {
       "idx": 0,
       "ref": "heavy_slash_0"
      }
-    }
+    },
+    "centers": [
+     560,
+     626,
+     712
+    ],
+    "forceCores": true,
+    "bodyScale": 1.25
    },
    {
     "name": "summon",
@@ -732,18 +780,27 @@
     "name": "aerial",
     "y0": 626,
     "y1": 745,
-    "x0": 1160,
+    "x0": 1148,
     "x1": 1360,
     "count": 1,
     "cells": [
      [
-      1160,
+      1148,
       1360
      ]
     ],
     "scaleRef": {
      "likeRow": "slash"
-    }
+    },
+    "bodyScale": 0.8,
+    "_noteR3": "Round 3: utilt/uair/usmash hit frame. Keyed with the panel rule inside the band (it closes the envelope so the dark cape fill stays solid; opening it made the cape and armour hollow), then the rule rows below 736 dropped (maskY1). bodyScale 0.8 (the attack panel scale left the armour about 25 percent big next to heavy_slash_0). anchors: no standing heel; ground point under his body at the arc base (1262, 734). Used mirrored (conA_aerial_0_r): the figure faces right with the sword sweeping down in front and the cape loop behind; the owner wants the crescent shape in front.",
+    "anchors": {
+     "0": [
+      1262,
+      734
+     ]
+    },
+    "maskY1": 736
    },
    {
     "name": "erupt",
@@ -849,7 +906,8 @@
     "idx": 0
    }
   },
-  "_note": "The attack panel (slash, summon, aerial, erupt) draws the knight at about 0.7 source px per game px against 0.36 for the big idle panel; slash is pose-matched to heavy_slash_0, summon stands on its knight, aerial and erupt share the slash scale."
+  "_note": "The attack panel (slash, summon, aerial, erupt) draws the knight at about 0.7 source px per game px against 0.36 for the big idle panel; slash is pose-matched to heavy_slash_0, summon stands on its knight, aerial and erupt share the slash scale.",
+  "_notePolish": "Polish wave: slash split by body centres grown through the mask (the fixed cells gave slash_0 the tip of slash_1's sword and slash_1 a piece of slash_2's cape); bodyScale 1.25 (pose match to heavy_slash_0 left the body about 20 percent small)."
  },
  "pix": {
   "file": "pixler/downed_raw.png",
@@ -883,6 +941,313 @@
    }
   },
   "_note": "pixler generation for the downed pose (plan A.5); lying length 60 game px = standing height 55 plus the cape; targetH 22 = a lying knight at 0.4 of the standing height"
+ },
+ "dk": {
+  "file": "dark_knight.png",
+  "mode": "rows",
+  "bg": "black",
+  "rows": [
+   {
+    "name": "light",
+    "y0": 125,
+    "y1": 318,
+    "count": 7,
+    "cells": [
+     [
+      40,
+      250
+     ],
+     [
+      268,
+      466
+     ],
+     [
+      500,
+      662
+     ],
+     [
+      698,
+      874
+     ],
+     [
+      892,
+      1072
+     ],
+     [
+      1075,
+      1275
+     ],
+     [
+      1300,
+      1510
+     ]
+    ]
+   },
+   {
+    "name": "strong",
+    "y0": 440,
+    "y1": 655,
+    "count": 7,
+    "centers": [
+     125,
+     340,
+     540,
+     760,
+     1000,
+     1210,
+     1420
+    ]
+   },
+   {
+    "name": "dead",
+    "y0": 755,
+    "y1": 948,
+    "count": 7,
+    "centers": [
+     130,
+     320,
+     510,
+     760,
+     970,
+     1170,
+     1420
+    ]
+   }
+  ],
+  "scaleRef": {
+   "stand": {
+    "row": "light",
+    "idx": 0
+   }
+  },
+  "pocketMin": 40,
+  "_note": "Round 2 owner sheet: LIGHT HIT REACT, STRONG HIT REACT, DEAD (7 each). Captions sit outside the row bands. dk_light_0 is the side-view standing reference (55 px)."
+ },
+ "vk": {
+  "file": "violet_knight.png",
+  "mode": "rows",
+  "bg": "black",
+  "rects": [
+   [
+    296,
+    336,
+    20,
+    300
+   ],
+   [
+    604,
+    613,
+    25,
+    185
+   ]
+  ],
+  "rows": [
+   {
+    "name": "dash",
+    "y0": 95,
+    "y1": 236,
+    "count": 11,
+    "centers": [
+     115,
+     285,
+     455,
+     665,
+     860,
+     1005,
+     1180,
+     1320,
+     1450,
+     1575,
+     1700
+    ]
+   },
+   {
+    "name": "ledge",
+    "y0": 300,
+    "y1": 528,
+    "count": 11,
+    "pillars": {
+     "1": [
+      300,
+      390,
+      302,
+      366
+     ],
+     "2": [
+      450,
+      402,
+      452,
+      512
+     ],
+     "3": [
+      596,
+      407,
+      598,
+      658
+     ],
+     "4": [
+      741,
+      414,
+      743,
+      803
+     ],
+     "5": [
+      885,
+      422,
+      887,
+      947
+     ],
+     "6": [
+      1029,
+      422,
+      1031,
+      1091
+     ],
+     "7": [
+      1175,
+      423,
+      1177,
+      1235
+     ],
+     "8": [
+      1324,
+      418,
+      1326,
+      1386
+     ],
+     "9": [
+      1484,
+      401,
+      1486,
+      1540
+     ],
+     "10": [
+      1565,
+      397,
+      1633,
+      1695
+     ]
+    },
+    "corners": {
+     "0": [
+      130,
+      388
+     ]
+    }
+   },
+   {
+    "name": "climb",
+    "y0": 612,
+    "y1": 858,
+    "count": 10,
+    "pillars": {
+     "0": [
+      145,
+      738,
+      148,
+      210
+     ],
+     "1": [
+      331,
+      738,
+      334,
+      396
+     ],
+     "2": [
+      523,
+      732,
+      525,
+      587
+     ],
+     "3": [
+      687,
+      732,
+      688,
+      734
+     ],
+     "4": [
+      844,
+      732,
+      844,
+      902
+     ],
+     "5": [
+      975,
+      732,
+      998,
+      1046
+     ],
+     "6": [
+      1128,
+      732,
+      1156,
+      1204
+     ],
+     "7": [
+      1254,
+      732,
+      1313,
+      1362
+     ],
+     "8": [
+      1424,
+      732,
+      1485,
+      1532
+     ],
+     "9": [
+      1597,
+      732,
+      1657,
+      1704
+     ]
+    },
+    "settle": {
+     "from": 3,
+     "to": 9,
+     "inset": 14
+    }
+   }
+  ],
+  "scaleRef": {
+   "stand": {
+    "row": "climb",
+    "idx": 9
+   }
+  },
+  "pocketMin": 40,
+  "_note": "Round 2 owner sheet: DASH ATTACK (SMOOTH) 11, LEDGE HANG (SIDE) 11, CLIMB (UP) 10. The LEDGE HANG caption is blanked by a rect (it shares the band with the tall last frame). pillars {idx: [eraseFromX, lipY, cornerX, eraseToX]}: the stone pillar right of each figure is erased (remove_pillars), cornerX is the pillar's left edge (climb: right edge minus 42, the hang width, because the drawn top slab widens as he climbs), and the anchor is the corner moved 20 game px down (sim LEDGE_HANG_DROP), so the hands land on the stage corner. corners: ledge_0 has no pillar; its corner is set from the reaching hand like the hang frames (hand about 18 px right of and 6 px above the corner)."
+ },
+ "twin": {
+  "file": "twin_strike.png",
+  "mode": "rows",
+  "bg": "black",
+  "rows": [
+   {
+    "name": "",
+    "y0": 255,
+    "y1": 625,
+    "count": 2,
+    "bodyScale": 1.2,
+    "glowBoost": {
+     "1": {
+      "L": 1.35,
+      "S": 1.25,
+      "minL": 0.28
+     }
+    }
+   }
+  ],
+  "scaleRef": {
+   "pose": {
+    "row": "",
+    "idx": 0,
+    "ref": "vk_dash_3"
+   }
+  },
+  "pocketMin": 40,
+  "_note": "Round 2 owner sheet: the long thrust and the impact burst (dash attack). Crop names twin_0, twin_1. No standing frame: the thrust body is matched to the same lunge in vk_dash_3.",
+  "_noteRound2": "The pose match (body mask height of the whole lunge) leaves the knight about 20 percent small next to vk_dash_3 (helmet and legs); bodyScale 1.2."
  },
  "_winPose": {
   "src": "conB_hero_0",
@@ -978,29 +1343,6 @@
    "keep": "all"
   },
   {
-   "name": "counterFlash0",
-   "src": "parry_parry_2",
-   "from": "counterFlash1",
-   "rescale": 0.7
-  },
-  {
-   "name": "counterFlash1",
-   "src": "parry_parry_2",
-   "clip": [
-    660,
-    60,
-    830,
-    300
-   ],
-   "bodyPad": 4
-  },
-  {
-   "name": "counterFlash2",
-   "src": "parry_parry_2",
-   "from": "counterFlash1",
-   "alpha": 0.5
-  },
-  {
    "name": "hitspark0",
    "src": "heavy_slash_3",
    "from": "hitspark1",
@@ -1048,6 +1390,348 @@
    "from": "shadowBurst2",
    "rescale": 1.5,
    "alpha": 0.5
+  },
+  {
+   "name": "swordUp0",
+   "src": "uspec_g_4",
+   "clip": [
+    1156,
+    50,
+    1195,
+    159
+   ],
+   "keep": "all",
+   "_note": "lone vertical sword, point up; anchor centre (drawn at the ascentSword projectile)"
+  },
+  {
+   "name": "swordUp1",
+   "src": "uspec_g_5",
+   "clip": [
+    105,
+    335,
+    165,
+    472
+   ],
+   "keep": "all"
+  },
+  {
+   "name": "pShard0",
+   "src": "parry_parry_3",
+   "clip": [
+    1374,
+    197,
+    1394,
+    211
+   ],
+   "keep": "pieces",
+   "largest": true
+  },
+  {
+   "name": "pShard1",
+   "src": "parry_parry_3",
+   "clip": [
+    1382,
+    224,
+    1411,
+    238
+   ],
+   "keep": "pieces",
+   "largest": true,
+   "fitMax": 8
+  },
+  {
+   "name": "pShard2",
+   "src": "parry_parry_3",
+   "clip": [
+    1087,
+    107,
+    1101,
+    120
+   ],
+   "keep": "pieces",
+   "largest": true
+  },
+  {
+   "name": "pShard3",
+   "src": "parry_counter_5",
+   "clip": [
+    1486,
+    557,
+    1498,
+    572
+   ],
+   "keep": "pieces",
+   "largest": true
+  },
+  {
+   "name": "pSmoke0",
+   "src": "parry_counter_7",
+   "clip": [
+    691,
+    845,
+    722,
+    878
+   ],
+   "keep": "pieces",
+   "largest": true
+  },
+  {
+   "name": "pSmoke1",
+   "src": "parry_counter_7",
+   "clip": [
+    630,
+    872,
+    670,
+    905
+   ],
+   "keep": "pieces",
+   "largest": true
+  },
+  {
+   "name": "pSmoke2",
+   "src": "parry_counter_8",
+   "clip": [
+    934,
+    860,
+    989,
+    886
+   ],
+   "keep": "pieces",
+   "largest": true,
+   "fitMax": 16
+  },
+  {
+   "name": "pSmoke3",
+   "src": "nspec_g_11",
+   "clip": [
+    440,
+    650,
+    508,
+    700
+   ],
+   "keep": "all",
+   "softAlpha": 14.0,
+   "fitMax": 14
+  },
+  {
+   "name": "pSmoke4",
+   "src": "dk_dead_5",
+   "clip": [
+    1165,
+    803,
+    1222,
+    880
+   ],
+   "keep": "all",
+   "largest": true,
+   "fitMax": 16,
+   "_note": "Round 2: the rising smoke wisp of the DEAD dissolve, above the heap"
+  },
+  {
+   "name": "pSmoke5",
+   "src": "dk_dead_6",
+   "clip": [
+    1331,
+    800,
+    1392,
+    877
+   ],
+   "keep": "all",
+   "largest": true,
+   "fitMax": 16
+  },
+  {
+   "name": "pMote0",
+   "src": "conB_hero_1",
+   "clip": [
+    684,
+    208,
+    691,
+    216
+   ],
+   "keep": "all",
+   "largest": true
+  },
+  {
+   "name": "pMote1",
+   "src": "conB_hero_1",
+   "clip": [
+    732,
+    310,
+    739,
+    320
+   ],
+   "keep": "all",
+   "largest": true,
+   "fitMax": 4
+  },
+  {
+   "name": "pSliver0",
+   "src": "parry_counter_2",
+   "clip": [
+    505,
+    468,
+    575,
+    545
+   ],
+   "largest": true,
+   "fitMax": 20,
+   "keep": "pieces"
+  },
+  {
+   "name": "pSliver1",
+   "src": "parry_counter_3",
+   "clip": [
+    745,
+    480,
+    800,
+    598
+   ],
+   "largest": true,
+   "fitMax": 20,
+   "keep": "pieces"
+  },
+  {
+   "name": "pSliver2",
+   "src": "parry_counter_4",
+   "clip": [
+    1005,
+    455,
+    1075,
+    525
+   ],
+   "largest": true,
+   "fitMax": 18,
+   "keep": "pieces"
+  },
+  {
+   "name": "pSpike0",
+   "src": "parry_counter_5",
+   "clip": [
+    1405,
+    445,
+    1440,
+    600
+   ],
+   "largest": true,
+   "fitMax": 24,
+   "keep": "pieces"
+  },
+  {
+   "name": "pSpike1",
+   "src": "parry_counter_6",
+   "clip": [
+    262,
+    798,
+    292,
+    880
+   ],
+   "largest": true,
+   "fitMax": 20,
+   "keep": "pieces"
+  },
+  {
+   "name": "pSpike2",
+   "src": "conA_erupt_0",
+   "clip": [
+    1430,
+    626,
+    1466,
+    736
+   ],
+   "keep": "all",
+   "largest": true,
+   "fitMax": 24,
+   "_note": "Round 3: the concept_a eruption panel next to the Aerial / Jump Attack figure"
+  },
+  {
+   "name": "pSpike3",
+   "src": "conA_erupt_0",
+   "clip": [
+    1468,
+    640,
+    1502,
+    736
+   ],
+   "keep": "all",
+   "largest": true,
+   "fitMax": 20
+  }
+ ],
+ "_colour": {
+  "_note": "Polish QA colour pass: per-sheet curves so every sheet matches the attack sheets' darker violet. ref = attack sheets pooled for the target (python tools/sheetcut/cut_trekmore.py --colour-target); sheets = sheets recoloured onto it; satMin/satMax cap the saturation ratio.",
+  "ref": [
+   "heavy",
+   "parry",
+   "step",
+   "uspec"
+  ],
+  "sheets": [
+   "loco",
+   "air",
+   "parry",
+   "heavy",
+   "step",
+   "uspec",
+   "nspec",
+   "conB",
+   "conA",
+   "dk",
+   "vk",
+   "twin"
+  ],
+  "satMin": 0.6,
+  "satMax": 2.0,
+  "target": {
+   "L": [
+    0.0,
+    0.0176,
+    0.051,
+    0.1098,
+    0.202,
+    0.3706,
+    0.8098
+   ],
+   "S50": 0.75,
+   "H50": 267.0
+  }
+ },
+ "_derived": [
+  {
+   "name": "uspec_g_2_nosword",
+   "src": "uspec_g_2",
+   "bodyOnly": true,
+   "_note": "the detached thrown sword erased; the ascentSword projectile (fx swordUp) is the only sword from frame 8"
+  },
+  {
+   "name": "nspec_g_4_nosword",
+   "src": "nspec_g_4",
+   "erase": [
+    [
+     1292,
+     0,
+     1402,
+     1122
+    ]
+   ],
+   "_note": "blade beyond the hand erased while the shadowSword projectile flies"
+  },
+  {
+   "name": "vk_climb_7_stage",
+   "src": "vk_climb_7",
+   "heelAnchor": true,
+   "_note": "ledgeatk starts on the stage (the sim places him at the corner + 14 before the move): heel anchor instead of the ledge anchor"
+  },
+  {
+   "name": "vk_climb_8_stage",
+   "src": "vk_climb_8",
+   "heelAnchor": true
+  },
+  {
+   "name": "conA_aerial_0_r",
+   "src": "conA_aerial_0",
+   "flip": true,
+   "_note": "round 3: mirrored so the crescent-shaped cape sweep sits in front of a right-facing Trekmore (owner)"
   }
  ]
 }

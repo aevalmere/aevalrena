@@ -2,9 +2,28 @@ import { ECHO_TAIL, TUNING } from '../core/constants';
 import { Btn } from '../core/types';
 import type { AimDir, CharacterDef, GameState, MoveDef, MoveId, ShadowStepDef } from '../core/types';
 import { heldDir, heldDown, heldUp } from './input';
-import { sameTeam, setAction, simFighters, stageOf, type SimFighter } from './state';
+import { defOf, sameTeam, setAction, simFighters, stageOf, type SimFighter } from './state';
 import { spawnProjectile } from './projectiles';
-import { chargeFraction, projectileChargePower, projectileChargeScale } from './hits';
+import { chargeFraction, chargesPower, projectileChargePower, projectileChargeScale } from './hits';
+
+/** Longest a holdAim move stays paused on its hold frame (MoveDef.holdAim). */
+export const HOLD_AIM_MAX = 45;
+
+/**
+ * The frame a holdAim move pauses on: the one before its first timeline projectile spawns, so the
+ * release frame is the spawn frame. 0 for a move with no timeline projectile.
+ */
+export function holdFrameOf(mv: MoveDef): number {
+  const shots = mv.projectiles;
+  let first = Infinity;
+  if (shots !== undefined) {
+    for (let i = 0; i < shots.length; i++) {
+      const at = shots[i].spawnFrame;
+      if (at >= 0 && at < first) first = at;
+    }
+  }
+  return first === Infinity || first < 1 ? 0 : first - 1;
+}
 
 /**
  * Frames a charged cast adds to both the projectile spawn frames and totalFrames:
@@ -13,7 +32,7 @@ import { chargeFraction, projectileChargePower, projectileChargeScale } from './
  */
 export function castDelay(f: SimFighter, mv: MoveDef): number {
   if (mv.chargeCastFrames === undefined) return 0;
-  return Math.round(mv.chargeCastFrames * chargeFraction(f.charge, mv.chargeable));
+  return Math.round(mv.chargeCastFrames * chargeFraction(f.charge, chargesPower(mv)));
 }
 
 export function moveOf(f: SimFighter, def: CharacterDef): MoveDef {
@@ -47,10 +66,12 @@ function applyMoveFrame(state: GameState, f: SimFighter, mv: MoveDef, frame: num
     // with `charged` gets all of its extra damage, strength and knockback from that lerp,
     // so its power stays exactly 1 (no double scaling); a chargeable def without `charged`
     // still rides projectileChargePower. An unchargeable move spawns at exactly 1 and 1.
-    const power = projectileChargePower(f.charge, mv.chargeable);
-    const scale = projectileChargeScale(f.charge, mv.chargeable);
+    // A holdAim move counts its held frames in f.charge but never scales: power 1, scale 1, charge 0.
+    const powered = chargesPower(mv);
+    const power = projectileChargePower(f.charge, powered);
+    const scale = projectileChargeScale(f.charge, powered);
     // 0 for a move that cannot charge, so its `charged` defs keep their base values.
-    const charge = chargeFraction(f.charge, mv.chargeable);
+    const charge = chargeFraction(f.charge, powered);
     const delay = castDelay(f, mv);
     for (let i = 0; i < shots.length; i++) {
       const at = shots[i].spawnFrame;
@@ -95,13 +116,18 @@ export function startMove(state: GameState, f: SimFighter, def: CharacterDef, id
   f.hitGroups = 0;
   f.charge = 0;
   f.chargeMask = chargeMaskFor(f, mv, id);
-  f.charging = mv.chargeable === true && chargeHeld(f);
+  // A holdAim move does not pause on frame 0; it pauses on its hold frame (advanceMove).
+  f.charging = mv.chargeable === true && mv.holdAim !== true && chargeHeld(f);
   const echo = mv.echo;
   if (echo !== undefined) {
-    // A new echo replaces a running one. It stays where the move started.
+    // A new echo replaces a running one. Its side is latched here: the direction he was
+    // travelling (his facing when nearly still). From then on it stands offsetX px that way from
+    // his current feet (syncEchoes), so it strikes in front of him however far he slides.
+    const dir = f.vx >= 0.5 ? 1 : f.vx <= -0.5 ? -1 : f.facing;
     f.echoMove = id;
     f.echoAge = -echo.delayFrames;
-    f.echoX = f.x + echo.offsetX * f.facing;
+    f.echoDir = dir;
+    f.echoX = f.x + echo.offsetX * dir;
     f.echoY = f.y;
     f.echoFacing = f.facing;
     f.echoHitGroups = 0;
@@ -149,6 +175,22 @@ export function enterBranch(state: GameState, f: SimFighter, mv: MoveDef): void 
 }
 
 /**
+ * Moves every live echo to its owner's current feet plus echoDir * offsetX. Runs once a frame after
+ * every fighter has moved and before hits resolve, so the echo strikes from where he is now.
+ */
+export function syncEchoes(state: GameState): void {
+  const fighters = simFighters(state);
+  for (let i = 0; i < fighters.length; i++) {
+    const f = fighters[i];
+    if (f.echoMove === null) continue;
+    const echo = defOf(f).moves[f.echoMove]?.echo;
+    if (echo === undefined) continue;
+    f.echoX = f.x + echo.offsetX * f.echoDir;
+    f.echoY = f.y;
+  }
+}
+
+/**
  * One frame of the shadow echo, run on every frame the owner is not in hitlag. It ends
  * ECHO_TAIL frames after the last replayed hitbox's last active frame.
  */
@@ -188,7 +230,20 @@ export function endMove(f: SimFighter, mv: MoveDef): void {
 export function advanceMove(state: GameState, f: SimFighter, def: CharacterDef): boolean {
   const mv = moveOf(f, def);
 
-  if (f.charging) {
+  if (f.charging && mv.holdAim === true) {
+    // Hold to aim: pinned on the hold frame, the aim follows the stick. The release frame (or the
+    // 45th held frame) reads the aim one last time and runs the next frame at once, so the spawn
+    // lands on the release frame. Nothing scales with the hold.
+    const hold = holdFrameOf(mv);
+    f.actionFrame = hold;
+    if (movesAims(mv)) latchAim(f);
+    if (chargeHeld(f) && f.charge < HOLD_AIM_MAX) {
+      f.charge++;
+      return false;
+    }
+    f.charging = false;
+    f.actionFrame = hold + 1;
+  } else if (f.charging) {
     f.actionFrame = 0;
     // The aim follows the stick for the whole charge, so the direction held at release wins.
     if (movesAims(mv)) latchAim(f);
@@ -210,8 +265,17 @@ export function advanceMove(state: GameState, f: SimFighter, def: CharacterDef):
     return true;
   }
   if (mv.dive !== undefined) stepDive(f, mv.dive);
+  // Hold to aim: while Special is still held on the way to the hold frame, the aim follows the
+  // stick every frame, so it is current on the first paused frame (and on a throw let go before it).
+  if (mv.holdAim === true && !f.onBranch && f.actionFrame <= holdFrameOf(mv) && chargeHeld(f) && movesAims(mv)) {
+    latchAim(f);
+  }
   applyMoveFrame(state, f, mv, f.actionFrame);
   if (mv.shadowStep !== undefined) stepShadow(state, f, mv.shadowStep);
+  // Still holding on the hold frame: pause there (a tap released earlier never pauses).
+  if (mv.holdAim === true && !f.onBranch && f.charge === 0 && f.actionFrame === holdFrameOf(mv) && chargeHeld(f)) {
+    f.charging = true;
+  }
   return false;
 }
 

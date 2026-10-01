@@ -111,7 +111,8 @@ type Scene = (chars: Pair) => GameState;
 const sceneSwordRoute: Scene = (chars) => {
   const s = stateFor(chars);
   const b = stageBox(s);
-  put(s, 0, b.cx - 110, 1); put(s, 1, b.cx, -1);
+  // 170 px: the sword (8 px/frame, recallable from frame 34) reaches above a target this far.
+  put(s, 0, b.cx - 170, 1); put(s, 1, b.cx, -1);
   return s;
 };
 
@@ -123,7 +124,8 @@ const sceneSwordOut: Scene = (chars) => {
   stepWith(s, 1, (i) => (i === 0 ? Btn.Right | Btn.Up : 0));
   const ins = inputs(2); ins[0].held = Btn.Right | Btn.Up; ins[0].direct = directCode('nspecial');
   stepGame(s, ins);
-  for (let k = 0; k < 34; k++) stepGame(s, inputs(2));
+  // The throw lasts 34 frames (polish wave, was 30); the sword leaves on 9 at 8 px/frame.
+  for (let k = 0; k < 35; k++) stepGame(s, inputs(2));
   // The target stands under the sword's recall point.
   const sw = s.projectiles.find((p) => p.alive && p.owner === s.fighters[0].slot);
   if (sw !== undefined) put(s, 1, sw.x, -1);

@@ -111,6 +111,10 @@ function spawnAt(
   p.scale = def.fixedScale === true ? 1 : scale;
   p.charge = charge;
   p.returned = false;
+  // Written after charge so a fresh slot's key order matches cloneProjectile's (the rollback
+  // tests compare states as JSON).
+  p.spawnX = x;
+  p.spawnY = y;
   state.events.push({ type: 'projectileSpawn', x: p.x, y: p.y, slot: owner, defId: def.id });
 }
 
@@ -124,6 +128,26 @@ export function spawnProjectile(
   state: GameState, f: SimFighter, def: ProjectileDef, power = 1, scale = 1, charge = 0,
 ): void {
   spawnAt(state, f.slot, f.facing, f.x + def.x * f.facing, f.y + def.y, def, power, scale, charge, 0, f.aimDir);
+}
+
+/**
+ * Damage and base knockback of one projectile instance at hit time, charge, power and
+ * distanceScale included. The distance is the straight line from the spawn point, so an aimed
+ * shot scales the same along any direction; Math.sqrt is exact (IEEE), so it stays deterministic.
+ */
+export function projectileHitStats(def: ProjectileDef, p: ProjectileState, out: { damage: number; bkb: number }): void {
+  let damage = chargedStat(def, p.charge, 'damage');
+  let bkb = chargedStat(def, p.charge, 'bkb');
+  const ds = def.distanceScale;
+  if (ds !== undefined) {
+    const dx = p.x - (p.spawnX ?? p.x);
+    const dy = p.y - (p.spawnY ?? p.y);
+    const d = Math.sqrt(dx * dx + dy * dy);
+    damage = Math.min(ds.maxDamage, damage + ds.damagePerPx * d);
+    if (ds.bkbPerPx !== undefined) bkb += ds.bkbPerPx * d;
+  }
+  out.damage = damage * p.power;
+  out.bkb = bkb;
 }
 
 /**
@@ -144,7 +168,26 @@ export function killProjectile(state: GameState, p: ProjectileState, def: Projec
   spawnAt(state, p.owner, p.facing, p.x, p.y, burstDef, p.power, p.scale, p.charge ?? 0, p.hitSlots);
 }
 
-/** Step 5 of the frame: move, age, die on lifetime or outside the blast zone. */
+/**
+ * True when a dieOnGround projectile touched ground this step: its centre crossed a platform top
+ * going down (from prevY above or on it to below), or it is inside a solid platform's body. On a
+ * hit the centre is put on the surface, where the burst then spawns.
+ */
+function hitsGround(state: GameState, p: ProjectileState, prevY: number): boolean {
+  const platforms = stageOf(state).platforms;
+  for (let i = 0; i < platforms.length; i++) {
+    const pl = platforms[i];
+    if (p.x < pl.x || p.x > pl.x + pl.w) continue;
+    const crossed = p.y > prevY && prevY <= pl.y && p.y >= pl.y;
+    const inside = pl.solid && p.y >= pl.y && p.y <= pl.y + pl.h;
+    if (!crossed && !inside) continue;
+    if (crossed) p.y = pl.y;
+    return true;
+  }
+  return false;
+}
+
+/** Step 5 of the frame: move, age, die on lifetime, on ground (dieOnGround) or outside the blast zone. */
 export function stepProjectiles(state: GameState): void {
   const blast = stageOf(state).blast;
   for (let i = 0; i < state.projectiles.length; i++) {
@@ -164,12 +207,15 @@ export function stepProjectiles(state: GameState): void {
       p.power *= def.returnPower === undefined ? 0.5 : def.returnPower;
       p.returned = true;
     }
+    const prevY = p.y;
     p.x += p.vx;
     p.y += p.vy;
     p.vy += def.gravity;
     p.age++;
     const outside = p.x < blast.x || p.x > blast.x + blast.w || p.y < blast.y || p.y > blast.y + blast.h;
-    if (outside) {
+    if (!outside && def.dieOnGround === true && hitsGround(state, p, prevY)) {
+      killProjectile(state, p, def);
+    } else if (outside) {
       p.alive = false;
       state.events.push({ type: 'projectileDie', x: p.x, y: p.y, defId: p.defId });
     } else if (p.age >= Math.round(chargedStat(def, p.charge, 'lifetime'))) {

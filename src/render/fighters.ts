@@ -3,7 +3,7 @@ import { ECHO_TAIL, SHIELD_MAX } from '../core/constants';
 import { MAX_PLAYERS } from '../core/types';
 import type { FighterState, GameState, MoveDef } from '../core/types';
 import { animClock, animFrameIndex, pickAnimName } from './anim';
-import { getFrame, getFrameAnchor, getShadowFrame } from './bake';
+import { ECHO_PAD, getFrame, getFrameAnchor, getShadowFrame } from './bake';
 import { INK, STONE, STONE_LIGHT, WHITE, glowFor, slotColor } from './colors';
 import { getCharVisual } from './visuals';
 
@@ -154,7 +154,7 @@ export function resolveFighterFrames(state: GameState, deps: FighterDrawDeps): v
  * Echo age at which the sim drops the echo: the last replayed hitbox's end plus ECHO_TAIL.
  * -1 when the move has no echo. A loop over the move's hitboxes, no allocation.
  */
-function echoEndAge(move: MoveDef): number {
+export function echoEndAge(move: MoveDef): number {
   const echo = move.echo;
   if (echo === undefined) return -1;
   let last = -1;
@@ -165,47 +165,160 @@ function echoEndAge(move: MoveDef): number {
   return last < 0 ? -1 : last + ECHO_TAIL;
 }
 
+/** MoveDef.hiddenFrames, read structurally so this compiles before and after the field lands. */
+interface MaybeHidden { hiddenFrames?: readonly [number, number] }
+
+/** The move's hidden body frames [start, end] inclusive, or null. */
+export function hiddenRange(move: MoveDef): readonly [number, number] | null {
+  const h = (move as MoveDef & MaybeHidden).hiddenFrames;
+  return h === undefined || h === null || h.length < 2 ? null : h;
+}
+
+/** Frames before hiddenFrames over which the body fades out, and after over which it fades in. */
+export const HIDE_FADE_OUT = 2;
+export const HIDE_FADE_IN = 8;
+
 /**
- * The shadow echo of a fighter's move: the same animation, echoAge frames in, at the latched
- * point, drawn from the cached shadow bake (bake.ts getShadowFrame). It fades out over the last
- * ECHO_TAIL frames. Drawn before the fighter's body so the owner stays on top. Returns true when
- * something was drawn.
+ * Body opacity for a fighter whose move has hiddenFrames: 0 inside the range, fading out over
+ * the HIDE_FADE_OUT frames before it and back in over the HIDE_FADE_IN frames after. 1 otherwise.
  */
-export function drawEcho(ctx: CanvasRenderingContext2D, fighter: FighterState): boolean {
-  const f = fighter;
-  const moveId = f.echoMove;
-  const age = f.echoAge;
-  if (moveId === undefined || moveId === null || age === undefined || age < 0) return false;
+export function bodyAlpha(fighter: FighterState): number {
+  if (fighter.action !== 'attack' || fighter.moveId === null || fighter.onBranch === true) return 1;
   const def = CHARACTER_DEFS[fighter.charId];
-  if (def === undefined) return false;
-  const move: MoveDef | undefined = def.moves[moveId];
-  if (move === undefined) return false;
-  const visual = getCharVisual(fighter.charId, 0);
-  if (visual === null) return false;
-  const animName = visual.sprites.animFor('attack', moveId, fighter);
-  const anim = visual.sprites.anims[animName];
-  if (anim === undefined || anim.frames.length === 0) return false;
-  const frameName = anim.frames[animFrameIndex(anim, age)];
+  const move = def === undefined ? undefined : def.moves[fighter.moveId];
+  if (move === undefined) return 1;
+  const range = hiddenRange(move);
+  if (range === null) return 1;
+  const af = fighter.actionFrame;
+  if (af >= range[0] && af <= range[1]) return 0;
+  if (af < range[0] && af >= range[0] - HIDE_FADE_OUT) return (range[0] - af) / (HIDE_FADE_OUT + 1);
+  if (af > range[1] && af <= range[1] + HIDE_FADE_IN) return (af - range[1]) / (HIDE_FADE_IN + 1);
+  return 1;
+}
+
+/**
+ * Share of the echo's delay over which the clone darts from his body to its strike point; it
+ * waits there, on guard, for the rest of the delay.
+ */
+export const ECHO_DART_SHARE = 0.7;
+/** The clone's opacity on its first visible frame, still overlapping his body. */
+const ECHO_SPLIT_ALPHA = 0.4;
+
+/** Reused result of echoPlace. Read it before the next call. */
+export interface EchoPlace { x: number; y: number; facing: number; alpha: number; age: number }
+const placeOut: EchoPlace = { x: 0, y: 0, facing: 1, alpha: 0, age: 0 };
+
+/**
+ * Where the shadow clone stands and how opaque it is, given the owner drawn at (ox, oy). Before
+ * its first replayed frame (echoAge < 0) it splits off his body: it starts on him and darts,
+ * easing out hard, to its point (echoX/echoY: in front of him along his travel direction; the
+ * sim may move it with him every frame, so only the offset from him is used) over the first
+ * ECHO_DART_SHARE of the delay, solidifying as it goes. From age 0 it stands on that point and
+ * plays the move; it fades over the last ECHO_TAIL frames. The
+ * result's `age` is the animation clock (0 while darting). `age` defaults to the fighter's
+ * echoAge. Null when there is no echo.
+ */
+export function echoPlace(
+  fighter: FighterState,
+  move: MoveDef,
+  ox: number,
+  oy: number,
+  age = fighter.echoAge
+): EchoPlace | null {
+  const f = fighter;
+  if (age === undefined) return null;
   const facing = f.echoFacing === undefined ? fighter.facing : f.echoFacing;
-  const flipped = (facing === -1) !== (anim.mirror === true);
-  const sheetId = visual.baseBodySheetId;
-  const shadow = getShadowFrame(sheetId, frameName, flipped, fighter.variant, fighter.charId);
-  const anchor = shadow === null ? null : getFrameAnchor(sheetId, frameName, flipped);
-  if (shadow === null || anchor === null) return false;
+  // The clone's point relative to his sim position, carried onto his drawn position: the sim
+  // moves the point with him (it follows him for its whole life), and the offset keeps the
+  // clone locked to his interpolated body instead of lagging it by a sim frame.
+  const ex = f.echoX === undefined ? ox : ox + (f.echoX - fighter.x);
+  const ey = f.echoY === undefined ? oy : oy + (f.echoY - fighter.y);
+  placeOut.facing = facing;
+  if (age < 0) {
+    const delay = move.echo !== undefined && move.echo.delayFrames > 0 ? move.echo.delayFrames : 1;
+    let t = (delay + age) / delay;
+    if (t < 0) t = 0;
+    if (t > 1) t = 1;
+    let u = t / ECHO_DART_SHARE;
+    if (u > 1) u = 1;
+    const inv = 1 - u;
+    const e = 1 - inv * inv * inv;
+    placeOut.x = ox + (ex - ox) * e;
+    placeOut.y = oy + (ey - oy) * e;
+    const a = ECHO_SPLIT_ALPHA + t * 2;
+    placeOut.alpha = t <= 0 ? 0 : a > 1 ? 1 : a;
+    placeOut.age = 0;
+    return placeOut;
+  }
   const end = echoEndAge(move);
   let fade = 1;
   if (end > 0) {
     fade = (end - age) / ECHO_TAIL;
     if (fade > 1) fade = 1;
-    if (fade <= 0) return false;
+    if (fade <= 0) return null;
   }
-  const ex = f.echoX === undefined ? fighter.x : f.echoX;
-  const ey = f.echoY === undefined ? fighter.y : f.echoY;
+  placeOut.x = ex;
+  placeOut.y = ey;
+  placeOut.alpha = fade;
+  placeOut.age = age;
+  return placeOut;
+}
+
+/**
+ * The shadow clone of a fighter's move (echoPlace for where): the same animation at the echo's
+ * age, drawn from the cached clone bake (bake.ts getShadowFrame). Drawn before the fighter's body
+ * so the owner stays on top. (ox, oy) is the owner's drawn position. Returns true when something
+ * was drawn.
+ */
+export function drawEcho(ctx: CanvasRenderingContext2D, fighter: FighterState, ox = fighter.x, oy = fighter.y): boolean {
+  const moveId = fighter.echoMove;
+  if (moveId === undefined || moveId === null) return false;
+  const def = CHARACTER_DEFS[fighter.charId];
+  if (def === undefined) return false;
+  const move: MoveDef | undefined = def.moves[moveId];
+  if (move === undefined) return false;
+  const place = echoPlace(fighter, move, ox, oy);
+  if (place === null || place.alpha <= 0) return false;
+  const visual = getCharVisual(fighter.charId, 0);
+  if (visual === null) return false;
+  const animName = visual.sprites.animFor('attack', moveId, fighter);
+  const anim = visual.sprites.anims[animName];
+  if (anim === undefined || anim.frames.length === 0) return false;
+  const frameName = anim.frames[animFrameIndex(anim, place.age)];
+  const flipped = (place.facing === -1) !== (anim.mirror === true);
+  const sheetId = visual.baseBodySheetId;
+  const shadow = getShadowFrame(sheetId, frameName, flipped, fighter.variant, fighter.charId);
+  const anchor = shadow === null ? null : getFrameAnchor(sheetId, frameName, flipped);
+  if (shadow === null || anchor === null) return false;
   const prev = ctx.globalAlpha;
+  const fade = place.alpha;
   if (fade < 1) ctx.globalAlpha = prev * fade;
-  ctx.drawImage(shadow, Math.round(ex - anchor.ax), Math.round(ey - anchor.ay));
+  ctx.drawImage(shadow, Math.round(place.x - anchor.ax - ECHO_PAD), Math.round(place.y - anchor.ay - ECHO_PAD));
   if (fade < 1) ctx.globalAlpha = prev;
   return true;
+}
+
+/**
+ * True while an attacking fighter is inside an invulnerable window its move defines: MoveDef.invuln,
+ * the shadow step's invuln, or a recall's invulnFrames from the branch start. Respawn, dodge and
+ * other invulnerability still blink.
+ */
+export function inMoveInvuln(fighter: FighterState): boolean {
+  if (fighter.action !== 'attack' || fighter.moveId === null) return false;
+  const def = CHARACTER_DEFS[fighter.charId];
+  const move = def === undefined ? undefined : def.moves[fighter.moveId];
+  if (move === undefined) return false;
+  const af = fighter.actionFrame;
+  const inv = move.invuln;
+  if (inv !== undefined && af >= inv[0] && af <= inv[1]) return true;
+  const step = move.shadowStep;
+  if (step !== undefined && af >= step.invuln[0] && af <= step.invuln[1]) return true;
+  const recall = move.recall;
+  const branch = move.branch;
+  if (fighter.onBranch === true && recall !== undefined && branch !== undefined) {
+    if (af >= branch.start && af < branch.start + recall.invulnFrames) return true;
+  }
+  return false;
 }
 
 export function drawFighters(
@@ -230,12 +343,17 @@ export function drawFighters(
     const x = posX[i];
     const y = posY[i];
 
-    const hidden = fighter.invuln > 0 && blinkOff;
+    // No blink inside an attack's own invulnerable window (a counter branch, a recall, a step).
+    const hidden = fighter.invuln > 0 && blinkOff && !inMoveInvuln(fighter);
+    // A move's hiddenFrames skip the body (and its fades around them).
+    const alpha = bodyAlpha(fighter);
 
-    // The echo does not blink with its owner: it is a separate shadow standing where the move began.
-    drawEcho(ctx, fighter);
+    // The echo does not blink with its owner: it is a separate shadow clone of the move.
+    drawEcho(ctx, fighter, x, y);
 
-    if (!hidden) {
+    if (!hidden && alpha > 0) {
+      const prevAlpha = ctx.globalAlpha;
+      if (alpha < 1) ctx.globalAlpha = prevAlpha * alpha;
       const white = flash[i] > 0;
       let drew = false;
       if (sheetId !== '' && frameName !== '') {
@@ -252,6 +370,7 @@ export function drawFighters(
         }
       }
       if (!drew) drawPlaceholder(ctx, fighter, x, y, color, white);
+      if (alpha < 1) ctx.globalAlpha = prevAlpha;
     }
 
     if (fighter.action === 'shield' || fighter.action === 'shieldStun') {

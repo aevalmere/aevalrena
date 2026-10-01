@@ -53,9 +53,10 @@ export interface SimFighter extends FighterState {
   // Trekmore mechanics (plan B.1). Required here, optional on FighterState.
   echoMove: MoveId | null; // move being echoed, null when no echo
   echoAge: number;         // echo move frame; negative while waiting out delayFrames
-  echoX: number;           // echo feet position and facing, latched at owner move frame 0
+  echoX: number;           // echo feet position: the owner's current feet + echoDir * offsetX (syncEchoes)
   echoY: number;
-  echoFacing: Facing;
+  echoFacing: Facing;      // latched at owner move frame 0
+  echoDir: Facing;         // side the echo stands on, latched at owner move frame 0
   onBranch: boolean;       // the current move is running its branch frames
   aimDir: AimDir;          // latched aim of the current aimed move
   echoHitGroups: number;   // groups the echo already landed
@@ -279,6 +280,7 @@ function makeFighter(
     echoX: 0,
     echoY: 0,
     echoFacing: 1,
+    echoDir: 1,
     onBranch: false,
     aimDir: 0,
     echoHitGroups: 0,
@@ -394,6 +396,7 @@ function cloneFighter(src: SimFighter): SimFighter {
     echoX: src.echoX,
     echoY: src.echoY,
     echoFacing: src.echoFacing,
+    echoDir: src.echoDir,
     onBranch: src.onBranch,
     aimDir: src.aimDir,
     echoHitGroups: src.echoHitGroups,
@@ -417,6 +420,8 @@ function cloneProjectile(src: ProjectileState): ProjectileState {
     scale: src.scale,
     returned: src.returned,
     charge: src.charge,
+    spawnX: src.spawnX,
+    spawnY: src.spawnY,
   };
 }
 

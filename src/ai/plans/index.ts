@@ -68,6 +68,23 @@ export function registerFamilies(fams: readonly PlanFamily[]): number {
   return added;
 }
 
+/**
+ * Candidate vetoes a character pack registers (the Trekmore sword throttle): a candidate any of
+ * them rejects is dropped with the vocabulary and teammate rules. Same no-cycle rule as
+ * registerFamilies: the pack imports this module, never the reverse.
+ */
+const VETOES: ((v: DecisionView, p: PlanInstance) => boolean)[] = [];
+
+/** Adds a candidate veto (true = drop the plan); a function already present is skipped. */
+export function registerCandidateVeto(fn: (v: DecisionView, p: PlanInstance) => boolean): void {
+  if (VETOES.indexOf(fn) < 0) VETOES.push(fn);
+}
+
+function vetoed(v: DecisionView, p: PlanInstance): boolean {
+  for (let i = 0; i < VETOES.length; i++) if (VETOES[i](v, p)) return true;
+  return false;
+}
+
 registerFamilies(NEUTRAL_FAMILIES);
 registerFamilies(ADVANTAGE_FAMILIES);
 registerFamilies(PASSIVE_FAMILIES);
@@ -155,6 +172,7 @@ export const generateCandidates: GenerateCandidatesFn = (v, out) => {
     if (!vocab.has(p.family)) continue;
     if (ti < 0 && (p.flags & PF_ATTACK) !== 0) continue;
     if (p instanceof Plan && p.target >= 0 && !isOpponent(s, meI, p.target)) continue;
+    if (VETOES.length > 0 && vetoed(v, p)) continue;
     KEEP.push(p);
     KEYS.push(scoreOf(v, p));
     let j = ORDER.length;

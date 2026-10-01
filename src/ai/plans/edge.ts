@@ -217,6 +217,7 @@ export function copyStateInto(src: GameState, dst: GameState): void {
     b.id = a.id; b.owner = a.owner; b.defId = a.defId; b.x = a.x; b.y = a.y; b.vx = a.vx; b.vy = a.vy;
     b.facing = a.facing; b.age = a.age; b.hitSlots = a.hitSlots; b.alive = a.alive; b.power = a.power; b.scale = a.scale;
     b.returned = a.returned; b.charge = a.charge ?? 0;
+    b.spawnX = a.spawnX ?? a.x; b.spawnY = a.spawnY ?? a.y;
   }
   for (let i = sp.length; i < dp.length; i++) dp[i].alive = false;
 }

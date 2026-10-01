@@ -10,7 +10,7 @@ import { Btn } from '../../core/types';
 import type { CharacterDef, InputFrame, MoveId, ProjectileDef, StageDef } from '../../core/types';
 import { stepGame } from '../../sim/index';
 import { chargedStat } from '../../sim/projectiles';
-import { chargeFraction, projectileChargePower, projectileChargeScale } from '../../sim/hits';
+import { chargeFraction, chargesPower, projectileChargePower, projectileChargeScale } from '../../sim/hits';
 import { startMove } from '../../sim/moves';
 import { simFighters, type SimFighter } from '../../sim/state';
 import { knockbackOf, place, timelineShots, trialState, withProbeWorld, type ProbeWorld, type StageGeo } from './probeHit';
@@ -345,7 +345,7 @@ export const probeShots: ProbeShotsFn = (def) => {
   for (let m = 0; m < ids.length; m++) {
     const mv = def.moves[ids[m]];
     const shots = timelineShots(mv);
-    for (let s = 0; s < shots.length; s++) out.push(shotProfile(def, ids[m], shots[s], mv.chargeable === true ? maxH : 0));
+    for (let s = 0; s < shots.length; s++) out.push(shotProfile(def, ids[m], shots[s], chargesPower(mv) ? maxH : 0));
   }
   return out;
 };
@@ -366,10 +366,10 @@ function shotProfile(def: CharacterDef, moveId: MoveId, p: ProjectileDef, maxH: 
   const shield = new Float64Array(n);
   const damageMul = TUNING.knockback.damageMul;
   for (let h = 0; h < n; h++) {
-    const frac = chargeFraction(h, mv.chargeable);
+    const frac = chargeFraction(h, chargesPower(mv));
     const delay = mv.chargeCastFrames === undefined ? 0 : Math.round(mv.chargeCastFrames * frac);
-    const power = p.charged === undefined ? projectileChargePower(h, mv.chargeable) : 1;
-    const scale = projectileChargeScale(h, mv.chargeable);
+    const power = p.charged === undefined ? projectileChargePower(h, chargesPower(mv)) : 1;
+    const scale = projectileChargeScale(h, chargesPower(mv));
     cast[h] = p.spawnFrame + delay;
     total[h] = mv.totalFrames + delay;
     speed[h] = Math.abs(chargedStat(p, frac, 'vx'));

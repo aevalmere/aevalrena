@@ -48,6 +48,17 @@ import {
   stepParticles,
 } from './particles';
 import { fitCanvas, liveView } from './scale';
+import {
+  clearShadowFx,
+  createShadowFx,
+  drawShadowFxBack,
+  drawShadowFxFront,
+  shadowHitBurst,
+  shadowKoBurst,
+  shadowRecall,
+  stepShadowFx,
+  updateShadowFx,
+} from './shadowfx';
 import { addShake, createShake, resetShake, stepShake } from './shake';
 import { buildVisuals } from './visuals';
 
@@ -77,6 +88,14 @@ const CRIT_GLOW_SPARKS = 3;
 const CHEST_Y = -24;
 /** The teleport arrival puff shows this many sim frames after the departure one. */
 const TELEPORT_ARRIVE_DELAY = 4;
+/** Characters whose counter never draws a counter flash (owner rule for Trekmore, 2026-09-30). */
+const NO_COUNTER_FLASH: readonly string[] = ['trekmore'];
+
+/** The counter flash clip name for `charId`, '' when it never draws one. */
+function counterFlashFor(charId: string): string {
+  for (let i = 0; i < NO_COUNTER_FLASH.length; i++) if (NO_COUNTER_FLASH[i] === charId) return '';
+  return 'counterFlash';
+}
 
 /** Optional hook a StageArt module can expose so its layers bake during load. */
 interface PreparableStageArt extends StageArt {
@@ -107,6 +126,7 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
   const particles = createParticles();
   const sparks = createSparks();
   const clips = createClips();
+  const shadowFx = createShadowFx();
 
   const posX = new Float32Array(MAX_PLAYERS);
   const posY = new Float32Array(MAX_PLAYERS);
@@ -145,6 +165,7 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
     clearParticles(particles);
     clearSparks(sparks);
     clearClips(clips);
+    clearShadowFx(shadowFx);
     resetShake(shakeState);
     flash.fill(0);
     cameraPrimed = false;
@@ -218,9 +239,10 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
           if (amount > HIT_SHAKE_MAX) amount = HIT_SHAKE_MAX;
           if (event.crit === true) {
             amount *= CRIT_SHAKE_MUL;
-            spawnClip(clips, c, v, 'counterFlash', event.x, event.y, CRIT_FLASH_SCALE, 0, true);
+            spawnClip(clips, c, v, counterFlashFor(c), event.x, event.y, CRIT_FLASH_SCALE, 0, true);
             spawnGlowSparks(particles, event.x, event.y, CRIT_GLOW_SPARKS, v, c);
           }
+          shadowHitBurst(shadowFx, state.frame, event.x, event.y, event.damage, event.echo === true, v, c);
           addShake(shakeState, amount);
           const vi = event.victim >= 0 && event.victim < MAX_PLAYERS ? slotToIndex[event.victim] : -1;
           if (vi >= 0) flash[vi] = FLASH_FRAMES;
@@ -233,10 +255,18 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
           spawnHitSparks(particles, event.x, event.y, 12);
           addShake(shakeState, SHIELD_BREAK_SHAKE);
           break;
-        case 'ko':
+        case 'ko': {
           spawnKoBurst(particles, event.x, event.y, variantForSlot(state, event.slot), paletteIdForSlot(state, event.slot));
+          // His shards burst when he is KO'd and when he scored the KO.
+          shadowKoBurst(shadowFx, state.frame, event.x, event.y, variantForSlot(state, event.slot), paletteIdForSlot(state, event.slot));
+          const vi = event.slot >= 0 && event.slot < MAX_PLAYERS ? slotToIndex[event.slot] : -1;
+          const by = vi >= 0 ? state.fighters[vi].lastHitBy : -1;
+          if (by >= 0 && by !== event.slot) {
+            shadowKoBurst(shadowFx, state.frame + 1, event.x, event.y, variantForSlot(state, by), paletteIdForSlot(state, by));
+          }
           addShake(shakeState, KO_SHAKE);
           break;
+        }
         case 'land':
           spawnLandDust(particles, event.x, event.y, event.hard);
           if (event.hard) addShake(shakeState, HARD_LAND_SHAKE);
@@ -266,7 +296,7 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
           const c = paletteIdForSlot(state, event.slot);
           const cx = feetXForSlot(state, event.slot, event.x);
           const cy = feetYForSlot(state, event.slot, event.y - CHEST_Y) + CHEST_Y;
-          spawnClip(clips, c, v, 'counterFlash', cx, cy, 1, 0, false);
+          spawnClip(clips, c, v, counterFlashFor(c), cx, cy, 1, 0, false);
           startCounterDim(clips);
           break;
         }
@@ -275,6 +305,7 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
           const c = paletteIdForSlot(state, event.slot);
           spawnClip(clips, c, v, 'stepTrail', event.fromX, event.fromY + CHEST_Y, 1, 0, false);
           spawnClip(clips, c, v, 'stepTrail', event.x, event.y + CHEST_Y, 1, TELEPORT_ARRIVE_DELAY, false);
+          if (event.kind === 'recall') shadowRecall(shadowFx, state.frame, event.slot, event.fromX, event.fromY, event.x, event.y, v, c);
           break;
         }
         default:
@@ -338,6 +369,7 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
     stepParticles(particles, steps);
     stepSparks(sparks, steps);
     stepClips(clips, steps);
+    stepShadowFx(shadowFx, steps);
     if (steps <= 0) return;
     for (let i = 0; i < MAX_PLAYERS; i++) {
       if (flash[i] > 0) flash[i] = flash[i] > steps ? flash[i] - steps : 0;
@@ -400,6 +432,7 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
       stepRenderFrame(steps);
       if (state.frame !== lastConsumedFrame) {
         consumeEvents(state);
+        updateShadowFx(shadowFx, state, steps);
         lastConsumedFrame = state.frame;
       }
 
@@ -437,8 +470,11 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
       resolveFighterFrames(state, drawDeps);
       // The up-special column stands behind the fighter rising out of it.
       drawGeysers(ctx, state, posX, posY);
+      // Shadow smoke behind the fighters, shards and slivers over them.
+      drawShadowFxBack(ctx, shadowFx);
       drawFighters(ctx, state, posX, posY, flash, drawDeps, renderTick);
       drawFighterFx(ctx, state, posX, posY);
+      drawShadowFxFront(ctx, shadowFx);
       drawClips(ctx, clips);
       drawSparks(ctx, sparks);
       drawParticles(ctx, particles);

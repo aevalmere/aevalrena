@@ -7,6 +7,7 @@ import { syncFinalSmash } from './finalsmash';
 import { consumeInput, EMPTY_INPUT } from './input';
 import { stepMatch } from './match';
 import { stepPhysics } from './physics';
+import { syncEchoes } from './moves';
 import { stepProjectiles } from './projectiles';
 import { defOf, simFighters, type SimFighter } from './state';
 
@@ -50,6 +51,7 @@ export function stepGame(state: GameState, inputs: InputFrame[]): void {
 
   syncGrabbed(state);
   syncFinalSmash(state);
+  syncEchoes(state);
   stepProjectiles(state);
   resolveHits(state);
   stepMatch(state);

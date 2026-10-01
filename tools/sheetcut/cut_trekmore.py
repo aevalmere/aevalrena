@@ -6,6 +6,7 @@ Helpers come from cut.py (not modified). Map of every sheet: art/trekmore/cutmap
     python tools/sheetcut/cut_trekmore.py                # all sheets, fx, contact sheets
     python tools/sheetcut/cut_trekmore.py --sheet heavy  # one sheet (fx of other sheets kept)
     python tools/sheetcut/cut_trekmore.py --measure      # also write art/trekmore/palette_measure.json
+    python tools/sheetcut/cut_trekmore.py --size-strip art/trekmore/qa/SIZE_STRIP.png  # body size QA strip only
 
 Keying (every mode builds a silhouette envelope instead of flooding the
 background, because the armour ink is as dark as the background and touches it
@@ -92,6 +93,56 @@ def hsl(a: np.ndarray):
     h = np.where(mx == r, ((g - b) / dd) % 6, np.where(mx == g, (b - r) / dd + 2, (r - g) / dd + 4)) * 60
     h = np.where(d == 0, 0, h)
     return h, s, l
+
+
+def hsl_to_rgb(h, s, l) -> np.ndarray:
+    """Inverse of hsl(): degrees, 0..1, 0..1 -> uint8-range float RGB."""
+    c = (1 - np.abs(2 * l - 1)) * s
+    hp = (h % 360) / 60.0
+    x = c * (1 - np.abs(hp % 2 - 1))
+    z = np.zeros_like(c)
+    sel = [(hp < 1, (c, x, z)), (hp < 2, (x, c, z)), (hp < 3, (z, c, x)),
+           (hp < 4, (z, x, c)), (hp < 5, (x, z, c)), (hp >= 5, (c, z, x))]
+    r = np.select([k for k, _ in sel], [v[0] for _, v in sel])
+    g = np.select([k for k, _ in sel], [v[1] for _, v in sel])
+    b = np.select([k for k, _ in sel], [v[2] for _, v in sel])
+    m = l - c / 2
+    return np.stack([r + m, g + m, b + m], -1) * 255.0
+
+
+COLOUR_Q = (1, 10, 25, 50, 75, 90, 99)
+
+
+def colour_stats(px: np.ndarray) -> dict:
+    """Body colour of a set of opaque source pixels (N x 3): lightness
+    percentiles, median saturation, median hue of the coloured pixels."""
+    h, s, l = hsl(px[None])
+    h, s, l = h[0], s[0], l[0]
+    col = s > 0.15
+    return {"L": [round(float(np.percentile(l, q)), 4) for q in COLOUR_Q],
+            "S50": round(float(np.median(s)), 4),
+            "H50": round(float(np.median(h[col])) if col.any() else 270.0, 1)}
+
+
+def recolour(a: np.ndarray, mask: np.ndarray, src: dict, dst: dict, cfg: dict) -> np.ndarray:
+    """Per-sheet curves (polish QA colour pass; recolouring cut pixels is allowed):
+    lightness mapped through the sheet's percentiles onto the target's (a monotonic
+    curve), saturation scaled by the median ratio (capped), hue shifted by the
+    median difference on coloured pixels. Background pixels are untouched."""
+    out = a.copy()
+    px = a[mask].astype(np.float32)
+    h, s, l = hsl(px[None])
+    h, s, l = h[0], s[0], l[0]
+    xs = np.array([0.0] + src["L"] + [1.0])
+    ys = np.array([0.0] + dst["L"] + [1.0])
+    xs = np.maximum.accumulate(xs + np.arange(len(xs)) * 1e-6)
+    l2 = np.interp(l, xs, ys)
+    k = float(np.clip(dst["S50"] / max(src["S50"], 1e-3), cfg.get("satMin", 0.6), cfg.get("satMax", 2.0)))
+    s2 = np.clip(s * k, 0, 1)
+    dh = ((dst["H50"] - src["H50"] + 180) % 360) - 180
+    h2 = np.where(s > 0.15, h + dh, h)
+    out[mask] = np.clip(np.round(hsl_to_rgb(h2, s2, l2)), 0, 255).astype(out.dtype)
+    return out
 
 
 def glow_mask(a: np.ndarray) -> np.ndarray:
@@ -203,7 +254,55 @@ def remove_ledge_blocks(a: np.ndarray, m: np.ndarray, log: list, tag: str) -> np
     keep = (vio >= 0.2 * size) & (size >= 8)
     keep[0] = False
     out = keep[lab]
+    # the grey test also takes grey armour highlights inside the knight: put
+    # back enclosed pinholes (polish wave; they read as see-through dots)
+    hl, hn = label(~out)
+    if hn:
+        hs = np.bincount(hl.ravel(), minlength=hn + 1)
+        edge = np.unique(np.concatenate([hl[0], hl[-1], hl[:, 0], hl[:, -1]]))
+        small = hs <= 40
+        small[edge] = False
+        small[0] = False
+        out |= small[hl] & m
     log.append(f"  {tag}: ledge block removed ({int((m & ~out).sum())} px)")
+    return out
+
+
+def remove_pillars(a: np.ndarray, m: np.ndarray, pillars: dict, off, log: list, tag: str) -> np.ndarray:
+    """violet_knight ledge and climb rows (Round 2): each figure hangs from or climbs
+    onto a dark stone pillar to his right. The pillar is a blue-violet block (hue
+    250 to 260, very dark) with a bright lip line on top; the knight is violet
+    (hue 266 and up). cutmap `pillars` {idx: [eraseFromX, lipY, cornerX, eraseToX]} in
+    sheet coords: everything in eraseFromX..eraseToX from the lip row down is the
+    pillar (eraseToX = its right edge plus the lip overhang), except knight-hue pixels below the
+    lip that are connected to the knight outside the zone (chest and knees in front
+    of the pillar's left face). The hands rest above the lip and are not touched."""
+    h, s, l = hsl(a)
+    H, W = m.shape
+    starts = [(int(v[0]) - off[0], int(v[1]) - off[1], int(v[2]) - off[0], int(v[3]) - off[0]) for v in pillars.values()]
+    zone = np.zeros_like(m)
+    face = np.zeros_like(m)
+    weak = a.max(2) <= 17   # not ink: the keying closing filled it between the soles and the lip
+    for xe, yl, xc, xend in starts:
+        zone[max(yl, 0):, max(xe, 0):min(xend + 1, W)] = True
+        # QA round 2: the closing bridged the gap rows between the soles and the lip into a
+        # flat strip under the feet; those filled (non-ink) pixels go with the pillar
+        band = np.zeros_like(m)
+        band[max(yl - 4, 0):max(yl, 0), max(xe - 12, 0):min(xend + 1, W)] = True
+        zone |= band & weak
+        face[yl + 4:, max(xe, 0):min(xc + 12, W)] = True
+    keep = m & ~zone
+    cand = m & face & (h >= 266) & (s >= 0.2)
+    lab, n = label(keep | cand)
+    if n:
+        hit = np.bincount(lab[keep], minlength=n + 1) > 0
+        hit[0] = False
+        restored = cand & hit[lab]
+    else:
+        restored = cand & False
+    out = keep | restored
+    log.append(f"  {tag}: {len(starts)} pillars removed ({int((m & ~out).sum())} px, {int(restored.sum())} knight px kept "
+               f"in front of the pillar faces)")
     return out
 
 
@@ -376,9 +475,12 @@ class Frame:
             else:
                 self.anchor = ((xs.min() + xs.max()) / 2, (ys.min() + ys.max() + 1) / 2)
 
+    corner = None   # Round 2 ledge frames: (x, lip y) of the ledge corner in band coords
+
     @property
     def key(self):
-        return f"{self.sheet}_{self.row}_{self.idx}"
+        # a row named "" gives <sheet>_<n> (twin_0, twin_1)
+        return f"{self.sheet}_{self.row}_{self.idx}" if self.row else f"{self.sheet}_{self.idx}"
 
     def fx_part(self) -> np.ndarray:
         """Glow pieces far from the body: slash arcs, trails. Capped at alpha 254."""
@@ -472,8 +574,14 @@ def cut_rows_sheet(name: str, cfg: dict, log: list, report: dict):
                 M = key_soft(A, kcfg, log, tag)
             if cfg.get("rules"):
                 M = remove_rules(M, log, tag)
+            if "maskY1" in row:
+                # key with the panel rule inside the band (it closes the envelope so the dark
+                # cape fill stays solid), then drop the rule rows (round 3 upsweep)
+                M[max(row["maskY1"] - y0 + 1, 0):] = False
             if row.get("ledgeBlocks"):
                 M = remove_ledge_blocks(A, M, log, tag)
+            if row.get("pillars"):
+                M = remove_pillars(A, M, row["pillars"], (x0, y0), log, tag)
             count = part["count"]
             masks = None
             if "cells" in part or ("cells" in row and len(parts) == 1):
@@ -513,6 +621,15 @@ def cut_rows_sheet(name: str, cfg: dict, log: list, report: dict):
                             mm = np.zeros_like(M)
                             mm[:, s:e + 1] = M[:, s:e + 1]
                             masks.append(mm)
+            for src_i, dst_i, rx0, ry0, rx1, ry1 in part.get("reassign", []):
+                # QA round 2: a neighbour's detached piece (an arc tail) grown into the wrong
+                # frame goes back to its own frame instead of being clipped (sheet coords)
+                box = np.zeros_like(M)
+                box[max(ry0 - y0, 0):max(ry1 - y0 + 1, 0), max(rx0 - x0, 0):max(rx1 - x0 + 1, 0)] = True
+                moved = masks[src_i] & box
+                masks[src_i] = masks[src_i] & ~box
+                masks[dst_i] = masks[dst_i] | moved
+                log.append(f"  {tag}: {int(moved.sum())} px of frame {src_i} given to frame {dst_i}")
             if len(masks) != count:
                 log.append(f"  ERROR {tag}: {len(masks)} frames (expected {count})")
                 ok = False
@@ -521,9 +638,15 @@ def cut_rows_sheet(name: str, cfg: dict, log: list, report: dict):
                 masks = [masks[i] for i in order]
             for i, mm in enumerate(masks):
                 j = idx0 + i
-                frames.append(Frame(name, row["name"], j, A, mm, (x0, y0),
-                                    bodyless=j in row.get("bodyless", []),
-                                    anchor_bottom=row.get("anchorBottom", False)))
+                fr = Frame(name, row["name"], j, A, mm, (x0, y0),
+                           bodyless=j in row.get("bodyless", []),
+                           anchor_bottom=row.get("anchorBottom", False))
+                pc = row.get("pillars", {}).get(str(j)) or row.get("corners", {}).get(str(j))
+                if pc is not None:
+                    # ledge corner: pillars [eraseFromX, lipY, cornerX, eraseToX], corners [x, y]
+                    cx, cy = (pc[2], pc[1]) if len(pc) == 4 else (pc[0], pc[1])
+                    fr.corner = (cx - x0, cy - y0)
+                frames.append(fr)
             idx0 += len(masks)
         report["counts"][f"{name}_{row['name']}"] = idx0
     return ok, frames
@@ -671,12 +794,127 @@ def write_frame(f: Frame, scale: float, manifest: dict, key=None, mask=None):
     return img, ax, ay
 
 
+def body_factor(cfg: dict, row: str, idx: int) -> float:
+    """Polish wave body-size normalisation (CUT_NOTES "Polish wave"): a factor on
+    the sheet / row scale so the knight's body (helmet, torso, helmet to hip on
+    the dark armour core; sword, glow and cape spikes ignored) matches
+    loco_idle_0. Row level `bodyScale`, per frame `bodyScaleFrames` {idx: f};
+    grid sheets use the sheet level `bodyScaleFrames`."""
+    rows = {r["name"]: r for r in cfg.get("rows", [])}
+    r = rows.get(row, cfg)
+    per = r.get("bodyScaleFrames", {})
+    if str(idx) in per:
+        return float(per[str(idx)])
+    return float(r.get("bodyScale", 1.0))
+
+
+def glow_boost(cfg: dict, frames, log: list) -> None:
+    """QA round 2: row `glowBoost` {idx: {L, S, minL}} lifts the lightness and saturation of a
+    frame's glow pixels (l >= minL, s >= 0.3) after the recolour, so an impact burst pops over
+    bright stage backgrounds. Recolour only: hue and every pixel position stay."""
+    for row in cfg.get("rows", []):
+        for k, b in row.get("glowBoost", {}).items():
+            f = find(frames, row["name"], int(k))
+            if f is None:
+                continue
+            a = f.a.copy()
+            h, s, l = hsl(a)
+            sel = f.mask & (l >= b.get("minL", 0.3)) & (s >= 0.3)
+            l2 = np.clip(l * b.get("L", 1.3), 0, 0.96)
+            s2 = np.clip(s * b.get("S", 1.2), 0, 1)
+            rgb = np.clip(np.round(hsl_to_rgb(h, s2, l2)), 0, 255).astype(a.dtype)
+            a[sel] = rgb[sel]
+            f.a = a
+            log.append(f"  {f.key}: glow boost L x{b.get('L', 1.3)}, S x{b.get('S', 1.2)} on {int(sel.sum())} px")
+
+
+HANG_DROP = 20   # src/sim/state.ts LEDGE_HANG_DROP: a hanger's position is this far below the ledge top
+
+
+def ledge_anchors(cfg: dict, frames, row_scale: dict, scale: float, log: list) -> None:
+    """Round 2 ledge rows: the renderer draws a frame's anchor at the fighter's
+    position, which the sim holds at (ledge corner x, ledge top + HANG_DROP) for the
+    whole hang and climb. So the anchor is the source ledge corner moved HANG_DROP
+    game px down: the hands land on the stage corner. Row `settle` {from, to, inset}:
+    from frame `from` to `to` the anchor x slides linearly until the last frame's
+    heel stands `inset` game px inside the corner, where the sim places him when
+    the climb ends (src/sim/ledge.ts CLIMB_INSET), so the idle frame does not jump."""
+    rows = {r["name"]: r for r in cfg.get("rows", [])}
+    for f in frames:
+        fixed = rows.get(f.row, {}).get("anchors", {}).get(str(f.idx))
+        if fixed is not None:
+            # a figure with no standing heel (the concept_a upsweep): ground point measured by hand
+            f.anchor = (float(fixed[0] - f.off[0]), float(fixed[1] - f.off[1]))
+        if f.corner is None:
+            continue
+        sc = row_scale.get(f.row, scale) * body_factor(cfg, f.row, f.idx)
+        f.anchor = (float(f.corner[0]), float(f.corner[1]) + HANG_DROP / sc)
+    for rn, r in rows.items():
+        st = r.get("settle")
+        if not st:
+            continue
+        a1 = find(frames, rn, st["to"])
+        sc1 = row_scale.get(rn, scale) * body_factor(cfg, rn, st["to"])
+        heel = heel_anchor(a1.body)[0]
+        x_end = heel - st["inset"] / sc1
+        slide = x_end - float(a1.corner[0])
+        for i in range(st["from"] + 1, st["to"] + 1):
+            f = find(frames, rn, i)
+            t = (i - st["from"]) / (st["to"] - st["from"])
+            # each frame keeps its own corner; the slide is an offset growing to the full amount
+            f.anchor = (float(f.corner[0]) + t * slide, f.anchor[1])
+        log.append(f"  {cfg['file']} {rn}: anchors settle from frame {st['from']} to {st['to']}, "
+                   f"last heel {st['inset']} game px inside the corner (slide {slide * sc1:+.1f} game px)")
+
+
+def drop_far_specks(m: np.ndarray, body: np.ndarray, scale: float,
+                    min_game_area: float = 4.0, near_game: float = 4.0) -> np.ndarray:
+    """Stray specks: pieces that would be under `min_game_area` game px and lie
+    more than `near_game` game px from the body are dropped (at game scale they
+    are single grey pixels floating around the sprite)."""
+    lab, n = label(m)
+    if n == 0:
+        return m
+    size = np.bincount(lab.ravel(), minlength=n + 1)
+    near = dilate(body, max(1, round(near_game / scale)))
+    touch = np.bincount(lab[near & m], minlength=n + 1) > 0
+    kill = (size * scale * scale < min_game_area) & ~touch
+    kill[0] = False
+    return m & ~kill[lab]
+
+
+def soft_alpha(f: Frame, m: np.ndarray, gain: float) -> np.ndarray:
+    """Alpha from the pixel's distance to the frame's background colour (keying,
+    no new pixels): faint smoke keeps its faintness instead of a solid blob."""
+    ref = np.median(f.a[~f.mask], 0) if (~f.mask).any() else np.zeros(3)
+    dist = np.abs(f.a - ref).max(2).astype(np.float32)
+    return np.where(m, np.clip(dist * gain, 0, 254), 0).astype(np.uint8)
+
+
+def render_soft(f: Frame, m: np.ndarray, alpha: np.ndarray, scale: float, anchor):
+    ys, xs = np.nonzero(m)
+    x0, x1 = max(xs.min() - 2, 0), min(xs.max() + 3, m.shape[1])
+    y0, y1 = max(ys.min() - 2, 0), min(ys.max() + 3, m.shape[0])
+    rgba = np.dstack([f.a[y0:y1, x0:x1].astype(np.uint8), alpha[y0:y1, x0:x1]])
+    ow, oh = max(1, round((x1 - x0) * scale)), max(1, round((y1 - y0) * scale))
+    img = Image.fromarray(rgba, "RGBA").convert("RGBa").resize((ow, oh), Image.LANCZOS).convert("RGBA")
+    arr = np.asarray(img).copy()
+    arr[..., 3] = np.minimum(arr[..., 3], 254)
+    arr[arr[..., 3] < 4] = 0
+    return Image.fromarray(arr, "RGBA"), round((anchor[0] - x0) * scale), round((anchor[1] - y0) * scale)
+
+
 def fx_from(f: Frame, scale: float, spec: dict):
-    """Cut an effect out of a frame: body removed, bright violet pieces kept."""
+    """Cut an effect out of a frame: body removed, bright violet pieces kept.
+    keep: glowNoBody (default), all (every mask pixel), pieces (every mask pixel
+    away from the body, no colour test: smoke tatters, armour shards)."""
     m = f.mask.copy()
     mode = spec.get("keep", "glowNoBody")
     if mode == "all":
         pass
+    elif mode == "pieces":
+        if f.body is not None:
+            m &= ~dilate(f.body, spec.get("bodyPad", 2))
     else:
         if f.body is not None:
             m &= ~dilate(f.body, spec.get("bodyPad", 2))
@@ -694,9 +932,21 @@ def fx_from(f: Frame, scale: float, spec: dict):
         clip = np.zeros_like(m)
         clip[max(cy0 - f.off[1], 0):max(cy1 - f.off[1], 0), max(cx0 - f.off[0], 0):max(cx1 - f.off[0], 0)] = True
         m &= clip
-    m = drop_specks(m, 4)
+    m = drop_specks(m, spec.get("minPx", 4))
+    if spec.get("largest"):
+        # one particle per crop: the largest piece inside the clip
+        lab, n = label(m)
+        if n:
+            size = np.bincount(lab.ravel(), minlength=n + 1)
+            size[0] = 0
+            m = lab == int(size.argmax())
     if not m.any():
         return None, None
+    if "softAlpha" in spec:
+        ys, xs = np.nonzero(m)
+        anchor = ((xs.min() + xs.max()) / 2, (ys.min() + ys.max() + 1) / 2)
+        img, ax, ay = render_soft(f, m, soft_alpha(f, m, spec["softAlpha"]), scale, anchor)
+        return (img, ax, ay), m
     if spec.get("anchor") == "heel" and f.body is not None:
         # world anchored at the source frame's heel: drawn at the latched
         # takeoff point, the effect keeps its height above the floor
@@ -855,6 +1105,79 @@ def preview(kind: str, out: Path, zoom: int = 2) -> None:
     print(f"preview {out.name}: {img.size}")
 
 
+def colour_target(cmap: dict) -> None:
+    """Pooled body colour of the attack sheets (cutmap _colour.ref) in source
+    pixels: paste the printed JSON into _colour.target."""
+    px = []
+    for name in cmap["_colour"]["ref"]:
+        cfg = cmap[name]
+        rep = {"counts": {}, "fallbackRows": [], "scaleTable": {}}
+        _, frames = (cut_grid_sheet if cfg["mode"] == "grid" else cut_rows_sheet)(name, cfg, [], rep)
+        seen = {}
+        for f in frames:
+            e = seen.setdefault(id(f.a), [f.a, np.zeros(f.a.shape[:2], bool)])
+            e[1] |= f.mask
+        sub = np.concatenate([a[m] for a, m in seen.values()])
+        print(name, json.dumps(colour_stats(sub)))
+        px.append(sub)
+    print("target", json.dumps(colour_stats(np.concatenate(px))))
+
+
+def size_strip(out: Path, zoom: int = 2, max_w: int = 2400, title: str = "") -> None:
+    """Every body frame the sheetmap uses, in anim order, heel (cyan dot) on a
+    baseline, with the 55 px standing guide (magenta) across each line and the
+    crop's body-scale factor under its name (art/trekmore/qa/SIZE_STRIP.png)."""
+    smap = json.loads((ART / "sheetmap.json").read_text(encoding="utf-8"))
+    man = json.loads((OUT_DIR / "manifest.json").read_text(encoding="utf-8"))
+    font = ImageFont.load_default()
+    cells = []
+    seen = set()
+    for name, anim in smap["body"].items():
+        for fr in anim["frames"]:
+            if fr in seen:
+                continue
+            seen.add(fr)
+            meta = man["frames"][fr]
+            im = Image.open(OUT_DIR / f"{fr}.png").convert("RGBA")
+            im = im.resize((im.width * zoom, im.height * zoom), Image.NEAREST)
+            cells.append((fr, im, meta["ax"] * zoom, meta["ay"] * zoom, meta.get("bodyScale")))
+    gap, pad = 6, 10
+    lines, cur, x = [], [], pad
+    for c in cells:
+        cw = max(c[1].width, int(font.getlength(c[0])) + 2)
+        if cur and x + cw > max_w:
+            lines.append(cur)
+            cur, x = [], pad
+        cur.append((c, x, cw))
+        x += cw + gap
+    if cur:
+        lines.append(cur)
+    lay = []
+    for ln in lines:
+        up = max(max(c[3] for c, _, _ in ln), STAND_H * zoom + 4)
+        down = max(c[1].height - c[3] for c, _, _ in ln)
+        lay.append((up, max(down, 0)))
+    H = sum(u + d + 30 for u, d in lay) + 24
+    img = Image.new("RGBA", (max_w, H), (72, 72, 78, 255))
+    d = ImageDraw.Draw(img)
+    d.text((pad, 6), title or out.name, fill=(255, 255, 255), font=font)
+    y = 24
+    for ln, (up, down) in zip(lines, lay):
+        base = y + up
+        d.line([(0, base), (max_w, base)], fill=(30, 30, 34, 255))
+        d.line([(0, base - STAND_H * zoom), (max_w, base - STAND_H * zoom)], fill=(255, 0, 255, 255))
+        for (fr, im, ax, ay, bs), x, cw in ln:
+            ox = x + (cw - im.width) // 2
+            img.alpha_composite(im, (ox, base - ay))
+            d.rectangle([ox + ax - 1, base - 1, ox + ax, base], fill=(0, 255, 255, 255))
+            d.text((x, base + down + 2), fr, fill=(230, 230, 230), font=font)
+            if bs is not None:
+                d.text((x, base + down + 13), f"x{bs:.2f}", fill=(255, 220, 120), font=font)
+        y += up + down + 30
+    img.save(out)
+    print(f"size strip {out}: {img.size}")
+
+
 # --------------------------------------------------------------------------
 # palette measure
 
@@ -971,7 +1294,19 @@ def main() -> int:
     ap.add_argument("--measure", action="store_true")
     ap.add_argument("--preview", action="store_true",
                     help="write art/trekmore/preview_sheet_body.png and preview_sheet_fx.png from sheetmap.json")
+    ap.add_argument("--size-strip", metavar="PNG",
+                    help="only draw the body size strip from the current crops into this file, then exit")
+    ap.add_argument("--no-recolour", action="store_true",
+                    help="skip the per-sheet colour curves (cutmap _colour), e.g. to see the source colours")
+    ap.add_argument("--colour-target", action="store_true",
+                    help="print the pooled colour stats of the _colour.ref sheets (the target) and exit")
     args = ap.parse_args()
+    if args.colour_target:
+        colour_target(cmap)
+        return 0
+    if args.size_strip:
+        size_strip(Path(args.size_strip))
+        return 0
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     man_path = OUT_DIR / "manifest.json"
     manifest = {"sheetScale": {}, "frames": {}, "fx": {}}
@@ -1023,6 +1358,24 @@ def main() -> int:
                     rs = scale
                 row_scale[row["name"]] = rs
         scales[name] = (scale, row_scale)
+        col = cmap.get("_colour")
+        if col and name in col.get("sheets", []) and not args.no_recolour:
+            # one recolour per source array (frames of a row share their band)
+            arrs = {}
+            for f in frames:
+                e = arrs.setdefault(id(f.a), [f.a, np.zeros(f.a.shape[:2], bool), []])
+                e[1] |= f.mask
+                e[2].append(f)
+            src = colour_stats(np.concatenate([e[0][e[1]] for e in arrs.values()]))
+            for arr, mk, fl in arrs.values():
+                new = recolour(arr, mk, src, col["target"], col)
+                for f in fl:
+                    f.a = new
+            after = colour_stats(np.concatenate([fl[0].a[mk] for _, mk, fl in arrs.values()]))
+            report.setdefault("colour", {})[name] = {"before": src, "after": after}
+            log.append(f"  colour: L50 {src['L'][3]:.3f} -> {after['L'][3]:.3f}, S50 {src['S50']:.3f} -> {after['S50']:.3f}, "
+                       f"hue {src['H50']:.0f} -> {after['H50']:.0f} (target L50 {col['target']['L'][3]:.3f}, "
+                       f"S50 {col['target']['S50']:.3f}, hue {col['target']['H50']:.0f})")
         for f in frames:
             if f.body is not None:
                 POSE_H[f.key] = body_height(f) * row_scale.get(f.row, scale)
@@ -1031,10 +1384,53 @@ def main() -> int:
             for p in OUT_DIR.glob(f"{name}_*.png"):
                 p.unlink()
             results = []
+            ledge_anchors(cfg, frames, row_scale, scale, log)
+            glow_boost(cfg, frames, log)
             for f in frames:
                 sc = row_scale.get(f.row, scale)
-                img, ax, ay = write_frame(f, sc, manifest)
+                bf = body_factor(cfg, f.row, f.idx)
+                clean = drop_far_specks(f.mask, f.body, sc * bf) if f.body is not None else None
+                img, ax, ay = write_frame(f, sc * bf, manifest, mask=clean)
+                manifest["frames"][f.key]["bodyScale"] = round(bf, 3)
+                if bf != 1.0:
+                    log.append(f"  {f.key}: body scale x{bf:.3f}")
                 results.append((f.row, f.key, img, ax, ay))
+            for dspec in cmap.get("_derived", []):
+                # body crops with cut pixels erased (polish QA: no second sword
+                # while the projectile flies); same scale and heel anchor as the source
+                parts = dspec["src"].split("_")
+                if parts[0] != name:
+                    continue
+                f = find(frames, "_".join(parts[1:-1]), int(parts[-1]))
+                sc = row_scale.get(f.row, scale) * body_factor(cfg, f.row, f.idx)
+                m = drop_far_specks(f.mask, f.body, sc) if f.body is not None else f.mask.copy()
+                for x0, y0, x1, y1 in dspec.get("erase", []):
+                    m[max(y0 - f.off[1], 0):max(y1 - f.off[1], 0), max(x0 - f.off[0], 0):max(x1 - f.off[0], 0)] = False
+                if dspec.get("bodyOnly") and f.body is not None:
+                    # keep the pieces connected to the body; detached pieces (a thrown sword) go
+                    lab, n = label(m)
+                    hit = np.bincount(lab[f.body & m], minlength=n + 1) > 0
+                    hit[0] = False
+                    m = hit[lab]
+                m = drop_specks(m, 6)
+                saved = f.anchor
+                if dspec.get("heelAnchor") and f.body is not None:
+                    # a ledge-row frame used on the stage (ledgeatk): back to the heel anchor
+                    f.anchor = heel_anchor(f.body)
+                img, ax, ay = write_frame(f, sc, manifest, key=dspec["name"], mask=m)
+                f.anchor = saved
+                if dspec.get("flip"):
+                    # mirrored copy (round 3: the upsweep's crescent in front of a right-facing
+                    # Trekmore); only the pixel order and the anchor x change
+                    img = img.transpose(Image.FLIP_LEFT_RIGHT)
+                    ax = img.width - ax
+                    img.save(OUT_DIR / f"{dspec['name']}.png")
+                    manifest["frames"][dspec["name"]]["ax"] = ax
+                    manifest["frames"][dspec["name"]]["mirrored"] = True
+                manifest["frames"][dspec["name"]]["bodyScale"] = round(body_factor(cfg, f.row, f.idx), 3)
+                manifest["frames"][dspec["name"]]["derivedFrom"] = dspec["src"]
+                results.append((f.row, dspec["name"], img, ax, ay))
+                log.append(f"  {dspec['name']}: derived from {dspec['src']} (erased {int((f.mask & ~m).sum())} px)")
             manifest["sheetScale"][name] = round(scale, 5)
             for rn, rs in row_scale.items():
                 manifest["sheetScale"][f"{name}_{rn}"] = round(rs, 5)
@@ -1070,7 +1466,7 @@ def main() -> int:
                 all_ok = False
                 continue
             sc, rsc = scales[sheet]
-            res, _ = fx_from(f, rsc.get(row, sc), spec)
+            res, _ = fx_from(f, rsc.get(row, sc) * body_factor(cmap[sheet], row, idx), spec)
             if res is None:
                 print(f"ERROR fx {spec['name']}: empty")
                 all_ok = False

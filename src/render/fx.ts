@@ -1,6 +1,6 @@
 import { CHARACTER_DEFS } from '../characters/registry';
 import { TUNING } from '../core/constants';
-import { MAX_PLAYERS, SIM_HZ } from '../core/types';
+import { AIM_ANGLES, MAX_PLAYERS, SIM_HZ } from '../core/types';
 import type { FighterState, GameState, MoveDef, ProjectileDef } from '../core/types';
 import { chargeFraction, projectileChargeScale } from '../sim/hits';
 import { getFrame, getFrameAnchor } from './bake';
@@ -315,6 +315,94 @@ function heldProjectile(fighter: FighterState): ProjectileDef | null {
   return projectiles[0];
 }
 
+// ---------------- the neutral special aim hold ----------------
+
+/** cos and sin of AIM_ANGLES (aim index: forward, up-forward, up, down-forward, down). */
+export const AIM_COS: readonly number[] = AIM_ANGLES.map((d) => Math.cos((d * Math.PI) / 180));
+export const AIM_SIN: readonly number[] = AIM_ANGLES.map((d) => Math.sin((d * Math.PI) / 180));
+/** MoveDef.holdAim, read structurally so this compiles before and after the field lands. */
+interface MaybeHoldAim { holdAim?: boolean }
+/** The ghost sword sits this far along the aim from the sword's spawn point; the pointer dots beyond. */
+const AIM_GHOST_DIST = 36;
+const AIM_DOT_FROM = 60;
+const AIM_DOT_STEP = 9;
+const AIM_DOTS = 3;
+const AIM_GHOST_ALPHA = 0.42;
+
+/** Reused result of aimHoldOf. */
+export interface AimHold { aim: number; def: ProjectileDef }
+const aimHoldOut: AimHold = { aim: 0, def: null as unknown as ProjectileDef };
+
+/**
+ * The aim of a fighter holding a holdAim move (paused on its hold frame, `charging`), with the
+ * aimed projectile it will throw, or null: on a tap the move never pauses, so there is no hold.
+ */
+export function aimHoldOf(fighter: FighterState): AimHold | null {
+  if (fighter.action !== 'attack' || fighter.moveId === null || !fighter.charging) return null;
+  const aim = fighter.aimDir;
+  if (aim === undefined || aim < 0 || aim >= AIM_ANGLES.length) return null;
+  const def = CHARACTER_DEFS[fighter.charId];
+  const move = def === undefined ? undefined : def.moves[fighter.moveId];
+  if (move === undefined || (move as MoveDef & MaybeHoldAim).holdAim !== true) return null;
+  const shots = move.projectiles;
+  if (shots === undefined) return null;
+  for (let s = 0; s < shots.length; s++) {
+    if (shots[s].aim !== true) continue;
+    aimHoldOut.aim = aim;
+    aimHoldOut.def = shots[s];
+    return aimHoldOut;
+  }
+  return null;
+}
+
+/**
+ * The aim hold: a faint ghost of the sword pointing where it would fly if released now, and a
+ * short dotted pointer beyond it. Drawn at the fighter's render position.
+ */
+function drawAimGhost(ctx: CanvasRenderingContext2D, fighter: FighterState, hold: AimHold, x: number, y: number): void {
+  const dx = AIM_COS[hold.aim] * fighter.facing;
+  const dy = -AIM_SIN[hold.aim];
+  const sx = x + hold.def.x * fighter.facing;
+  const sy = y + hold.def.y;
+  const prev = ctx.globalAlpha;
+  // A slow breath off the held-frame counter, so it holds still while paused.
+  const pulse = 0.85 + 0.15 * Math.sin(fighter.charge * 0.35);
+  const visual = getProjectileVisual(hold.def.id);
+  const owner = visual === null ? null : getCharVisual(visual.owner.charId, fighter.variant);
+  let name: string | null = null;
+  if (visual !== null) {
+    if (visual.anim !== null && visual.anim.frames.length > 0) name = visual.anim.frames[0];
+    else if (visual.frames.length > 0) name = visual.frames[0];
+  }
+  ctx.globalAlpha = prev * AIM_GHOST_ALPHA * pulse;
+  let drew = false;
+  if (owner !== null && name !== null) {
+    const gx = sx + dx * AIM_GHOST_DIST;
+    const gy = sy + dy * AIM_GHOST_DIST;
+    const left = dx < 0;
+    ctx.save();
+    ctx.translate(Math.round(gx), Math.round(gy));
+    ctx.rotate(left ? Math.atan2(-dy, -dx) : Math.atan2(dy, dx));
+    drew = drawCentered(ctx, owner.fxSheetId, name, 0, 0, left, 1);
+    ctx.restore();
+  }
+  const color = glowFor(fighter.variant, fighter.charId);
+  ctx.fillStyle = color;
+  if (!drew) {
+    // No sword art: a thin line of the ghost's length instead.
+    for (let k = 0; k < 8; k++) {
+      const d = AIM_GHOST_DIST - 10 + k * 3;
+      ctx.fillRect(Math.round(sx + dx * d) - 1, Math.round(sy + dy * d) - 1, 2, 2);
+    }
+  }
+  for (let k = 0; k < AIM_DOTS; k++) {
+    const d = AIM_DOT_FROM + k * AIM_DOT_STEP;
+    ctx.globalAlpha = prev * AIM_GHOST_ALPHA * pulse * (1 - k * 0.25);
+    ctx.fillRect(Math.round(sx + dx * d) - 1, Math.round(sy + dy * d) - 1, 2, 2);
+  }
+  ctx.globalAlpha = prev;
+}
+
 /** The beads a held charge gathers, drawn on top of the wind-up pose. */
 function drawChargeRing(
   ctx: CanvasRenderingContext2D,
@@ -470,6 +558,12 @@ export function drawFighterFx(
   const count = Math.min(state.fighters.length, posX.length, MAX_PLAYERS);
   for (let i = 0; i < count; i++) {
     const fighter = state.fighters[i];
+    const hold = aimHoldOf(fighter);
+    if (hold !== null) {
+      // Holding only aims: no charge ring or orb, just where the sword will go.
+      drawAimGhost(ctx, fighter, hold, posX[i], posY[i]);
+      continue;
+    }
     const orbVisual =
       fighter.action === 'attack' && fighter.moveId === 'nspecial'
         ? getCharVisual(fighter.charId, fighter.variant)

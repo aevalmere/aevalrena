@@ -4,7 +4,7 @@
   "worldWidth": 1080,
   "pad": 32,
   "paletteColors": 64,
-  "blastPad": [48,48,48,96],
+  "blastPad": [48,101,48,96],
   "collision": {
     "origin": [820,536],
     "platforms": [

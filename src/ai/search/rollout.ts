@@ -133,6 +133,7 @@ function copyProjectileInto(s: ProjectileState, d: ProjectileState): void {
   d.x = s.x; d.y = s.y; d.vx = s.vx; d.vy = s.vy;
   d.facing = s.facing; d.age = s.age; d.hitSlots = s.hitSlots; d.alive = s.alive;
   d.power = s.power; d.scale = s.scale; d.returned = s.returned; d.charge = s.charge ?? 0;
+  d.spawnX = s.spawnX ?? s.x; d.spawnY = s.spawnY ?? s.y;
 }
 
 function projectileAt(dp: ProjectileState[], i: number): ProjectileState {

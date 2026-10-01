@@ -18,8 +18,8 @@ import { HEARTHMOOR_BLAST, HEARTHMOOR_CAMERA_BOUNDS, HEARTHMOOR_PLATFORMS } from
  *   platform's left tip behind the well roof (unshifted stage pixels draw in
  *   front of shifted ones).
  * - cameraBounds = the painting's world rect { x: -530, y: -346, w: 1080, h: 608 }.
- * - blast = cameraBounds grown 48 left/top/right and 96 bottom
- *   { x: -578, y: -394, w: 1176, h: 752 }.
+ * - blast = cameraBounds grown 48 left/right, 101 top and 96 bottom
+ *   { x: -578, y: -447, w: 1176, h: 805 }, so the top blast line sits 447 above the floor like Tidegate.
  *
  * Spawns are the Tidegate layout scaled to this main platform (360 -> 596 px).
  */

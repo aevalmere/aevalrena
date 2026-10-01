@@ -166,9 +166,9 @@ function moveNumbers(def: CharacterDef, id: MoveId, shots: readonly ShotProfile[
     maxDamage: 0, advShield: NaN, safeShield: false, safeShieldMeasured: false,
     killPct: { ...NO_KILL }, killPctRecover: { ...NO_KILL },
     starterWindow: STARTER_PERCENTS.map(() => NaN),
-    chargeable: mv.chargeable === true, charge: null,
+    chargeable: mv.chargeable === true && mv.holdAim !== true, charge: null,
   };
-  if (mv.chargeable === true) info.charge = { maxFrames: TUNING.input.chargeMax, damageMul: 1 + TUNING.input.chargeBonus };
+  if (info.chargeable) info.charge = { maxFrames: TUNING.input.chargeMax, damageMul: 1 + TUNING.input.chargeBonus };
   if (!hasOutput(mv)) return info;
 
   let startup = Infinity;
@@ -235,7 +235,7 @@ function moveNumbers(def: CharacterDef, id: MoveId, shots: readonly ShotProfile[
   const lag = lagAfter(mv, lf);
   info.starterWindow = STARTER_PERCENTS.map((p) => hitstunOf(knockbackOf(p + ld, def.weight, ld, lbkb, lkbg)) - lag);
 
-  if (mv.chargeable === true && launcher === null && shots.length > 0 && shots[0].damage(0) > 0) {
+  if (info.chargeable && launcher === null && shots.length > 0 && shots[0].damage(0) > 0) {
     info.charge = { maxFrames: TUNING.input.chargeMax, damageMul: shots[0].damage(TUNING.input.chargeMax) / shots[0].damage(0) };
   }
   return info;

@@ -1,11 +1,13 @@
 import { TUNING } from '../core/constants';
 import type { GameState, MatchConfig, PerfSample, SimEvent } from '../core/types';
 import { animFrameIndex, frameNameFor } from './anim';
-import { getFrame, getShadowFrame } from './bake';
+import { CHARACTER_DEFS } from '../characters/registry';
+import type { MoveDef } from '../core/types';
+import { ECHO_PAD, echoClone, getFrame, getFrameAnchor, getShadowFrame } from './bake';
 import { COUNTER_DIM_FRAMES } from './fx';
 import { createRenderer } from './index';
 import { PALETTES, VARIANT_COUNT, VARIANT_NAMES, remapHex, remapRgb, rgbToHsl, variantNames } from './palette';
-import { getCharVisual } from './visuals';
+import { getCharVisual, getProjectileVisual } from './visuals';
 
 /**
  * Headless verification of the render effects that only show up in motion:
@@ -35,6 +37,8 @@ const QUIET_FRAME = 10;
 
 interface DrawRecord {
   image: object;
+  dx: number;
+  dy: number;
   sw: number;
   sh: number;
   dw: number;
@@ -145,7 +149,13 @@ class FakeContext {
       sh: image.height,
       dw: image.width,
       dh: image.height,
+      dx: args.length === 8 ? args[4] : args[0],
+      dy: args.length === 8 ? args[5] : args[1],
     };
+    if (args.length === 4) {
+      record.dw = args[2];
+      record.dh = args[3];
+    }
     if (args.length === 8) {
       record.sw = args[2];
       record.sh = args[3];
@@ -513,6 +523,313 @@ export function characterPaletteChecks(): RenderTestResult[] {
   return out;
 }
 
+/**
+ * The clone bake is a darkened copy, not a silhouette: a row of [dark armour, lighter armour,
+ * empty, bright violet, cutter-marked glow at alpha 254]. Both armour pixels go dark at about 0.9
+ * alpha and the lighter plate stays lighter (the shading survives); both glow pixels stay violet;
+ * the rim rings the whole opaque mask, the glow included.
+ */
+export function cloneBakeChecks(): RenderTestResult[] {
+  const src = new Uint8ClampedArray([
+    0x3a, 0x20, 0x60, 255,
+    0x6a, 0x4a, 0x90, 255,
+    0, 0, 0, 0,
+    0xb0, 0x70, 0xff, 255,
+    0x6a, 0x30, 0xc0, 254,
+  ]);
+  const shadow: [number, number, number] = [0x2a, 0x16, 0x40];
+  const rim: [number, number, number] = [0xb0, 0x70, 0xff];
+  const out = echoClone(src, 5, 1, shadow, rim, 0, 'trekmore');
+  const W = 7;
+  const px = (x: number, y: number): number[] => {
+    const o = (y * W + x) * 4;
+    return [out[o], out[o + 1], out[o + 2], out[o + 3]];
+  };
+  const hsl = [0, 0, 0];
+  const lightOf = (p: number[]): number => {
+    rgbToHsl(p[0], p[1], p[2], hsl);
+    return hsl[2];
+  };
+  const dark = px(1, 1);
+  const lighter = px(2, 1);
+  const glow = px(4, 1);
+  const marked = px(5, 1);
+  const darkOk =
+    lightOf(dark) < 0.22 && lightOf(lighter) < 0.3 && lightOf(lighter) > lightOf(dark) &&
+    dark[3] === 230 && lighter[3] === 230;
+  const glowOk = glow[2] > 150 && glow[2] > glow[1] && glow[3] === 217 && marked[2] > 100 && marked[3] === 216;
+  const rimOk = px(0, 1)[3] > 0 && px(3, 1)[3] > 0 && px(4, 0)[3] > 0 && px(6, 1)[3] > 0 && px(0, 0)[3] === 0;
+  return [{
+    name: 'clone bake is a darkened copy that keeps shading and glow, rimmed all round',
+    pass: darkOk && glowOk && rimOk,
+    detail:
+      'armour ' + dark.join(',') + ' (light ' + lightOf(dark).toFixed(2) + '), lighter plate ' + lighter.join(',') +
+      ' (light ' + lightOf(lighter).toFixed(2) + '), glow ' + glow.join(',') + ', marked glow ' + marked.join(',') +
+      ', rim left/gap/above glow/right a=' + px(0, 1)[3] + '/' + px(3, 1)[3] + '/' + px(4, 0)[3] + '/' + px(6, 1)[3],
+  }];
+}
+
+// ---------------- Trekmore: clone, hidden frames, sprite particles ----------------
+
+function drawOf(log: CallLog, image: object | null): DrawRecord | null {
+  if (image === null) return null;
+  for (let i = 0; i < log.draws.length; i++) if (log.draws[i].image === image) return log.draws[i];
+  return null;
+}
+
+/** MoveDef.hiddenFrames read structurally (the SIM worker owns the field). */
+interface HiddenMove { hiddenFrames?: [number, number] }
+
+/**
+ * Fighter 0 as Trekmore: the shadow clone darts out of his body to its latched point and then
+ * plays there, from a baked clone 1 px larger on each side (the rim); a move's hiddenFrames skip
+ * the body; a swing's sprite particles spawn once per sim frame (not again on a repeat render);
+ * a Trekmore counter draws no counter flash.
+ */
+function trekmoreChecks(
+  state: GameState,
+  renderFrame: (frame: number, events: SimEvent[]) => CallLog,
+  at: number
+): RenderTestResult[] {
+  const out: RenderTestResult[] = [];
+  const f = state.fighters[0];
+  const savedChar = f.charId;
+  f.charId = 'trekmore';
+  f.x = 0;
+  f.y = 0;
+  f.facing = 1;
+  f.action = 'idle';
+  f.actionFrame = 0;
+  f.moveId = null;
+  f.echoMove = null;
+  const def = CHARACTER_DEFS.trekmore;
+  const visual = getCharVisual('trekmore', 0);
+  if (def === undefined || visual === null) {
+    f.charId = savedChar;
+    return [{ name: 'Trekmore render checks', pass: false, detail: 'no Trekmore def or visual' }];
+  }
+
+  // Clone: utilt's echo, latched 30 px in front of him (the sim's travel-direction latch). One
+  // frame into its delay it is darting out of his body (between him and the point, still near
+  // him), then playing on the point (age 4).
+  const utilt = def.moves.utilt;
+  const delay = utilt.echo === undefined ? 0 : utilt.echo.delayFrames;
+  const anim = visual.sprites.anims[visual.sprites.animFor('attack', 'utilt', f)];
+  const echoX = 30;
+  f.echoMove = 'utilt';
+  f.echoX = echoX;
+  f.echoY = 0;
+  f.echoFacing = 1;
+  f.echoAge = -delay + 1;
+  const firstName = anim === undefined ? '' : anim.frames[animFrameIndex(anim, 0)];
+  const glideCanvas = getShadowFrame(visual.baseBodySheetId, firstName, false, 0, 'trekmore');
+  const plain = getFrame(visual.baseBodySheetId, firstName, false, false);
+  const anchor = getFrameAnchor(visual.baseBodySheetId, firstName, false);
+  const ax = anchor === null ? 0 : anchor.ax;
+  const gliding = renderFrame(at, []);
+  const glide = drawOf(gliding, glideCanvas as unknown as object);
+  const glideX = glide === null ? NaN : glide.dx + ax + ECHO_PAD;
+  f.echoAge = 4;
+  const playName = anim === undefined ? '' : anim.frames[animFrameIndex(anim, 4)];
+  const playCanvas = getShadowFrame(visual.baseBodySheetId, playName, false, 0, 'trekmore');
+  const playAnchor = getFrameAnchor(visual.baseBodySheetId, playName, false);
+  const playAx = playAnchor === null ? 0 : playAnchor.ax;
+  const playing = renderFrame(at + 1, []);
+  const play = drawOf(playing, playCanvas as unknown as object);
+  // The sim moves the point with him: he and the point both 50 px on, the clone follows.
+  const MOVED = 50;
+  f.x = MOVED;
+  f.echoX = MOVED + echoX;
+  const movedLog = renderFrame(at + 2, []);
+  const moved = drawOf(movedLog, playCanvas as unknown as object);
+  f.echoAge = -delay + 1;
+  const movedGlide = drawOf(renderFrame(at + 3, []), glideCanvas as unknown as object);
+  const movedGlideX = movedGlide === null ? NaN : movedGlide.dx + ax + ECHO_PAD;
+  f.x = 0;
+  f.echoX = echoX;
+  out.push({
+    name: 'Trekmore clone darts out of his body to its point in front, plays there, and moves with him',
+    pass:
+      glide !== null && play !== null && plain !== null && glideCanvas !== null &&
+      glideCanvas.width === plain.width + 2 * ECHO_PAD && glideCanvas.height === plain.height + 2 * ECHO_PAD &&
+      delay > 1 && glideX > 1 && glideX < echoX - 1 &&
+      play.dx === Math.round(echoX - playAx - ECHO_PAD) &&
+      moved !== null && moved.dx === Math.round(MOVED + echoX - playAx - ECHO_PAD) &&
+      Math.abs(movedGlideX - MOVED - glideX) < 1.01,
+    detail:
+      'dart at x ' + glideX.toFixed(1) + ' between 0 (his body) and ' + echoX + ' (his point) on delay frame 1 of ' + delay + '; moved ' + MOVED + ' px with him: dart at ' +
+      movedGlideX.toFixed(1) + ', playing at dx ' + (moved === null ? 'none' : moved.dx) + '; clone ' +
+      (glideCanvas === null ? 'none' : glideCanvas.width + 'x' + glideCanvas.height) + ' for frame ' +
+      (plain === null ? 'none' : plain.width + 'x' + plain.height) + ', playing at dx ' + (play === null ? 'none' : play.dx),
+  });
+  f.echoMove = null;
+
+  // Hidden frames: uspecial's body is skipped inside hiddenFrames.
+  const uspecial = def.moves.uspecial as MoveDef & HiddenMove;
+  const patched = uspecial.hiddenFrames === undefined;
+  if (patched) uspecial.hiddenFrames = [10, 21];
+  const range = uspecial.hiddenFrames as [number, number];
+  f.action = 'attack';
+  f.moveId = 'uspecial';
+  f.onBranch = false;
+  f.actionFrame = range[0] + 2;
+  const hiddenBody = bodyCanvasFor(state, 0, false);
+  const hiddenLog = renderFrame(at + 2, []);
+  f.actionFrame = range[1] + 12;
+  const shownBody = bodyCanvasFor(state, 0, false);
+  const shownLog = renderFrame(at + 3, []);
+  if (patched) delete uspecial.hiddenFrames;
+  out.push({
+    name: 'hiddenFrames skip the body draw',
+    pass: hiddenBody !== null && !drewCanvas(hiddenLog, hiddenBody) && drewCanvas(shownLog, shownBody),
+    detail:
+      'frames ' + range[0] + ' to ' + range[1] + (patched ? ' (patched in: the move has none yet)' : '') +
+      ', body drawn at ' + (range[0] + 2) + ': ' + drewCanvas(hiddenLog, hiddenBody) + ', at ' + (range[1] + 12) + ': ' +
+      drewCanvas(shownLog, shownBody),
+  });
+
+  // Aim hold: nspecial held on its hold frame (charging, aimDir up) draws a faint ghost of the
+  // sword; the same frame not held (a tap) draws none.
+  const nspecial = def.moves.nspecial as MoveDef & { holdAim?: boolean };
+  const aimPatched = nspecial.holdAim === undefined;
+  if (aimPatched) nspecial.holdAim = true;
+  const swordVisual = getProjectileVisual('shadowSword');
+  const swordName =
+    swordVisual === null ? '' : swordVisual.anim !== null && swordVisual.anim.frames.length > 0 ? swordVisual.anim.frames[0] : swordVisual.frames.length > 0 ? swordVisual.frames[0] : '';
+  const swordCanvas = swordVisual === null ? null : getFrame(swordVisual.owner.fxSheetId, swordName, false, false);
+  f.action = 'attack';
+  f.moveId = 'nspecial';
+  f.onBranch = false;
+  f.actionFrame = 8;
+  f.charging = true;
+  f.charge = 10;
+  f.aimDir = 2;
+  const heldLog = renderFrame(at + 4, []);
+  f.charging = false;
+  f.charge = 0;
+  const tapLog = renderFrame(at + 5, []);
+  if (aimPatched) delete nspecial.holdAim;
+  const heldGhost = swordCanvas !== null && drewCanvas(heldLog, swordCanvas as unknown as object);
+  const tapGhost = swordCanvas !== null && drewCanvas(tapLog, swordCanvas as unknown as object);
+  out.push({
+    name: 'nspecial aim hold draws a ghost sword, a tap does not',
+    pass: heldGhost && !tapGhost,
+    detail:
+      'sword frame ' + (swordName === '' ? 'none' : swordName) + (aimPatched ? ' (holdAim patched in: the move has none yet)' : '') +
+      ', held (aim up): ' + heldGhost + ', not held: ' + tapGhost,
+  });
+
+  // Swing particles: utilt's first active frame spawns; a repeat render spawns nothing more.
+  f.action = 'idle';
+  f.moveId = null;
+  f.actionFrame = 0;
+  const quiet = renderFrame(at + 40, []);
+  let firstActive = -1;
+  for (const hb of utilt.hitboxes) if (firstActive < 0 || hb.start < firstActive) firstActive = hb.start;
+  f.action = 'attack';
+  f.moveId = 'utilt';
+  f.actionFrame = firstActive;
+  const swing = renderFrame(at + 41, []);
+  const again = renderFrame(at + 41, []);
+  const cost = (l: CallLog): number => l.draws.length + l.fillRects;
+  out.push({
+    name: 'Trekmore swing particles spawn once per sim frame',
+    pass: cost(swing) > cost(quiet) + 1 && cost(again) === cost(swing),
+    detail: cost(quiet) + ' draws+fills idle, ' + cost(swing) + ' on utilt frame ' + firstActive + ', ' + cost(again) + ' on a repeat render',
+  });
+
+  // Dash attack impact: its first active frame bursts at the thrust tip (spikes, shards, motes,
+  // the flash), far more than the frame before it.
+  f.moveId = 'dashatk';
+  f.actionFrame = 10;
+  const preImpact = renderFrame(at + 42, []);
+  f.actionFrame = 11;
+  const impact = renderFrame(at + 43, []);
+  f.action = 'idle';
+  f.moveId = null;
+  f.actionFrame = 0;
+  out.push({
+    name: 'Trekmore dash attack bursts at the thrust tip on its first active frame',
+    pass: cost(impact) >= cost(preImpact) + 20,
+    detail: cost(preImpact) + ' draws+fills on dashatk frame 10, ' + cost(impact) + ' on frame 11',
+  });
+
+  // Blink: none inside the counter branch's invuln window (an attack's own window); an idle
+  // fighter with the same invuln still blinks.
+  const dspecial = def.moves.dspecial;
+  const invWin = dspecial.invuln;
+  let branchDrawn = 0;
+  let idleDrawn = 0;
+  const BLINK_RENDERS = 8;
+  if (invWin !== undefined) {
+    f.action = 'attack';
+    f.moveId = 'dspecial';
+    f.onBranch = true;
+    f.actionFrame = invWin[0] + 4;
+    f.invuln = 10;
+    const branchBody = bodyCanvasFor(state, 0, false);
+    for (let k = 0; k < BLINK_RENDERS; k++) if (drewCanvas(renderFrame(at + 70 + k, []), branchBody)) branchDrawn++;
+    f.action = 'idle';
+    f.moveId = null;
+    f.onBranch = false;
+    f.actionFrame = 0;
+    const idleBody = bodyCanvasFor(state, 0, false);
+    for (let k = 0; k < BLINK_RENDERS; k++) if (drewCanvas(renderFrame(at + 80 + k, []), idleBody)) idleDrawn++;
+    f.invuln = 0;
+  }
+  out.push({
+    name: 'no invuln blink inside an attack own invuln window, blink elsewhere',
+    pass: invWin !== undefined && branchDrawn === BLINK_RENDERS && idleDrawn < BLINK_RENDERS && idleDrawn > 0,
+    detail:
+      'counter branch frame ' + (invWin === undefined ? '?' : invWin[0] + 4) + ' with invuln: body on ' + branchDrawn + '/' +
+      BLINK_RENDERS + ' renders; idle with invuln: ' + idleDrawn + '/' + BLINK_RENDERS,
+  });
+
+  // Counter: no counter flash canvas for Trekmore.
+  f.action = 'idle';
+  f.moveId = null;
+  const flashes: object[] = [];
+  const clip = visual.clips.get('counterFlash');
+  if (clip !== undefined) {
+    for (const name of clip.frames) {
+      const c = getFrame(visual.fxSheetId, name, false, false);
+      if (c !== null) flashes.push(c as unknown as object);
+    }
+  }
+  const counter: SimEvent[] = [{ type: 'counter', x: 0, y: -20, slot: 0, attacker: 1 }];
+  // His sheet has no counterFlash any more, so also count draws: the counter frames must issue
+  // exactly the drawImage calls of a quiet frame (no clip, no stand-in of any kind). Particle pools
+  // age per render, so render quiet frames until the swing particles above have all died.
+  let quietDraws = -1;
+  let steady = 0;
+  for (let q = 0; q < 240 && steady < 8; q++) {
+    const n = renderFrame(at + 100 + q, []).draws.length;
+    steady = n === quietDraws ? steady + 1 : 0;
+    quietDraws = n;
+  }
+  let flashed = false;
+  const counterDraws: number[] = [];
+  for (let k = 0; k <= 3; k++) {
+    const log = renderFrame(at + 400 + k, k === 0 ? counter : []);
+    counterDraws.push(log.draws.length);
+    for (const c of flashes) if (drewCanvas(log, c)) flashed = true;
+  }
+  const extraDraws = counterDraws.some((n) => n !== quietDraws);
+  out.push({
+    name: 'a Trekmore counter draws no counter flash',
+    pass: !flashed && !extraDraws,
+    detail:
+      flashes.length + ' counterFlash frames in his fx sheet, drawn: ' + flashed +
+      '; draws quiet ' + quietDraws + ', on the counter and after ' + counterDraws.join(','),
+  });
+
+  f.charId = savedChar;
+  f.action = 'idle';
+  f.moveId = null;
+  f.actionFrame = 0;
+  return out;
+}
+
 // ---------------- the test ----------------
 
 export interface RenderTestResult {
@@ -645,6 +962,8 @@ export async function runRenderTest(): Promise<RenderTestResult[]> {
   const debugQuiet = renderDebugFrame(counterAt + 20, noEvents);
   const debugCounter = renderDebugFrame(counterAt + 21, counter);
 
+  const shadow = trekmoreChecks(state, renderFrame, counterAt + 40);
+
   return [
     {
       name: 'screen shake fires on the hit frame and decays to zero',
@@ -702,6 +1021,7 @@ export async function runRenderTest(): Promise<RenderTestResult[]> {
         quietBeforeCounter.bigFills + ' full-view fills quiet, ' + onCounter.bigFills + ' on the counter; frame data view ' +
         debugQuiet.bigFills + ' quiet, ' + debugCounter.bigFills + ' on the counter',
     },
+    ...shadow,
     {
       name: 'parallax layers scale with camera zoom',
       pass: baseline.scales.length > 0 && Math.abs(zoomScale - zoomMax) < 1e-6,
@@ -712,7 +1032,7 @@ export async function runRenderTest(): Promise<RenderTestResult[]> {
 }
 
 if (typeof process !== 'undefined' && process.argv[1] && process.argv[1].endsWith('rendertest.ts')) {
-  const results = [...paletteChecks(), ...characterPaletteChecks(), ...(await runRenderTest())];
+  const results = [...paletteChecks(), ...characterPaletteChecks(), ...cloneBakeChecks(), ...(await runRenderTest())];
   let passed = 0;
   for (let i = 0; i < results.length; i++) {
     const r = results[i];

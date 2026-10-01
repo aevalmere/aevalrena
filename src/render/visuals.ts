@@ -81,7 +81,22 @@ export interface CharVisual {
   hitspark: string[];
   splash: string[];
   ko: string[];
+  /**
+   * Particle piece crops by family (PIECE_FAMILIES order: shard, smoke, mote, sliver, spike, dissolve smoke), the
+   * frame names the fx sheet has. An empty family draws rect particles (sprparticles.ts).
+   */
+  pieces: string[][];
 }
+
+/** Particle piece families and the fx names each one probes, in family order. */
+export const PIECE_FAMILIES: readonly (readonly string[])[] = [
+  ['pShard0', 'pShard1', 'pShard2', 'pShard3'],
+  ['pSmoke0', 'pSmoke1', 'pSmoke2', 'pSmoke3'],
+  ['pMote0', 'pMote1'],
+  ['pSliver0', 'pSliver1', 'pSliver2'],
+  ['pSpike0', 'pSpike1'],
+  ['pSmoke4', 'pSmoke5'],
+];
 
 /** A one-shot effect resolved once at load: frame names and sim-frame holds. */
 export interface FxClip {
@@ -164,6 +179,7 @@ export async function buildVisuals(): Promise<void> {
       hitspark: probeFrames(sprites.fx, 'hitspark'),
       splash: probeFrames(sprites.fx, 'splash'),
       ko: probeFrames(sprites.fx, 'ko'),
+      pieces: PIECE_FAMILIES.map((names) => resolvePieces(charId, sprites.fx, names)),
     };
     riseTiming(visual, charId);
     const stance = firstClip(charId, sprites.fx, STANCE_FX, DEFAULT_CLIP_HOLD);
@@ -204,6 +220,20 @@ export async function buildVisuals(): Promise<void> {
       }
     }
   }
+}
+
+/**
+ * The crops of one particle family the sheet has: for each name, the first frame of the fx anim
+ * of that name, else a sheet frame of that name. Missing names are skipped.
+ */
+function resolvePieces(charId: string, sheet: ImageSheetData, names: readonly string[]): string[] {
+  const out: string[] = [];
+  for (const name of names) {
+    const anim = fxAnim(charId, sheet, name);
+    if (anim !== null) out.push(anim.frames[0]);
+    else if (sheet.frames[name] !== undefined) out.push(name);
+  }
+  return out;
 }
 
 /**
@@ -304,6 +334,12 @@ function riseTiming(visual: CharVisual, charId: string): void {
   const move = def === undefined ? undefined : def.moves.uspecial;
   const velocity = move === undefined ? undefined : move.velocity;
   if (velocity === undefined) return;
+  // An up special that throws something (Trekmore's ascent sword) draws that projectile instead
+  // of a column left at the takeoff point.
+  const shots = move === undefined ? undefined : move.projectiles;
+  if (shots !== undefined) {
+    for (const shot of shots) if (shot.spawnFrame >= 0) return;
+  }
   for (const v of velocity) {
     if (v.setY === true) {
       visual.riseLaunch = v.frame;

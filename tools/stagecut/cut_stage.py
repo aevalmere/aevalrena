@@ -13,8 +13,8 @@ its full width is masks.json "worldWidth" world px, the main platform walk line
 painting's world rect is the camera bounds; the blast zone is that rect grown
 by blastPad (left, top, right, bottom). Both are written into geometry.ts.
 
-shiftY (world px, positive = down) on a stage-layer shape moves that piece's
-pixels down in the stage layer (behind the unshifted stage pixels); the same
+shiftY (world px, positive = down, negative = up) on a stage-layer shape moves
+that piece's pixels in the stage layer (behind the unshifted stage pixels); the same
 key on a collision platform moves its line. The place a piece leaves is filled
 in the back layers by the same diffusion as any other hidden pixel.
 
@@ -454,7 +454,12 @@ def main() -> None:
             for sy, sm in sorted(shifted.items()):
                 a_s = shift_rows(resize_mask(sm, w, h) >= 0.5, sy)
                 rgb_s = np.zeros_like(rgb)
-                rgb_s[sy:] = rgb[: h - sy] if sy > 0 else rgb
+                if sy > 0:
+                    rgb_s[sy:] = rgb[: h - sy]
+                elif sy < 0:
+                    rgb_s[: h + sy] = rgb[-sy:]
+                else:
+                    rgb_s[:] = rgb
                 put = a_s & ~out_a
                 out_rgb[put] = rgb_s[put]
                 out_a |= a_s

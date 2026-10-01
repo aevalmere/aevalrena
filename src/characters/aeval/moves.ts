@@ -330,7 +330,9 @@ const moves: Record<MoveId, MoveDef> = {
   dair: {
     id: 'dair', totalFrames: 30, landingLag: 20, airOnly: true, hitsLedge: true,
     bounceOnHit: DAIR_BOUNCE, dive: DAIR_DIVE,
-    hitboxes: [box(1, 6, 6, 4, -2, 12, 14, 275, 50, 80, 1)],
+    // Owner: the dive spike does not stun. Same damage and launch (still a meteor off stage), a
+    // quarter of the hitstun and never a tumble, so a grounded victim is pushed, not knocked down.
+    hitboxes: [{ ...box(1, 6, 6, 4, -2, 12, 14, 275, 50, 80, 1), hitstunScale: 0.25 }],
   },
 
   // Specials. Two projectiles, a rising recovery, a multi-hit trap.

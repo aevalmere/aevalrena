@@ -1,6 +1,6 @@
 import type { ImageSheetData } from '../core/types';
 import { WHITE } from './colors';
-import { VARIANT_COUNT as COLOUR_VARIANTS, paletteOf, remapPixels } from './palette';
+import { VARIANT_COUNT as COLOUR_VARIANTS, paletteOf, remapHex, remapPixels, hslToRgb, remapRgb, rgbToHsl } from './palette';
 
 /**
  * Sprite baker. A character ships one packed PNG atlas; at load we decode it
@@ -357,32 +357,106 @@ export function getFrame(
   return entry.variants[v];
 }
 
-/** Echo shadow: opaque pixels keep this share of alpha, edge pixels (alpha < 255) EDGE share. */
-const ECHO_SHADOW_ALPHA = 0.62;
-const ECHO_SHADOW_EDGE = 0.4;
+/**
+ * Echo clone (docs/TREKMORE_POLISH.md Render 3): a darkened copy of the sprite, a shadow knight
+ * whose armour plates, cape tatters and sword stay readable, swinging a real glowing slash.
+ * - Dark pixels keep their relative shading: lightness scaled to ECHO_LIGHT_SCALE over a small
+ *   floor, hue pulled ECHO_HUE_PULL of the way and saturation ECHO_SAT_PULL of the way toward the
+ *   palette's shadow colour, at ECHO_BODY_ALPHA (edge pixels at that share of their own alpha).
+ * - Bright pixels (lightness >= GLOW_MIN_LIGHT) and cutter-marked glow (alpha 254) stay glow: the
+ *   pixel in the variant's colours pulled GLOW_TINT toward the glow colour, at GLOW_STRENGTH
+ *   brightness and alpha. That keeps the slash arcs' bright cores.
+ * - A 1 px rim in the glow colour rings the whole opaque mask.
+ * Every pixel is computed from its own colour only, so there are no hard region edges.
+ */
+const ECHO_BODY_ALPHA = 0.9;
+const ECHO_LIGHT_SCALE = 0.5;
+const ECHO_LIGHT_FLOOR = 0.05;
+const ECHO_HUE_PULL = 0.6;
+const ECHO_SAT_PULL = 0.5;
+const ECHO_RIM_ALPHA = 0.6;
+const ECHO_MIN_ALPHA = 24;
+/** The sheet cutter marks detached glow pixels with this alpha. */
+const GLOW_MARK_ALPHA = 254;
+const GLOW_MIN_LIGHT = 0.45;
+const GLOW_TINT = 0.35;
+const GLOW_STRENGTH = 0.85;
 
-/** Every opaque pixel in `rgb`, alpha scaled for the translucent echo. */
-function echoShadow(
+/** Hue `from` moved `t` of the way toward `to` along the short way round, in degrees. */
+function pullHue(from: number, to: number, t: number): number {
+  let d = (to - from) % 360;
+  if (d > 180) d -= 360;
+  if (d < -180) d += 360;
+  const h = from + d * t;
+  return h < 0 ? h + 360 : h >= 360 ? h - 360 : h;
+}
+
+/**
+ * The clone of `pixels` (w x h) on a buffer 2 px wider and taller: source (x, y) lands at
+ * (x + 1, y + 1). `shadow` is the palette's shadow colour and `rim` the glow colour, both already
+ * for the variant; `variant` and `charId` remap the source pixels.
+ */
+export function echoClone(
   pixels: Uint8ClampedArray,
-  rgb: [number, number, number]
+  w: number,
+  h: number,
+  shadow: [number, number, number],
+  rim: [number, number, number],
+  variant: number,
+  charId: string
 ): Uint8ClampedArray<ArrayBuffer> {
-  const out = new Uint8ClampedArray(pixels.length);
-  for (let i = 0; i < pixels.length; i += 4) {
-    const a = pixels[i + 3];
-    if (a === 0) continue;
-    out[i] = rgb[0];
-    out[i + 1] = rgb[1];
-    out[i + 2] = rgb[2];
-    out[i + 3] = Math.round(a === 255 ? a * ECHO_SHADOW_ALPHA : a * ECHO_SHADOW_EDGE);
+  const W = w + 2;
+  const H = h + 2;
+  const out = new Uint8ClampedArray(W * H * 4);
+  const rgb = [0, 0, 0];
+  const hsl = [0, 0, 0];
+  const sh = [0, 0, 0];
+  rgbToHsl(shadow[0], shadow[1], shadow[2], sh);
+  const opaque = (x: number, y: number): boolean =>
+    x >= 0 && x < w && y >= 0 && y < h && pixels[(y * w + x) * 4 + 3] >= ECHO_MIN_ALPHA;
+  for (let oy = 0; oy < H; oy++) {
+    for (let ox = 0; ox < W; ox++) {
+      const x = ox - 1;
+      const y = oy - 1;
+      const o = (oy * W + ox) * 4;
+      if (opaque(x, y)) {
+        const i = (y * w + x) * 4;
+        const a = pixels[i + 3];
+        remapRgb(pixels[i], pixels[i + 1], pixels[i + 2], variant, rgb, charId);
+        rgbToHsl(rgb[0], rgb[1], rgb[2], hsl);
+        if (a === GLOW_MARK_ALPHA || hsl[2] >= GLOW_MIN_LIGHT) {
+          for (let c = 0; c < 3; c++) out[o + c] = Math.round((rgb[c] + (rim[c] - rgb[c]) * GLOW_TINT) * GLOW_STRENGTH);
+          out[o + 3] = Math.round(a * GLOW_STRENGTH);
+          continue;
+        }
+        const hue = pullHue(hsl[0], sh[0], ECHO_HUE_PULL);
+        const sat = hsl[1] + (sh[1] - hsl[1]) * ECHO_SAT_PULL;
+        const light = ECHO_LIGHT_FLOOR + hsl[2] * ECHO_LIGHT_SCALE;
+        hslToRgb(hue, sat, light, rgb);
+        out[o] = rgb[0];
+        out[o + 1] = rgb[1];
+        out[o + 2] = rgb[2];
+        out[o + 3] = Math.round((a === 255 ? 255 : a) * ECHO_BODY_ALPHA);
+      } else if (opaque(x - 1, y) || opaque(x + 1, y) || opaque(x, y - 1) || opaque(x, y + 1)) {
+        out[o] = rim[0];
+        out[o + 1] = rim[1];
+        out[o + 2] = rim[2];
+        out[o + 3] = Math.round(255 * ECHO_RIM_ALPHA);
+      }
+    }
   }
   return out;
 }
 
+/** Pixels an echo clone canvas extends past its frame on every side: add it to the frame anchor. */
+export const ECHO_PAD = 1;
+
 /**
- * The shadow echo copy of a frame (TREKMORE_PLAN C.3): the frame's silhouette in `charId`'s
- * shadow colour for `variant`, translucent. Baked the first time a (frame, variant, flip) is
- * asked for and cached on the frame, so every later draw is one drawImage of a stored canvas.
- * Pass the base body sheet id: the silhouette does not depend on the palette swap.
+ * The shadow echo clone of a frame (echoClone): a darkened copy with glowing slashes and a glow
+ * rim, in `charId`'s colours for `variant`, on a canvas ECHO_PAD px larger on every side (draw it
+ * at the frame anchor plus ECHO_PAD). Baked the first time a (frame, variant, flip) is asked for
+ * and cached on the frame, so every later draw is one drawImage of a stored canvas. Pass the base
+ * body sheet id: the variant is applied here.
  */
 export function getShadowFrame(
   sheetId: string,
@@ -407,8 +481,13 @@ export function getShadowFrame(
   const src = entry.variants[flipped ? VARIANT_FLIP : 0];
   if (src === null) return null;
   const pixels = context2d(src).getImageData(0, 0, src.width, src.height).data;
-  const shadowHex = paletteOf(charId).shadow[v];
-  const baked = canvasFrom(echoShadow(pixels, parseHex(shadowHex === undefined ? '#2a1640' : shadowHex)), src.width, src.height);
+  const palette = paletteOf(charId);
+  const shadowHex = palette.shadow[v];
+  const shade = parseHex(shadowHex === undefined ? '#2a1640' : shadowHex);
+  const rim = parseHex(remapHex(palette.glow, v, charId));
+  const W = src.width + ECHO_PAD * 2;
+  const H = src.height + ECHO_PAD * 2;
+  const baked = canvasFrom(echoClone(pixels, src.width, src.height, shade, rim, v, charId), W, H);
   list[slot] = baked;
   return baked;
 }

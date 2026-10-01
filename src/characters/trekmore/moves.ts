@@ -41,27 +41,56 @@ function forwardChain(
   return out;
 }
 
-/** The raised sword's column (utilt, usmash): x of the blade over the heel. */
-const SWORD_X = 4;
+/**
+ * Centre of the overhead crescent (the uspec_g_12..17 swing) that utilt, usmash and uair share.
+ * Round 2 QA (owner): the up attacks are back on this art, so these are the polish-wave hitboxes.
+ */
+const ARC_CX = 6;
+const ARC_CY = -34;
+/** The drawn crescent runs from up-behind (120 degrees) over the top to in front and slightly down (-20). */
+const ARC_FROM = 120;
+const ARC_TO = -20;
+/**
+ * Per-move spans (polish balance pass). utilt keeps the whole drawn crescent. usmash stops at 75
+ * degrees: to -20 at radius 50 it reached 67 px forward and the CPU used it as a forward kill move
+ * (41 to 46 percent of his KOs); to 75 it is an anti-air again (front edge x 33, about 20 percent).
+ * uair runs 140 to 20, overhead.
+ */
+const UT_FROM = ARC_FROM, UT_TO = ARC_TO, UT_KBG = 80;
+const US_FROM = ARC_FROM, US_TO = 75;
+const UA_FROM = 140, UA_TO = 20;
 
 /**
- * An upward sword column: `r` circles every `r` px from the top of the head circle (fromY) up,
- * the last one placed so its top edge sits exactly on `top`. Same window and group as the head
- * circle, so a target is hit once.
+ * The overhead crescent as circles of radius `r` on a circle of radius `radius` around
+ * (ARC_CX, ARC_CY), one every `r` px of arc from `from` to `to` degrees (0 = forward,
+ * 90 = straight up), both ends included. Same window and group, so a target is hit once.
+ * Centres are rounded to whole px at module load, so the sim never sees a trig result
+ * (an ulp of cos that differs between engines cannot move a hitbox).
  */
-function swordColumn(
-  firstId: number, start: number, end: number, fromY: number, r: number, top: number,
+function overheadArc(
+  firstId: number, start: number, end: number, radius: number, r: number, from: number, to: number,
   damage: number, angle: number, bkb: number, kbg: number, group: number,
 ): HitboxDef[] {
+  const span = ((from - to) * Math.PI) / 180;
+  const n = Math.max(1, Math.ceil((span * radius) / r));
   const out: HitboxDef[] = [];
-  let id = firstId;
-  let y = fromY;
-  for (; y - r > top; y -= r) out.push(box(id++, start, end, SWORD_X, y, r, damage, angle, bkb, kbg, group));
-  out.push(box(id, start, end, SWORD_X, top + r, r, damage, angle, bkb, kbg, group));
+  for (let i = 0; i <= n; i++) {
+    const deg = from - ((from - to) * i) / n;
+    const a = (deg * Math.PI) / 180;
+    const x = Math.round(ARC_CX + Math.cos(a) * radius);
+    const y = Math.round(ARC_CY - Math.sin(a) * radius);
+    out.push(box(firstId + i, start, end, x, y, r, damage, angle, bkb, kbg, group));
+  }
   return out;
 }
 
-/** The shadow echo every normal and aerial carries: half damage, group 1 unless noted. */
+/**
+ * The shadow echo every normal and aerial carries: half damage, group 1 unless noted. Round 2:
+ * offsetX is px along his travel at move frame 0 (his facing when nearly still), and every offset
+ * is positive so the shadow strikes from in front of him. Each was picked in 10 to 24 from an echo
+ * connect sweep (spacing, height, percent, standing and drifting): larger offsets follow a victim
+ * the owner's hit pushed away, so every move's rate rises with the offset up to about 20.
+ */
 function echo(delayFrames: number, offsetX: number, groups: number[] = [1]): EchoDef {
   return { delayFrames, damageScale: 0.5, offsetX, groups };
 }
@@ -72,11 +101,49 @@ function echo(delayFrames: number, offsetX: number, groups: number[] = [1]): Ech
  * -6.5 at 8 and +0.3 to 20. The plan's -7.2 rose 102.5 px against Aeval's 82.3 (1.245x); -6.85
  * rises 91.2 px, the plan's 1.1x height target (selftest "Trekmore uspecial" prints it).
  */
+/**
+ * ascentSword flight (polish wave), measured on the ground from the move's start point. The body
+ * (ascentVelocity above, unchanged) is still until frame 10 and stands at (12.4, -69.6) after
+ * frame 22's step; his raised hand there is (+8, -60) from the feet, so (20.4, -129.6). The sword
+ * spawns on frame 8 at the throwing hand (4, -50), is stepped 14 times (lifetime 14, it dies on
+ * frame 21's step) and moves 14 * vy + 91 * gravity vertically: -7.3 and 0.25 give -79.45, dying
+ * at (20.8, -129.45), within 0.4 px of the hand. Gravity 0.25 is the body's own rise deceleration,
+ * so after the body launches the sword stays 4 px above the hand the whole way up (it leads), and
+ * its last step (-4.05) matches the body's (-4.1 to -3.85), so he rematerializes out of it without
+ * a jump. In the air the body falls about 9 px before frame 10, so the meeting point is 9 px low.
+ */
+const ASC_X = 4;
+const ASC_Y = -50;
+const ASC_VY = -7.3;
+const ASC_G = 0.25;
+
 function ascentVelocity(): NonNullable<MoveDef['velocity']> {
   const out: NonNullable<MoveDef['velocity']> = [{ frame: 10, vx: 1.2, setX: true, vy: -6.85, setY: true }];
   for (let frame = 11; frame <= 30; frame++) out.push({ frame, vy: 0.25 });
   return out;
 }
+
+/**
+ * Sword Ascent's thrown sword (polish wave). Spawns on move frame 8 at the throwing hand and flies
+ * straight up with the body's 1.2 px/frame forward drift, decelerating, so it leads the body the
+ * whole way and dies (lifetime 14) where his raised hand is on frame 22: he rematerializes out of
+ * it (numbers at ASC_X above). It carries the old rising drag hit.
+ */
+const ascentSword: ProjectileDef = {
+  id: 'ascentSword',
+  spawnFrame: 8,
+  x: ASC_X, y: ASC_Y,
+  vx: 1.2, vy: ASC_VY,
+  gravity: ASC_G,
+  lifetime: 14,
+  r: 16,
+  damage: 3, angle: 90, bkb: 60, kbg: 30,
+  strength: 2,
+  destroyOnHit: false,
+  sprite: 'swordUp',
+  animFps: 12,
+  fixedScale: true,
+};
 
 /**
  * The sword's burst: where the sword dies (a hit or the end of its flight) a spike of shadow
@@ -90,31 +157,33 @@ const shadowBurst: ProjectileDef = {
   gravity: 0,
   lifetime: 12,
   r: 22,
-  damage: 5, angle: 60, bkb: 30, kbg: 50,
+  damage: 4, angle: 60, bkb: 30, kbg: 50,
   strength: 3,
-  charged: { damage: 9 },
   destroyOnHit: false,
   sprite: 'shadowBurst',
   animFps: 18,
 };
 
 /**
- * Shadow Sword (plan D.5). Aimed on the release frame (forward, up-forward, up, down-forward,
- * down), fixed size at every charge. Charged kbg 43 (plan 62, which killed at 73): 119. Tap: leaves on frame 14 of 30, 28 frames at 5 px/frame is
- * 140 px of travel. Full charge (chargeCastFrames 8): leaves on 22 of 38, 62 frames at 6 px/frame
- * is 372 px. One at a time: while it flies, a second Special press is the recall.
+ * Shadow Sword (plan D.5, polish wave). A fast cast that no longer charges: aimed on the start
+ * frame (forward, up-forward, up, down-forward, down), it leaves on frame 9 of 34 and flies 45
+ * frames at 8 px/frame, 360 px. Damage grows with the distance flown: 4 at the hand, +1 per 36 px,
+ * capped at 11 (reached at 252 px; 13 in the contract, trimmed in the balance pass), and bkb 30
+ * gains 0.05 per px (48 at the full 360). kbg 43 is
+ * the old full-charge value, which killed a fresh Aeval near 119 with 12 damage and bkb 40.
+ * One at a time: while it flies, a second Special press is the recall.
  */
 const shadowSword: ProjectileDef = {
   id: 'shadowSword',
-  spawnFrame: 14,
+  spawnFrame: 9,
   x: 20, y: -26,
-  vx: 5.0, vy: 0,
+  vx: 8.0, vy: 0,
   gravity: 0,
-  lifetime: 28,
+  lifetime: 45,
   r: 10,
-  damage: 7, angle: 40, bkb: 30, kbg: 55,
+  damage: 4, angle: 40, bkb: 30, kbg: 43,
   strength: 3,
-  charged: { vx: 6.0, lifetime: 62, damage: 12, bkb: 40, kbg: 43, strength: 6 },
+  distanceScale: { damagePerPx: 1 / 36, maxDamage: 11, bkbPerPx: 0.05 },
   destroyOnHit: true,
   sprite: 'shadowSword',
   animFps: 15,
@@ -122,6 +191,8 @@ const shadowSword: ProjectileDef = {
   aim: true,
   fixedScale: true,
   onePerOwner: true,
+  // Round 2 QA: a down or down-forward throw on the ground used to fly through the floor.
+  dieOnGround: true,
 };
 
 const moves: Record<MoveId, MoveDef> = {
@@ -132,25 +203,33 @@ const moves: Record<MoveId, MoveDef> = {
   // plan's -6 put it behind): 4.5 damage at bkb 24 slides a standing Aeval about 20 px before the
   // echo's frame 15, and from 6 px behind the replayed chain reached her only inside 35 px. From
   // +12 the echo lands at every spacing up to 56 px between centres (the jab reaches 63); the last
-  // 7 px of the tip are jab only. Measured by the selftest "Trekmore jab echo connects".
+  // 7 px of the tip are jab only. Measured by the selftest "Trekmore jab echo connects". Round 2:
+  // +20 (echoes stand in front along his travel); the jab plus echo now reaches the jab's 63 px.
   jab: {
     id: 'jab', totalFrames: 26, iasa: 22, groundOnly: true,
     hitboxes: forwardChain(1, 7, 9, 16, 40, -24, 10, 4.5, SAKURAI, 24, 42, 1),
-    echo: echo(8, 12),
+    echo: echo(8, 20),
   },
   // ftilt: circles r 11 from x 14 to 62 at y -26 (edge on the 72 px crescent tip), frames 13 to 17.
   // kbg 48 (plan 58): at 58 it killed a fresh Aeval at 110, below the 130 to 170 tilt band.
   ftilt: {
     id: 'ftilt', totalFrames: 38, iasa: 34, groundOnly: true,
     hitboxes: forwardChain(1, 13, 17, 14, 62, -26, 11, 12, SAKURAI, 22, 48, 1),
-    echo: echo(10, -8),
+    echo: echo(10, 20),
   },
-  // utilt: head circle plus the raised sword up to y -118, frames 13 to 18. kbg 98 (plan 92) pulls
-  // the KO from 177 into the tilt band.
+  // utilt: the head circle (the hilt, so an adjacent standing target is hit: the crescent's ring
+  // passes over it) plus the overhead crescent (radius 40, circles r 12, 120 to -20 degrees, top
+  // edge y -86), frames 13 to 18; the polish-wave hitboxes, back with the crescent art (round 2 QA).
+  // kbg 80: with an echo that no longer softens a launch, 98 killed at 119; 80 kills at 152.
   utilt: {
     id: 'utilt', totalFrames: 38, iasa: 34, groundOnly: true,
-    hitboxes: [box(1, 13, 18, 2, -52, 13, 10.5, 90, 38, 98, 1), ...swordColumn(2, 13, 18, -65, 11, -118, 10.5, 90, 38, 98, 1)],
-    echo: echo(10, -6),
+    hitboxes: [box(1, 13, 18, 2, -52, 13, 10.5, 90, 38, UT_KBG, 1), ...overheadArc(2, 13, 18, 40, 12, UT_FROM, UT_TO, 10.5, 90, 38, UT_KBG, 1)],
+    // Round 2 fix: the shadow strikes 4 frames behind, 20 px ahead, and follows through: utilt
+    // launches straight up faster than the half-damage replay would, so a plain echo always passed
+    // through (0 connects). followThrough lands its 5.25 damage and hit on the rising victim and
+    // leaves the launch as it is: on the crescent it connects at every spacing the utilt reaches,
+    // 0 to 60 percent, at any offset 5 to 22, and the KO stays 152 echo included.
+    echo: { ...echo(4, 20), followThrough: true },
   },
   // dtilt: a low sweep that reaches a ledge hanger and beats rolls. Balance loop 0: the plan's 75
   // degree launch (bkb 36) lifted a fresh Aeval about 40 px before the echo's frame, so the echo
@@ -165,12 +244,16 @@ const moves: Record<MoveId, MoveDef> = {
     ],
     echo: echo(4, 20),
   },
-  // dashatk: a lunge, circles r 12 from x 14 to 80 at y -20, frames 11 to 18, pushed on frame 6.
+  // dashatk: a lunge pushed on frame 6, frames 11 to 18. Round 2: it draws the twin_strike thrust
+  // and impact burst, so circles r 12 from x 14 to 50 at y -22 carry the blade into an impact
+  // circle r 18 on x 68 (front edge 86 px, was 92).
   dashatk: {
     id: 'dashatk', totalFrames: 44, groundOnly: true,
-    hitboxes: forwardChain(1, 11, 18, 14, 80, -20, 12, 13, 55, 36, 58, 1),
+    hitboxes: [...forwardChain(1, 11, 18, 14, 50, -22, 12, 13, 55, 36, 58, 1), box(6, 11, 18, 68, -22, 18, 13, 55, 36, 58, 1)],
     velocity: [{ frame: 6, vx: 3.5 }],
-    echo: echo(10, -10),
+    // Round 2 QA: 32 px ahead so the shadow thrusts clear of his body (18 overlapped it); it lands
+    // on a 0 percent victim (11 of 19 spacings); above that the thrust has launched her out of reach.
+    echo: echo(10, 32),
   },
 
   // Smashes: no echo, chargeable, 4 to 6 frames slower than Aeval's.
@@ -184,11 +267,12 @@ const moves: Record<MoveId, MoveDef> = {
     id: 'fsmash', totalFrames: 58, chargeable: true, groundOnly: true,
     hitboxes: forwardChain(1, 23, 27, 16, 94, -24, 14, 19, 40, 26, 40, 1),
   },
-  // usmash: the sword flung up as a column to y -128 and caught, frames 21 to 26. kbg 63 (plan 76,
-  // which killed at 83 and 48 charged): 107 uncharged, 65 charged.
+  // usmash: the head circle (hilt) plus the big overhead crescent from 120 to 75 degrees (radius 50,
+  // circles r 14, top edge y -98), frames 21 to 26 (polish wave, back in round 2 QA). kbg 63 (plan
+  // 76, which killed at 83 and 48 charged): 107 uncharged, 65 charged.
   usmash: {
     id: 'usmash', totalFrames: 56, chargeable: true, groundOnly: true,
-    hitboxes: [box(1, 21, 26, 2, -52, 15, 20, 88, 32, 63, 1), ...swordColumn(2, 21, 26, -67, 13, -128, 20, 88, 32, 63, 1)],
+    hitboxes: [box(1, 21, 26, 2, -52, 15, 20, 88, 32, 63, 1), ...overheadArc(2, 21, 26, 50, 14, US_FROM, US_TO, 20, 88, 32, 63, 1)],
   },
   // dsmash: the counter's art. A front arc on 17 to 20, then an eruption on 24 to 27 in the same
   // group, so a victim takes one of them: the front spike launches up, the back one behind him.
@@ -211,18 +295,21 @@ const moves: Record<MoveId, MoveDef> = {
       box(1, 6, 9, 0, -26, 26, 12, 60, 22, 52, 1),
       box(2, 10, 18, 0, -26, 24, 7, 55, 14, 42, 1),
     ],
-    echo: echo(8, 0),
+    echo: echo(8, 16),
   },
-  // fair: kbg 42 (plan 62, which killed at 71): 119.
+  // fair: kbg 42 (plan 62, which killed at 71): 119. Round 2: it draws the fsmash crescent
+  // (heavy_slash_3/4 on 12 to 17), which runs from over his head (x 10 to 40, y -56) down the
+  // front to x 59 at y -34 to -12, so three circles follow it out to a 60 px front edge (was 51).
   fair: {
     id: 'fair', totalFrames: 40, landingLag: 16, airOnly: true,
     hitboxes: [
-      box(1, 12, 16, 26, -26, 15, 16, 45, 24, 42, 1),
-      box(2, 12, 16, 38, -22, 13, 16, 45, 24, 42, 1),
+      box(1, 12, 16, 22, -42, 14, 16, 45, 24, 42, 1),
+      box(2, 12, 16, 40, -32, 14, 16, 45, 24, 42, 1),
+      box(3, 12, 16, 46, -16, 14, 16, 45, 24, 42, 1),
     ],
-    echo: echo(10, -6),
+    echo: echo(10, 20),
   },
-  // bair: he turns and thrusts back. The echo stands 6 px ahead, which is behind the thrust. kbg 53
+  // bair: he turns and thrusts back. The echo stands 12 px ahead along his travel. kbg 53
   // (plan 64): a thrust into a grounded Aeval 40 px behind him kills at 104 (81 at 64).
   bair: {
     id: 'bair', totalFrames: 36, landingLag: 15, airOnly: true,
@@ -230,40 +317,46 @@ const moves: Record<MoveId, MoveDef> = {
       box(1, 10, 13, -28, -24, 14, 17, SAKURAI, 26, 53, 1),
       box(2, 10, 13, -40, -24, 12, 17, SAKURAI, 26, 53, 1),
     ],
-    echo: echo(8, 6),
+    echo: echo(8, 12),
   },
   // uair: bkb 20 kbg 95 and an echo delay of 5 (plan 30, 82, 10). The plan's echo replayed 10
   // frames late where he started, and a victim above 0 percent had already risen out of it. With
   // less base knockback and the shorter delay it lands on a just-launched Aeval up to about 60.
   // Balance loop 1: kbg 95 to 90, his top KO move at every CPU level (20 to 23 percent of KOs).
+  // Polish wave (back in round 2 QA): the crescent from 140 to 20 degrees (radius 40, circles r 12).
+  // KO 136 at 40 px (calibrate). Echoes no longer soften a launch (hits.ts resolveEcho).
   uair: {
     id: 'uair', totalFrames: 42, landingLag: 14, airOnly: true,
-    hitboxes: [
-      box(1, 16, 21, -10, -56, 16, 12, 80, 20, 90, 1),
-      box(2, 16, 21, 10, -60, 16, 12, 80, 20, 90, 1),
-      box(3, 16, 21, 24, -42, 12, 12, 80, 20, 90, 1),
-    ],
-    echo: echo(5, 0),
+    hitboxes: overheadArc(1, 16, 21, 40, 12, UA_FROM, UA_TO, 12, 80, 20, 90, 1),
+    echo: echo(5, 10),
   },
   // dair: a stall-free downward stab, no dive, no bounce. The tip spikes on 14 to 18 (group 1),
   // the late body hit on 19 to 24 (group 2). Only the late hit is echoed: an echoed spike would be
   // a free second meteor. Balance loop 1 and 2: landing lag 24 to 18 to 14; landing was the top
   // state Aeval opened him in at UI 10 and the god CPU throws dair more than any other aerial.
+  // Round 2: it draws the dsmash art (parry_counter_0..8). The spike (14 to 18, parry_counter_4/5)
+  // sits where the arc comes down in front of and below him; the late hit (19 to 24,
+  // parry_counter_6) is the eruption under his feet, spread a little forward like the drawn spikes.
   dair: {
     id: 'dair', totalFrames: 48, landingLag: 14, airOnly: true, hitsLedge: true,
     hitboxes: [
-      box(1, 14, 18, 4, 10, 13, 16, 270, 40, 78, 1),
-      box(2, 19, 24, 4, -6, 16, 11, 70, 30, 60, 2),
+      box(1, 14, 18, 26, 0, 15, 16, 270, 40, 78, 1),
+      box(2, 19, 24, 4, 4, 17, 11, 70, 30, 60, 2),
+      box(3, 19, 24, 32, -2, 13, 11, 70, 30, 60, 2),
     ],
-    echo: echo(10, 0, [2]),
+    echo: echo(10, 10, [2]),
   },
 
   // Specials.
-  // Shadow Sword: hold Special to charge; press again while the sword flies to teleport to it.
-  // The recall starts the branch (frames 40 to 53, 14 frames of reappear lag, the first 12
-  // invulnerable).
+  // Shadow Sword: a fast cast (polish wave: no charge; 34 frames, raised from 22 in the balance pass
+  // so the throw is committal, UI 7 vs Aeval 78 to about 60-66 percent); press again while the sword flies to
+  // teleport to it. The recall starts the branch (frames 40 to 53, 14 frames of reappear lag, the
+  // first 12 invulnerable).
+  // Round 2: hold Special to aim (holdAim): still held on frame 8 pauses the throw for up to 45
+  // frames while the aim follows the stick; the release frame throws. Nothing grows with the hold,
+  // and a press released before frame 8 is the same 34-frame cast as before.
   nspecial: {
-    id: 'nspecial', totalFrames: 30, chargeable: true, chargeButton: 'special', chargeCastFrames: 8,
+    id: 'nspecial', totalFrames: 34, chargeable: true, chargeButton: 'special', holdAim: true,
     hitboxes: [],
     projectiles: [shadowSword, shadowBurst],
     recall: { projectileId: shadowSword.id, footOffsetY: 26, invulnFrames: 12, oncePerAir: true },
@@ -280,29 +373,32 @@ const moves: Record<MoveId, MoveDef> = {
       startFrame: 8, travelFrames: 6, distance: 96, invuln: [3, 16], turnIfPassed: true, stopAtEdge: true, oncePerAir: true,
     },
   },
-  // Shadow Ascent: the rising hitbox (12 to 30) drags a victim up into the top swing (40 to 46).
+  // Sword Ascent (polish wave): the sword is thrown up on frame 8 (ascentSword, which carries the
+  // old rising drag hit), he phases out on 10 to 21 (hidden and invulnerable) and rematerializes
+  // out of the sword at the top, then the swing (40 to 46) sends a dragged victim off.
   uspecial: {
-    id: 'uspecial', totalFrames: 56, helplessAfter: true, invuln: [10, 14],
+    id: 'uspecial', totalFrames: 56, helplessAfter: true, invuln: [10, 21], hiddenFrames: [10, 21],
     hitboxes: [
-      box(1, 12, 30, 0, -44, 16, 3, 90, 60, 30, 1),
       box(2, 40, 46, 20, -30, 22, 14, 50, 42, 80, 2),
       box(3, 40, 46, 34, -14, 16, 14, 50, 42, 80, 2),
     ],
+    projectiles: [ascentSword],
     velocity: ascentVelocity(),
   },
-  // Moon Parry: frames 5 to 22 absorb any melee hit or projectile (not a grab) and jump to the
+  // Moon Parry: frames 4 to 30 (polish wave; was 5 to 22) absorb any melee hit or projectile (not a grab) and jump to the
   // branch, 60 to 103: invulnerable 60 to 72, an arc on 70 to 73 and an eruption on 78 to 81 that
   // repay 1.3x the absorbed damage (10 to 20), one group so one of them lands. A whiff ends at 50.
   // Balance loop 0: cap 20 (plan 30), bkb 20 and kbg 61 (plan 60, 70). The plan's counter killed
   // a fresh Aeval at 0 percent at its cap and at 46 at its floor; now the floor (a countered jab)
   // kills at 130 and the cap (a countered Aeval fsmash, 15 x 1.3 = 19.5) at about 57.
+  // Polish wave: a whiff ends at 56 (was 50).
   dspecial: {
-    id: 'dspecial', totalFrames: 50, invuln: [60, 72],
+    id: 'dspecial', totalFrames: 56, invuln: [60, 72],
     hitboxes: [
       { ...box(1, 70, 73, 24, -34, 20, 0, 45, 20, 61, 1), fromCounter: true, noCrit: true },
       { ...box(2, 78, 81, 38, -8, 18, 0, 45, 20, 61, 1), fromCounter: true, noCrit: true },
     ],
-    counter: { windowStart: 5, windowEnd: 22, scale: 1.3, minDamage: 10, maxDamage: 20, attackerFreeze: 14 },
+    counter: { windowStart: 4, windowEnd: 30, scale: 1.3, minDamage: 10, maxDamage: 20, attackerFreeze: 14 },
     branch: { start: 60, end: 104 },
   },
 

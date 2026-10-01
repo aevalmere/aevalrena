@@ -5,9 +5,9 @@ import {
 import { circleRectOverlap, degToRad } from '../core/math';
 import { nextFloat } from '../core/rng';
 import { MAX_PLAYERS } from '../core/types';
-import type { Facing, GameState, HitboxDef, Rect, SimEvent } from '../core/types';
+import type { Facing, GameState, HitboxDef, MoveDef, Rect, SimEvent } from '../core/types';
 import { defOf, fighterHurtbox, recordHit, sameTeam, setAction, simFighters, type SimFighter } from './state';
-import { PROJECTILE_DEFS, PROJECTILE_SCALE_MAX, PROJECTILE_SCALE_MIN, chargedStat, killProjectile } from './projectiles';
+import { PROJECTILE_DEFS, PROJECTILE_SCALE_MAX, PROJECTILE_SCALE_MIN, chargedStat, killProjectile, projectileHitStats } from './projectiles';
 import { dodgesHit } from './dodge';
 import { forceGrab } from './grab';
 import { enterBranch } from './moves';
@@ -136,6 +136,7 @@ export function applyHit(
   hitX: number,
   hitY: number,
   kbScale = 1,
+  hitstunScale?: number,
 ): number {
   const crit = metaCrit;
   const echo = metaEcho;
@@ -191,8 +192,15 @@ export function applyHit(
   victim.lastHitBy = attackerSlot;
   victim.airLock = 0;
   victim.hitlag = lag;
-  victim.hitstun = Math.floor(kb * TUNING.knockback.hitstunPerKb);
-  setAction(victim, kb >= TUNING.knockback.tumbleKb ? 'tumble' : 'hitstun');
+  // A hitbox with hitstunScale (the dair dive) launches as hard but stuns for a fraction, and
+  // never tumbles, so its landing is never a knockdown.
+  if (hitstunScale !== undefined) {
+    victim.hitstun = Math.floor(kb * TUNING.knockback.hitstunPerKb * hitstunScale);
+    setAction(victim, 'hitstun');
+  } else {
+    victim.hitstun = Math.floor(kb * TUNING.knockback.hitstunPerKb);
+    setAction(victim, kb >= TUNING.knockback.tumbleKb ? 'tumble' : 'hitstun');
+  }
 
   const ev: Extract<SimEvent, { type: 'hit' }> = {
     type: 'hit', x: hitX, y: hitY,
@@ -205,6 +213,14 @@ export function applyHit(
   if (echo) ev.echo = true;
   state.events.push(ev);
   return lag;
+}
+
+/**
+ * True when holding the move's charge scales it (smashes, Aeval's orb). A holdAim move is
+ * chargeable only to pause and aim: its held frames count in f.charge but never scale anything.
+ */
+export function chargesPower(mv: MoveDef): boolean {
+  return mv.chargeable === true && mv.holdAim !== true;
 }
 
 /**
@@ -354,7 +370,7 @@ function resolveMelee(state: GameState, fighters: SimFighter[], a: number): void
   if (atk.action !== 'attack' || atk.moveId === null) return;
   if (atk.hitlag > 0 || atk.charging) return;
   const mv = defOf(atk).moves[atk.moveId];
-  const mul = chargeMultiplier(atk.charge, mv.chargeable);
+  const mul = chargeMultiplier(atk.charge, chargesPower(mv));
   for (let i = 0; i < fighters.length; i++) hitThisFrame[i] = false;
   // Set when a hitbox of this move lands on a fighter's body rather than a shield.
   let hitBody = false;
@@ -412,7 +428,7 @@ function resolveMelee(state: GameState, fighters: SimFighter[], a: number): void
         state, vic, atk.slot, atk.facing, dmg * critMul, hb.angle, hb.bkb, hb.kbg,
         hb.hitlagMul === undefined ? 1 : hb.hitlagMul,
         hb.shieldDamage === undefined ? dmg : hb.shieldDamage,
-        hx, hy, critMul,
+        hx, hy, critMul, hb.hitstunScale,
       );
       hitThisFrame[v] = true;
       landed = true;
@@ -445,6 +461,22 @@ function resolveMelee(state: GameState, fighters: SimFighter[], a: number): void
  * echo hits never grab or bounce, keep their own group mask, roll crits at half chance and can
  * be countered like any melee hit.
  */
+/** Scratch for a followThrough echo: the launch a struck victim keeps. */
+const KEPT = { dirX: 0, dirY: 0, speed: 0, fall: 0, vx: 0, vy: 0, hitstun: 0, onGround: false };
+
+function saveLaunch(v: SimFighter): void {
+  KEPT.dirX = v.kbDirX; KEPT.dirY = v.kbDirY; KEPT.speed = v.kbSpeed; KEPT.fall = v.kbFall;
+  KEPT.vx = v.vx; KEPT.vy = v.vy; KEPT.hitstun = v.hitstun; KEPT.onGround = v.onGround;
+}
+
+/** Puts the saved launch back after the echo's hit; hitstun keeps the longer of the two. */
+function restoreLaunch(v: SimFighter): void {
+  v.kbDirX = KEPT.dirX; v.kbDirY = KEPT.dirY; v.kbSpeed = KEPT.speed; v.kbFall = KEPT.fall;
+  v.vx = KEPT.vx; v.vy = KEPT.vy; v.onGround = KEPT.onGround;
+  if (KEPT.hitstun > v.hitstun) v.hitstun = KEPT.hitstun;
+  if (v.action !== 'tumble') setAction(v, 'tumble');
+}
+
 function resolveEcho(state: GameState, fighters: SimFighter[], a: number): void {
   const atk = fighters[a];
   if (atk.echoMove === null || atk.echoAge < 0) return;
@@ -476,6 +508,23 @@ function resolveEcho(state: GameState, fighters: SimFighter[], a: number): void 
       if (dodgesHit(vic, hy, hb.low, atk.echoMove, grounded)) continue;
 
       const dmg = (hb.fromCounter === true ? atk.counterDamage : hb.damage) * echo.damageScale;
+      // The shadow never softens a launch: a tumbling victim still flying faster than this echo hit
+      // would send it passes through (the group stays live, so a slowed victim can still be
+      // caught). Without it the half-damage replay caught a KO-percent victim rising through the
+      // overhead crescent and relaunched it weaker (uair killed at 220 instead of 137). Hitstun
+      // slides (the jab and dtilt echoes re-hit those on purpose) are left alone.
+      let keepLaunch = false;
+      if (vic.action === 'tumble' && vic.kbSpeed > 0) {
+        const d = dmg * TUNING.knockback.damageMul;
+        const echoSpeed = knockback(Math.min(PERCENT_CAP, vic.percent + d), defOf(vic).weight, d, hb.bkb, hb.kbg)
+          * TUNING.knockback.kbMul * TUNING.knockback.toVel;
+        if (vic.kbSpeed > echoSpeed) {
+          // A followThrough echo still strikes (damage, hitlag, the hit event) but leaves the
+          // faster launch as it is.
+          if (echo.followThrough !== true) continue;
+          keepLaunch = true;
+        }
+      }
       if (tryCounter(state, vic, atk.slot, dmg, atk.echoX) >= 0) {
         // The echo is a shadow: its group is spent, but there is no body to freeze.
         hitThisFrame[v] = true;
@@ -485,17 +534,22 @@ function resolveEcho(state: GameState, fighters: SimFighter[], a: number): void 
       const shielded = vic.action === 'shield' || vic.action === 'shieldStun';
       const critMul = shielded ? 1 : rollCrit(state, atk, hb, true);
       const shieldDmg = (hb.shieldDamage === undefined ? hb.damage : hb.shieldDamage) * echo.damageScale;
+      if (keepLaunch) saveLaunch(vic);
       setHitMeta(critMul !== 1, true, 'echo:' + atk.echoMove);
       applyHit(
         state, vic, atk.slot, atk.echoFacing, dmg * critMul, hb.angle, hb.bkb, hb.kbg,
-        hb.hitlagMul === undefined ? 1 : hb.hitlagMul, shieldDmg, hx, hy, critMul,
+        hb.hitlagMul === undefined ? 1 : hb.hitlagMul, shieldDmg, hx, hy, critMul, hb.hitstunScale,
       );
+      if (keepLaunch) restoreLaunch(vic);
       hitThisFrame[v] = true;
       landed = true;
     }
     if (landed) atk.echoHitGroups |= groupBit;
   }
 }
+
+/** Scratch for projectileHitStats, reused so the hit pass allocates nothing. */
+const PHIT = { damage: 0, bkb: 0 };
 
 /** Step 6 of the frame: fighter hitboxes, then echoes, then projectiles against every other hurtbox. */
 export function resolveHits(state: GameState): void {
@@ -525,8 +579,9 @@ export function resolveHits(state: GameState): void {
       if (!circleRectOverlap(pr.x, pr.y, chargedStat(pdef, pr.charge, 'r') * pr.scale, HURT)) continue;
       if (dodgesHit(vic, pr.y, pdef.low, null, true)) continue;
 
-      // Charge and the return pass scale what this instance deals, shield damage included.
-      const pdmg = chargedStat(pdef, pr.charge, 'damage') * pr.power;
+      // Charge, distance flown and the return pass scale what this instance deals, shield damage included.
+      projectileHitStats(pdef, pr, PHIT);
+      const pdmg = PHIT.damage;
       const shooter = fighterBySlot(state, pr.owner);
       // A parried shot is destroyed with no burst.
       if (tryCounter(state, vic, pr.owner, pdmg, shooter !== null ? shooter.x : pr.x) >= 0) {
@@ -539,7 +594,7 @@ export function resolveHits(state: GameState): void {
       setHitMeta(false, false, pr.defId);
       applyHit(
         state, vic, pr.owner, pr.facing, pdmg, pdef.angle,
-        chargedStat(pdef, pr.charge, 'bkb'), chargedStat(pdef, pr.charge, 'kbg'), 1,
+        PHIT.bkb, chargedStat(pdef, pr.charge, 'kbg'), 1,
         pdmg, pr.x, pr.y,
       );
       if (shooter !== null && !state.finished) shooter.stats.projectilesHit++;

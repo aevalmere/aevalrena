@@ -106,6 +106,12 @@ export interface HitboxDef {
   kbg: number;            // knockback growth
   group: number;          // a victim can be hit by only one hitbox per group per move use
   hitlagMul?: number;     // default 1
+  /**
+   * Hitstun multiplier (0..1). When set, the hit keeps its damage and knockback but the victim's
+   * hitstun is scaled by it and the victim never tumbles (plain hitstun), so landing from it is an
+   * ordinary landing, never a knockdown. Omitted: full hitstun and the usual tumble threshold.
+   */
+  hitstunScale?: number;
   shieldDamage?: number;  // default = damage
   low?: boolean;          // counts as a low hit, so rolls do not dodge it
   grab?: GrabSpec;        // catches the victim instead of hitting
@@ -186,14 +192,37 @@ export interface ProjectileDef {
   aim?: boolean;
   /** Ignore the charge scale curve for the hit circle and sprite: every instance has scale 1. */
   fixedScale?: boolean;
+  /**
+   * Damage and knockback grow with distance flown since spawn (px). Applied at hit time:
+   * damage = min(maxDamage, damage + damagePerPx * d), bkb += bkbPerPx * d, where d is the
+   * straight-line distance from the instance's spawn point (ProjectileState.spawnX/spawnY).
+   */
+  distanceScale?: { damagePerPx: number; maxDamage: number; bkbPerPx?: number };
+  /**
+   * Dies on contact with ground: its centre crossing a platform top on the way down, or entering a
+   * solid platform's body. It stops on the surface and bursts there, as at the end of its life.
+   */
+  dieOnGround?: boolean;
 }
 
 /** Shadow echo: a translucent copy replays chosen hitbox groups of this move later. */
 export interface EchoDef {
   delayFrames: number;       // echo move frame 0 = owner move frame delayFrames
   damageScale: number;       // damage and shield damage multiplier, about 0.5
-  offsetX: number;           // fighter-local x offset of the echo, facing right (negative = behind)
+  /**
+   * Echo x offset along the owner's travel direction at move frame 0: dir = sign(vx) when
+   * |vx| >= 0.5, else facing. For the echo's whole life it stands at the owner's CURRENT feet
+   * plus dir * offsetX (positive = in front of the travel), so it never falls behind him.
+   * The echo keeps the owner's facing from move frame 0.
+   */
+  offsetX: number;
   groups: number[];          // hitbox groups replayed; others are not
+  /**
+   * A tumbling victim already flying faster than this echo would send it is normally passed
+   * through (an echo never softens a launch). With followThrough the echo still strikes it:
+   * damage, hitlag and the hit event land, and the victim keeps its faster launch.
+   */
+  followThrough?: boolean;
 }
 
 /** Counter: a hit inside the window is absorbed and the move jumps to its branch. */
@@ -259,6 +288,14 @@ export interface MoveDef {
    * scaled linearly by the charge fraction and rounded. A charged cast takes longer.
    */
   chargeCastFrames?: number;
+  /**
+   * Hold to aim (with `chargeable` and `chargeButton: 'special'`). Still holding the button on the
+   * move's hold frame (the frame before its first projectile spawns) pauses the move there for up
+   * to 45 frames while the aim follows the stick; the release frame reads the aim and resumes. No
+   * power, speed, size, lifetime or cast-time scaling: the charge only counts the held frames. A
+   * press released before the hold frame plays exactly like an unchargeable move.
+   */
+  holdAim?: boolean;
   invuln?: [number, number];
   helplessAfter?: boolean;  // up-special: fall helpless when done in air
   airOnly?: boolean;
@@ -286,6 +323,8 @@ export interface MoveDef {
   recall?: RecallDef;
   /** Shadow step travel (see ShadowStepDef). */
   shadowStep?: ShadowStepDef;
+  /** Move frames [start, end] inclusive during which the body is not drawn (render only). */
+  hiddenFrames?: [number, number];
 }
 
 export type ThrowId = 'fthrow' | 'bthrow' | 'uthrow' | 'dthrow';
@@ -489,11 +528,16 @@ export interface FighterState {
   echoMove?: MoveId | null;
   /** Echo move frame; negative while waiting out delayFrames. */
   echoAge?: number;
-  /** Echo position and facing, latched at owner move frame 0. */
+  /**
+   * Echo feet position, the owner's current feet plus echoDir * offsetX every frame (it moves with
+   * him), and its facing, latched at owner move frame 0.
+   */
   echoX?: number; echoY?: number; echoFacing?: Facing;
+  /** Side the echo stands on (travel direction at owner move frame 0). */
+  echoDir?: Facing;
   /** The current move is running its branch frames. */
   onBranch?: boolean;
-  /** Latched aim of the current aimed move. */
+  /** Latched aim of the current aimed move; follows the stick while a holdAim move is held (charging). */
   aimDir?: AimDir;
 }
 
@@ -552,6 +596,13 @@ export interface ProjectileState {
    * only so older pooled copies type-check; the sim always writes it and reads a missing one as 0.
    */
   charge?: number;
+  /**
+   * Where it spawned, for ProjectileDef.distanceScale (distance flown = straight line from here).
+   * Optional like `charge`; the sim always writes both, and a missing one reads as the current
+   * position (distance 0).
+   */
+  spawnX?: number;
+  spawnY?: number;
 }
 
 export type SimEvent =

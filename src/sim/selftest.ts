@@ -17,6 +17,7 @@ import { moveLocked, tryRecall } from './actions';
 import { copyStateInto, newSnapshot } from '../net/snapshot';
 import { cloneGameState, createGameState, stepGame } from './index';
 import { koFighter } from './match';
+import { measure } from './calibrate';
 import { isDiving, startMove } from './moves';
 import { PROJECTILE_DEFS, chargedStat, rebuildProjectileDefs, spawnProjectile } from './projectiles';
 import { fighterHurtbox, setAction, simFighters, type SimFighter } from './state';
@@ -1586,6 +1587,39 @@ function testFsAttackerKoFreesVictim(): SelfTestResult {
       && v.action !== 'finalSmashVictim' && canBeHit(v) && v.y > yCaught,
     detail: `caught ${caught}, right after KO ${freedAt}, 5 frames later ${v.action} canBeHit ${canBeHit(v)}, `
       + `fell ${(v.y - yCaught).toFixed(2)} px`,
+  };
+}
+
+function testTopBlastOnlyKillsLaunched(): SelfTestResult {
+  const blast = STAGE_DEFS.tidegate.blast;
+  const rise = fresh(1, 10);
+  const a = simFighters(rise)[1];
+  const stocksBefore = a.stocks;
+  a.x = 0;
+  a.y = blast.y - 40;
+  a.vy = -12;
+  a.onGround = false;
+  setAction(a, 'air');
+  step(rise, NONE, NONE);
+  const clamped = a.action !== 'dead' && a.action !== 'respawn' && a.stocks === stocksBefore
+    && Math.abs(a.y - blast.y) < 1e-9 && a.vy >= 0;
+
+  const hit = fresh(1, 10);
+  const h = simFighters(hit)[1];
+  const hitStocksBefore = h.stocks;
+  h.x = 0;
+  h.y = blast.y - 40;
+  h.vy = -12;
+  h.onGround = false;
+  setAction(h, 'hitstun');
+  h.hitstun = 20;
+  step(hit, NONE, NONE);
+  const killed = h.stocks === hitStocksBefore - 1;
+  return {
+    name: 'at. the top blast line stops jumps but kills launched fighters',
+    pass: clamped && killed,
+    detail: `air: action ${a.action} y ${a.y} (blast ${blast.y}) stocks ${stocksBefore} to ${a.stocks} | `
+      + `hitstun: action ${h.action} stocks ${hitStocksBefore} to ${h.stocks}`,
   };
 }
 
@@ -3331,6 +3365,54 @@ function testDiveSpikes(): SelfTestResult {
   };
 }
 
+/**
+ * Owner: the dive does not stun. A dive onto a standing and onto an airborne Aeval at 0, 50 and 100
+ * percent: the victim takes 14 and the downward launch, is in plain hitstun (never tumble, never
+ * downed) and is actionable within hitlag plus a quarter of the launch's hitstun. Before the change
+ * the same hits kept a standing victim in tumble (hitlag 11 plus hitstun 31 to 69, then held until
+ * a press) and knocked an airborne one down on landing (about 166 frames with no input).
+ */
+function testDiveNoStun(): SelfTestResult {
+  const ACTIONABLE = ['idle', 'walk', 'run', 'dash', 'air', 'crouch', 'land', 'turn'];
+  const parts: string[] = [];
+  let ok = true;
+  for (const air of [false, true]) {
+    for (const pct of [0, 50, 100]) {
+      const state = fresh(1, 60);
+      const [me, v] = simFighters(state);
+      const g = STAGE_DEFS.tidegate.platforms[0].y;
+      placeAt(v, 0, air ? g - 60 : g, -1, !air);
+      v.percent = pct;
+      placeAt(me, 0, v.y - 90, 1, false);
+      startMove(state, me, CHARACTER_DEFS.aeval, 'dair');
+      let hitAt = -1;
+      let free = -1;
+      let kb = 0;
+      let badState = false;
+      for (let i = 0; i < 200 && free < 0; i++) {
+        step(state, NONE, NONE);
+        const h = hitEvents(state);
+        if (hitAt < 0 && h.length > 0 && h[0].attacker === 0) {
+          hitAt = i;
+          kb = h[0].kb;
+        }
+        if (hitAt < 0) continue;
+        if (v.action === 'tumble' || v.action === 'downed') badState = true;
+        if (v.hitlag === 0 && ACTIONABLE.indexOf(v.action) >= 0) free = i - hitAt;
+      }
+      const want = Math.floor(kb * TUNING.knockback.hitstunPerKb * 0.25);
+      const pass = hitAt >= 0 && !badState && free >= 0 && free <= 11 + want + 1 && free <= 30;
+      if (!pass) ok = false;
+      parts.push(`${air ? 'air' : 'ground'} ${pct}%: kb ${kb.toFixed(0)}, actionable ${free} frames after the hit${badState ? ' (tumble or downed!)' : ''}`);
+    }
+  }
+  return {
+    name: 'cn2. the dair dive does not stun: a standing or airborne victim is actionable within hitlag plus a quarter hitstun (<= 30 frames), never tumbling or downed',
+    pass: ok,
+    detail: parts.join(' | '),
+  };
+}
+
 /** The bounce off a landed dive gives the air dodge back and hops her up, actionable 10 frames after hitlag. */
 function testDiveBounceRestoresAirDodge(): SelfTestResult {
   const r = diveOnto(false);
@@ -4100,8 +4182,14 @@ function testTrekRollback(): SelfTestResult {
   step(s.state, inp(Btn.Special | Btn.Right, Btn.Special), NONE);
   for (let i = 0; i < 9; i++) step(s.state, NONE, NONE);
   record('step', s.state, s.me.moveId === 'sspecial' && s.me.actionFrame > 8 && s.me.actionFrame < 14);
+
+  const h = trekRig();
+  placeAt(h.me, -150, h.g, 1, true);
+  step(h.state, inp(Btn.Special, Btn.Special), NONE);
+  for (let i = 0; i < 14; i++) step(h.state, inp(Btn.Special | Btn.Up | Btn.Right, 0), NONE);
+  record('aim hold', h.state, h.me.moveId === 'nspecial' && h.me.charging && h.me.aimDir === 1);
   return {
-    name: 'tk15. clones and snapshots taken mid-echo, mid-branch, mid-recall and mid-step step identically',
+    name: 'tk15. clones and snapshots taken mid-echo, mid-branch, mid-recall, mid-step and mid-aim-hold step identically',
     pass: ok,
     detail: parts.join(' | '),
   };
@@ -4438,17 +4526,20 @@ function testTrekJabEcho(): SelfTestResult {
   };
 }
 
-/** Travel of a real shadow sword from spawn to death, tapped or held to full charge. */
-function tkSwordTravel(full: boolean): number {
+/**
+ * Travel of a real shadow sword from spawn to death. `held` keeps Special down for 70 frames (round 2:
+ * a 45-frame aim hold, which must not change the flight).
+ */
+function tkSwordTravel(held: boolean): number {
   const t = tkRig();
   placeAt(t.me, -150, t.g, 1, true);
   placeAt(t.other, -240, t.g, 1, true);
-  if (full) step(t.state, inp(Btn.Special, Btn.Special), NONE);
+  if (held) step(t.state, inp(Btn.Special, Btn.Special), NONE);
   else step(t.state, directInp('nspecial'), NONE);
   let from = NaN;
   let to = NaN;
   for (let i = 0; i < 200 && Number.isNaN(to); i++) {
-    step(t.state, full && i < 70 ? inp(Btn.Special, 0) : NONE, NONE);
+    step(t.state, held && i < 70 ? inp(Btn.Special, 0) : NONE, NONE);
     for (let e = 0; e < t.state.events.length; e++) {
       const ev = t.state.events[e];
       if (ev.type === 'projectileSpawn' && ev.defId === 'shadowSword') from = ev.x;
@@ -4458,9 +4549,347 @@ function tkSwordTravel(full: boolean): number {
   return to - from;
 }
 
+/** Damage and distance flown of a shadow sword thrown at a standing opponent `gap` px ahead. */
+function tkSwordHitAt(gap: number): { damage: number; flown: number } {
+  const t = tkRig();
+  placeAt(t.me, -200, t.g, 1, true);
+  placeAt(t.other, -200 + gap, t.g, -1, true);
+  step(t.state, directInp('nspecial'), NONE);
+  let from = NaN;
+  for (let i = 0; i < 80; i++) {
+    step(t.state, NONE, NONE);
+    for (let e = 0; e < t.state.events.length; e++) {
+      const ev = t.state.events[e];
+      if (ev.type === 'projectileSpawn' && ev.defId === 'shadowSword') from = ev.x;
+      if (ev.type === 'hit' && ev.source === 'shadowSword') return { damage: ev.damage, flown: ev.x - from };
+    }
+  }
+  return { damage: NaN, flown: NaN };
+}
+
+/**
+ * Sword Ascent (polish wave): the ascentSword leaves on frame 8, stays above the rising body and
+ * dies where his raised hand (+8, -60 from the feet) is on frame 22; the body is invulnerable and
+ * hidden on 10 to 21 and still rises about 91 px.
+ */
+function testTrekAscentSword(): SelfTestResult {
+  const t = tkRig();
+  placeAt(t.me, -100, t.g, 1, true);
+  placeAt(t.other, 300, t.g, -1, true);
+  step(t.state, directInp('uspecial'), NONE);
+  const x0 = t.me.x;
+  const y0 = t.me.y;
+  let spawnFrame = -1;
+  let dieX = NaN;
+  let dieY = NaN;
+  let dieFrame = -1;
+  let led = true;
+  let invulnOk = true;
+  let top = 0;
+  let handX = NaN;
+  let handY = NaN;
+  for (let i = 0; i < 60 && t.me.action === 'attack'; i++) {
+    step(t.state, NONE, NONE);
+    const fr = t.me.actionFrame;
+    for (let e = 0; e < t.state.events.length; e++) {
+      const ev = t.state.events[e];
+      if (ev.type === 'projectileSpawn' && ev.defId === 'ascentSword') spawnFrame = fr;
+      if (ev.type === 'projectileDie' && ev.defId === 'ascentSword') { dieX = ev.x; dieY = ev.y; dieFrame = fr; }
+    }
+    const sw = aliveOf(t.state, 'ascentSword');
+    if (sw !== null && fr >= 10 && sw.y > t.me.y - 60) led = false;
+    if (fr >= 10 && fr <= 21 && t.me.invuln <= 0) invulnOk = false;
+    if (fr === 22) { handX = t.me.x + 8; handY = t.me.y - 60; }
+    top = Math.min(top, t.me.y - y0);
+  }
+  const hidden = t.def.moves.uspecial.hiddenFrames;
+  const meet = Math.hypot(dieX - handX, dieY - handY);
+  return {
+    name: 'tkd11. Trekmore up special: the thrown sword leads the body and dies at his raised hand on frame 22; '
+      + 'hidden and invulnerable 10 to 21; the ground rise is unchanged (about 100 px peak)',
+    pass: spawnFrame === 8 && dieFrame === 21 && meet < 1 && led && invulnOk
+      && hidden !== undefined && hidden[0] === 10 && hidden[1] === 21 && Math.abs(-top - 100) < 12,
+    detail: `sword spawned on ${spawnFrame}, died on ${dieFrame} at ${(dieX - x0).toFixed(1)},${(dieY - y0).toFixed(1)} `
+      + `(hand ${(handX - x0).toFixed(1)},${(handY - y0).toFixed(1)}, off ${meet.toFixed(2)} px) | leads ${led} | `
+      + `invulnerable ${invulnOk} | peak ${(-top).toFixed(1)} px`,
+  };
+}
+
+/**
+ * One shadow sword throw. `special` is how many steps Special stays held from the press (0 = the
+ * direct shortcut, a pure tap); `releaseHeld` is the stick on the step Special is let go. Reports
+ * the step and move frame the sword spawned on, its velocity and scaling, and the step the move ended.
+ */
+function tkThrow(special: number, releaseHeld = 0): {
+  spawnStep: number; spawnFrame: number; endStep: number; vx: number; vy: number;
+  power: number; scale: number; charge: number; maxCharge: number; chargingSeen: boolean; aimWhileHeld: number;
+} {
+  const t = tkRig();
+  placeAt(t.me, -150, t.g, 1, true);
+  placeAt(t.other, -300, t.g, 1, true);
+  const out = { spawnStep: -1, spawnFrame: -1, endStep: -1, vx: 0, vy: 0, power: 0, scale: 0, charge: -1, maxCharge: 0, chargingSeen: false, aimWhileHeld: -1 };
+  if (special <= 0) step(t.state, directInp('nspecial'), NONE);
+  else step(t.state, inp(Btn.Special, Btn.Special), NONE);
+  for (let i = 1; i < 200 && out.endStep < 0; i++) {
+    const held = i < special ? Btn.Special | Btn.Down : i === special ? releaseHeld : 0;
+    step(t.state, inp(held, 0), NONE);
+    if (t.me.charging) {
+      out.chargingSeen = true;
+      out.aimWhileHeld = t.me.aimDir;
+    }
+    if (t.me.charge > out.maxCharge) out.maxCharge = t.me.charge;
+    for (let e = 0; e < t.state.events.length; e++) {
+      const ev = t.state.events[e];
+      if (ev.type === 'projectileSpawn' && ev.defId === 'shadowSword') {
+        out.spawnStep = i;
+        out.spawnFrame = t.me.actionFrame;
+        for (let k = 0; k < t.state.projectiles.length; k++) {
+          const p = t.state.projectiles[k];
+          if (!p.alive || p.defId !== 'shadowSword') continue;
+          out.vx = p.vx; out.vy = p.vy; out.power = p.power; out.scale = p.scale; out.charge = p.charge ?? 0;
+        }
+      }
+    }
+    if (t.me.action !== 'attack' || t.me.moveId !== 'nspecial') out.endStep = i;
+  }
+  return out;
+}
+
+/**
+ * Round 2 holdAim: a tap (shortcut or a button let go before frame 8) throws on move frame 9 and
+ * ends after 34; holding pauses on frame 8 with the aim following the stick, the release step
+ * reads the aim and throws, nothing scales, and the pause stops at 45 held frames.
+ */
+function testTrekHoldAim(): SelfTestResult {
+  const tap = tkThrow(0);
+  const short = tkThrow(5);
+  const held = tkThrow(30, Btn.Up);
+  const capped = tkThrow(120);
+  const tapOk = tap.spawnStep === 9 && tap.spawnFrame === 9 && tap.endStep === 34 && !tap.chargingSeen
+    && short.spawnStep === 9 && short.endStep === 34 && !short.chargingSeen && tap.vx === 8 && tap.vy === 0;
+  // Held from step 0 to 29, released on 30: frame 8 is step 8, paused on steps 9 to 29 (21 held
+  // frames), the release step 30 runs frame 9 and throws straight up (aim 2) as read on that step.
+  const heldOk = held.chargingSeen && held.aimWhileHeld === 4 && held.spawnStep === 30 && held.spawnFrame === 9
+    && held.endStep === 34 + 21 && held.vx === 0 && held.vy === -8 && held.power === 1 && held.scale === 1 && held.charge === 0;
+  // Never released: the pause ends after 45 held frames, so the throw lands on step 8 + 45 + 1.
+  const capOk = capped.spawnStep === 54 && capped.maxCharge === 45 && capped.power === 1 && capped.vx === 0 && capped.vy === 8;
+  const fmt = (n: string, r: ReturnType<typeof tkThrow>): string =>
+    `${n}: spawn step ${r.spawnStep} (frame ${r.spawnFrame}), end ${r.endStep}, v (${r.vx}, ${r.vy}), power ${r.power} scale ${r.scale} charge ${r.charge}, held ${r.maxCharge}`;
+  return {
+    name: 'tkd13. Trekmore nspecial holdAim: a tap throws on frame 9 of 34; a hold pauses on 8, aims on release, scales nothing, caps at 45',
+    pass: tapOk && heldOk && capOk,
+    detail: [fmt('tap', tap), fmt('short', short), fmt('held', held), fmt('capped', capped)].join(' | '),
+  };
+}
+
+/**
+ * Round 2 echo placement: the side is latched at move frame 0 (travel direction, facing when
+ * nearly still) and for its whole life the echo stands offsetX that way from his CURRENT feet,
+ * so a sliding dashatk or a drifting fair never overtakes it. It keeps his move-frame-0 facing.
+ */
+function testTrekEchoPlacement(): SelfTestResult {
+  const at = (vx: number, facing: 1 | -1): { x: number; facing: number } => {
+    const t = tkRig();
+    placeAt(t.me, -30, t.g, facing, true);
+    t.me.vx = vx;
+    startMove(t.state, t.me, t.def, 'jab');
+    return { x: t.me.echoX - t.me.x, facing: t.me.echoFacing };
+  };
+  const off = CHARACTER_DEFS[TREK].moves.jab.echo?.offsetX ?? 0;
+  const still = at(0, 1);
+  const stillL = at(0.4, -1);
+  const back = at(-2, 1);
+  const fwd = at(2, -1);
+  const latchOk = off > 0 && still.x === off && stillL.x === -off && back.x === -off && fwd.x === off
+    && still.facing === 1 && back.facing === 1 && fwd.facing === -1;
+  // Follows him: a dashatk (pushed forward) and a fair drifting forward, every frame of the echo.
+  const follow = (id: 'dashatk' | 'fair'): { worst: number; travel: number; frames: number } => {
+    const t = tkRig();
+    const air = id === 'fair';
+    placeAt(t.me, -120, air ? t.g - 120 : t.g, 1, !air);
+    placeAt(t.other, 300, t.g, -1, true);
+    t.me.vx = air ? 1.7 : 2.8;
+    startMove(t.state, t.me, t.def, id);
+    const o = t.def.moves[id].echo?.offsetX ?? 0;
+    const x0 = t.me.x;
+    let worst = 0;
+    let frames = 0;
+    for (let i = 0; i < 40 && t.me.echoMove !== null; i++) {
+      step(t.state, air ? inp(Btn.Right, 0) : NONE, NONE);
+      if (t.me.echoMove === null) break;
+      frames++;
+      worst = Math.max(worst, Math.abs(t.me.echoX - (t.me.x + o)), Math.abs(t.me.echoY - t.me.y));
+    }
+    return { worst, travel: t.me.x - x0, frames };
+  };
+  const dash = follow('dashatk');
+  const fair = follow('fair');
+  const followOk = dash.frames > 10 && fair.frames > 10 && dash.worst < 1e-9 && fair.worst < 1e-9 && dash.travel > 20 && fair.travel > 20;
+  return {
+    name: 'tkd12. echoes stand offsetX ahead of his current feet on the side latched at move frame 0 (travel, facing when |vx| < 0.5), and keep his facing',
+    pass: latchOk && followOk,
+    detail: `jab offset ${off}: still right ${still.x}, nearly still left ${stillL.x}, sliding back ${back.x} (facing ${back.facing}), `
+      + `sliding right while facing left ${fwd.x} | dashatk travels ${dash.travel.toFixed(1)} px, echo off its spot by ${dash.worst} over ${dash.frames} frames; `
+      + `fair drifts ${fair.travel.toFixed(1)} px, off by ${fair.worst} over ${fair.frames} frames`,
+  };
+}
+
+/** Round 2 QA: the aim is current on the first held frame (8), from Up held since frame 3. */
+function testTrekAimFirstHoldFrame(): SelfTestResult {
+  const t = tkRig();
+  placeAt(t.me, -150, t.g, 1, true);
+  step(t.state, inp(Btn.Special, Btn.Special), NONE);
+  let atHold = -1;
+  let firstCharging = -1;
+  for (let i = 1; i < 12; i++) {
+    step(t.state, inp(Btn.Special | (i >= 3 ? Btn.Up : 0), 0), NONE);
+    if (t.me.actionFrame === 8 && atHold < 0) atHold = t.me.aimDir;
+    if (t.me.charging && firstCharging < 0) firstCharging = t.me.aimDir;
+  }
+  return {
+    name: 'tkd15. Trekmore nspecial: Up held from frame 3 is the aim on frame 8, the first held frame',
+    pass: atHold === 2 && firstCharging === 2,
+    detail: `aim on frame 8 ${atHold}, on the first charging frame ${firstCharging}`,
+  };
+}
+
+/** Round 2 QA: a down or down-forward sword thrown on the ground stops at the floor and bursts there. */
+function testTrekSwordHitsFloor(): SelfTestResult {
+  const run = (stick: number): { dieY: number; burstY: number; age: number } => {
+    const t = tkRig();
+    placeAt(t.me, -150, t.g, 1, true);
+    placeAt(t.other, 300, t.g, -1, true);
+    step(t.state, directHeldInp('nspecial', stick), NONE);
+    const out = { dieY: NaN, burstY: NaN, age: -1 };
+    for (let i = 0; i < 80 && Number.isNaN(out.dieY); i++) {
+      step(t.state, NONE, NONE);
+      for (let e = 0; e < t.state.events.length; e++) {
+        const ev = t.state.events[e];
+        if (ev.type === 'projectileDie' && ev.defId === 'shadowSword') { out.dieY = ev.y; out.age = i; }
+        if (ev.type === 'projectileSpawn' && ev.defId === 'shadowBurst') out.burstY = ev.y;
+      }
+    }
+    return out;
+  };
+  const down = run(Btn.Down);
+  const downFwd = run(Btn.Down | Btn.Right);
+  const g = STAGE_DEFS.tidegate.platforms[0].y;
+  const ok = (r: { dieY: number; burstY: number; age: number }): boolean => r.dieY === g && r.burstY === g && r.age < 20;
+  return {
+    name: 'tkd16. Trekmore sword thrown down or down-forward on the ground dies on the floor and bursts on it',
+    pass: ok(down) && ok(downFwd),
+    detail: `floor ${g}: down died at y ${down.dieY} (step ${down.age}), burst ${down.burstY}; down-forward died at y ${downFwd.dieY} (step ${downFwd.age}), burst ${downFwd.burstY}`,
+  };
+}
+
+/**
+ * Round 2: the utilt shadow strikes a grounded Aeval rising off the column (followThrough) at every
+ * spacing the utilt reaches, 0 to 60 percent, without softening the launch: the victim's launch
+ * speed after the echo is the owner hit's, and the KO stays in the 130 to 170 tilt band echo included.
+ */
+function testTrekUtiltEcho(): SelfTestResult {
+  const run = (gap: number, pct: number, withEcho: boolean): { own: boolean; echo: boolean; peak: number } => {
+    const t = tkRig();
+    placeAt(t.me, -30, t.g, 1, true);
+    placeAt(t.other, -30 + gap, t.g, -1, true);
+    t.other.percent = pct;
+    const mv = t.def.moves.utilt;
+    const saved = mv.echo;
+    if (!withEcho) mv.echo = undefined;
+    startMove(t.state, t.me, t.def, 'utilt');
+    mv.echo = saved;
+    const out = { own: false, echo: false, peak: t.other.y };
+    for (let i = 0; i < 240; i++) {
+      step(t.state, NONE, NONE);
+      if (t.other.y < out.peak) out.peak = t.other.y;
+      const h = hitEvents(t.state);
+      for (let e = 0; e < h.length; e++) {
+        if (h[e].attacker !== 0) continue;
+        if (h[e].echo === true) out.echo = true;
+        else out.own = true;
+      }
+    }
+    return out;
+  };
+  const misses: string[] = [];
+  let checked = 0;
+  let worstPeak = 0;
+  for (const pct of [0, 20, 40, 60]) {
+    for (let gap = -24; gap <= 30; gap += 6) {
+      const r = run(gap, pct, true);
+      if (!r.own) continue;
+      checked++;
+      if (!r.echo) misses.push(`${gap}@${pct}`);
+      // The launch is kept: the victim rises as high as with no shadow at all.
+      const plain = run(gap, pct, false);
+      worstPeak = Math.max(worstPeak, Math.abs(r.peak - plain.peak));
+    }
+  }
+  const ko = measure('utilt', TREK, 'aeval').koPercent;
+  return {
+    name: 'tkd14. Trekmore utilt shadow connects on a grounded Aeval at 0 to 60 percent without softening the launch; KO 130 to 170 echo included',
+    pass: checked > 0 && misses.length === 0 && worstPeak < 0.5 && ko >= 130 && ko <= 170,
+    detail: `${checked} owner hits, echo misses ${misses.join(', ') || 'none'}, worst peak-height change from the echo ${worstPeak.toFixed(2)} px, KO ${ko}`,
+  };
+}
+
+/**
+ * Recovering from below (SSBU style): an up special started under the main stage 20 px in from
+ * either edge, facing the stage, slides out past the corner instead of bonking on the underside
+ * and catches the ledge, for Aeval and Trekmore on both stages. Under the middle it still bonks:
+ * the fighter never rises past the underside.
+ */
+function testUnderEdgeRecovery(): SelfTestResult {
+  const run = (stageId: string, charId: string, side: -1 | 1 | 0): { grabbed: boolean; top: number; under: number } => {
+    const config = matchConfig(1, stageId);
+    config.players[0].charId = charId;
+    const state = createGameState(config);
+    settle(state, 60);
+    const [me, other] = simFighters(state);
+    const p = STAGE_DEFS[stageId].platforms[0];
+    placeAt(other, p.x + p.w / 2 + 120, p.y, -1, true);
+    const x = side === 0 ? p.x + p.w / 2 : side < 0 ? p.x + 20 : p.x + p.w - 20;
+    placeAt(me, x, p.y + p.h + 60, side > 0 ? -1 : 1, false);
+    step(state, inp(Btn.Special | Btn.Up, Btn.Special), NONE);
+    let grabbed = false;
+    let top = me.y;
+    for (let i = 0; i < 200 && !grabbed; i++) {
+      step(state, NONE, NONE);
+      if (me.y < top) top = me.y;
+      if (me.ledge >= 0) grabbed = true;
+      if (me.stocks < 3) break;
+    }
+    return { grabbed, top, under: p.y + p.h };
+  };
+  const parts: string[] = [];
+  let ok = true;
+  for (const stageId of ['tidegate', 'hearthmoor', 'moonanchor']) {
+    for (const charId of ['aeval', TREK]) {
+      const l = run(stageId, charId, -1);
+      const r = run(stageId, charId, 1);
+      const m = run(stageId, charId, 0);
+      const pass = l.grabbed && r.grabbed && !m.grabbed && m.top >= m.under - 1e-9;
+      if (!pass) ok = false;
+      parts.push(`${stageId} ${charId}: left ${l.grabbed ? 'ledge' : 'no ledge'}, right ${r.grabbed ? 'ledge' : 'no ledge'}, middle top ${m.top.toFixed(1)} (underside ${m.under})`);
+    }
+  }
+  return {
+    name: 'tkd17. up special from under the stage 20 px in from an edge slides past the corner and grabs the ledge (Aeval, Trekmore, every stage); under the middle it still bonks',
+    pass: ok,
+    detail: parts.join(' | '),
+  };
+}
+
 function testTrekSwordAndRecall(): SelfTestResult {
   const tap = tkSwordTravel(false);
   const full = tkSwordTravel(true);
+  // Distance scaling: 4 at the hand, +1 per 36 px, capped at 11 (polish wave balance pass).
+  const near = tkSwordHitAt(50);
+  const mid = tkSwordHitAt(150);
+  const far = tkSwordHitAt(380);
+  const want = (h: { damage: number; flown: number }): number => Math.min(11, 4 + h.flown / 36);
+  const scaled = [near, mid, far].every((h) => Math.abs(h.damage - want(h)) < 0.01)
+    && near.damage < mid.damage && far.damage === 11;
   // Air, aimed up-forward, recalled once the throw is over.
   const t = tkRig();
   placeAt(t.me, -150, t.g - 150, 1, false);
@@ -4484,10 +4913,11 @@ function testTrekSwordAndRecall(): SelfTestResult {
   const inv = t.me.invuln;
   const n = runOut(t.state, t.me, 60);
   return {
-    name: 'tkd5. Trekmore sword: tap travels 140 px, full 372 px; the recall lands the feet 26 px under the sword with 12 '
-      + 'invulnerable frames and 14 frames of branch',
-    pass: Math.abs(tap - 140) <= 5 && Math.abs(full - 372) <= 10 && risingOk && landed && n === 14,
-    detail: `tap ${tap.toFixed(1)} px, full ${full.toFixed(1)} px | up-forward ${risingOk} | recall to `
+    name: 'tkd5. Trekmore sword: travels 360 px, held to aim or tapped (a hold scales nothing); damage grows 4 + 1 per 36 px to 11; the recall '
+      + 'lands the feet 26 px under the sword with 12 invulnerable frames and 14 frames of branch',
+    pass: Math.abs(tap - 360) <= 5 && full === tap && scaled && risingOk && landed && n === 14,
+    detail: `tap ${tap.toFixed(1)} px, held ${full.toFixed(1)} px | damage ${near.damage.toFixed(2)} at ${near.flown.toFixed(0)} px, `
+      + `${mid.damage.toFixed(2)} at ${mid.flown.toFixed(0)} px, ${far.damage.toFixed(2)} at ${far.flown.toFixed(0)} px | up-forward ${risingOk} | recall to `
       + `${tp === null ? 'none' : `${tp.x.toFixed(1)},${tp.y.toFixed(1)}`} `
       + `(sword ${sx.toFixed(1)},${sy.toFixed(1)}) as specified ${landed} (invulnerable ${inv}), branch ran ${n} more frames`,
   };
@@ -4834,6 +5264,7 @@ export function runSimSelfTest(): SelfTestResult[] {
     testFsDamageAndLaunch(),
     testFsThirdPartyBlocked(),
     testFsAttackerKoFreesVictim(),
+    testTopBlastOnlyKillsLaunched(),
     testFootstoolLanding(),
     testFsSkipsRespawn(),
     testGrabHitboxBlocksLaterHit(),
@@ -4886,6 +5317,7 @@ export function runSimSelfTest(): SelfTestResult[] {
     testOneCrescentAtATime(),
     testDiveInvulnerable(),
     testDiveSpikes(),
+    testDiveNoStun(),
     testDiveBounceRestoresAirDodge(),
     testDiveShielded(),
     testDiveLandingLagAndOffstage(),
@@ -4914,6 +5346,13 @@ export function runSimSelfTest(): SelfTestResult[] {
     testTrekGrabKitAndUtility(),
     testTrekJabEcho(),
     testTrekSwordAndRecall(),
+    testTrekHoldAim(),
+    testTrekEchoPlacement(),
+    testTrekUtiltEcho(),
+    testTrekAimFirstHoldFrame(),
+    testTrekSwordHitsFloor(),
+    testUnderEdgeRecovery(),
+    testTrekAscentSword(),
     testTrekShadowStepThrough(),
     testTrekCounters(),
     testTrekUpSpecial(),

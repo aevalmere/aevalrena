@@ -121,6 +121,12 @@ function findLanding(stage: StageDef, f: SimFighter): number {
 /** Least outward speed, px a frame, of a fighter sliding off a corner it cannot stand on. */
 const CORNER_SLIDE = 2;
 
+/**
+ * Band, px in from a ledge corner (the fighter's centre), where rising into a solid platform's
+ * underside slides the fighter out past the corner instead of stopping its rise.
+ */
+const UNDER_EDGE_BAND = 40;
+
 /** Solid platforms block their sides and underside. */
 function resolveSolids(state: GameState, f: SimFighter, def: CharacterDef, stage: StageDef): void {
   for (let i = 0; i < stage.platforms.length; i++) {
@@ -149,6 +155,21 @@ function resolveSolids(state: GameState, f: SimFighter, def: CharacterDef, stage
       return;
     }
     if (fromBottom <= fromLeft && fromBottom <= fromRight) {
+      // Recovering from below (SSBU style): rising into the underside within UNDER_EDGE_BAND px of
+      // a ledge corner slides the fighter out past that corner instead of bonking, so it keeps
+      // rising beside the stage and can catch the ledge. Under the middle it still bonks.
+      if (f.vy < 0) {
+        if (p.ledgeLeft && f.x - p.x <= UNDER_EDGE_BAND && f.x - p.x <= (p.x + p.w) - f.x) {
+          f.x -= fromLeft;
+          if (f.vx > 0) f.vx = 0;
+          continue;
+        }
+        if (p.ledgeRight && (p.x + p.w) - f.x <= UNDER_EDGE_BAND) {
+          f.x += fromRight;
+          if (f.vx < 0) f.vx = 0;
+          continue;
+        }
+      }
       f.y += fromBottom;
       if (f.vy < 0) {
         f.vy = 0;
@@ -177,6 +198,15 @@ function checkBlast(state: GameState, f: SimFighter, stage: StageDef): void {
   const b = stage.blast;
   if (f.x >= b.x && f.x <= b.x + b.w && f.y >= b.y && f.y <= b.y + b.h) return;
   const side = f.x < b.x ? 'left' : f.x > b.x + b.w ? 'right' : f.y < b.y ? 'top' : 'bottom';
+  if (side === 'top') {
+    const launched = f.hitstun > 0 || f.action === 'hitstun' || f.action === 'grabbed' || f.action === 'finalSmashVictim';
+    if (!launched) {
+      // Top line only KOs launched fighters, as in Smash; jumps and rising specials stop at it.
+      f.y = b.y;
+      if (f.vy < 0) f.vy = 0;
+      return;
+    }
+  }
   koFighter(state, f, side);
 }
 

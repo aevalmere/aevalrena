@@ -13,5 +13,5 @@ export const HEARTHMOOR_PLATFORMS: readonly Platform[] = [
 /** The painting's world rect. */
 export const HEARTHMOOR_CAMERA_BOUNDS: Rect = { x: -530, y: -346, w: 1080, h: 608 };
 
-/** Camera bounds grown by 48 left, 48 top, 48 right, 96 bottom. */
-export const HEARTHMOOR_BLAST: Rect = { x: -578, y: -394, w: 1176, h: 752 };
+/** Camera bounds grown by 48 left, 101 top, 48 right, 96 bottom. */
+export const HEARTHMOOR_BLAST: Rect = { x: -578, y: -447, w: 1176, h: 805 };
